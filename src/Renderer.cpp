@@ -6,10 +6,18 @@
 #include <algorithm>
 #include <cmath>
 #include <string>
+#include <vector>
 
 namespace
 {
 constexpr int kTextureSize = 32;
+
+struct TransparentBlockDraw
+{
+    GridPos pos {};
+    Block block {};
+    float distance = 0.0f;
+};
 
 unsigned char BlendChannel(unsigned char a, unsigned char b, float t)
 {
@@ -24,6 +32,14 @@ Color MixColor(Color a, Color b, float t)
         BlendChannel(a.b, b.b, t),
         BlendChannel(a.a, b.a, t)
     };
+}
+
+float DistanceSquared(Vector3 a, Vector3 b)
+{
+    const float dx = a.x - b.x;
+    const float dy = a.y - b.y;
+    const float dz = a.z - b.z;
+    return dx * dx + dy * dy + dz * dz;
 }
 
 Color ColorForNoise(Color base, int x, int y, int spread)
@@ -549,6 +565,14 @@ Color ItemUiColor(ItemType type)
     return Color { 220, 224, 235, 255 };
 }
 
+bool IsTransparentBlock(BlockType type, Color color)
+{
+    return color.a < 255
+        || type == BlockType::EnergyGlassBlock
+        || type == BlockType::IceBlock
+        || type == BlockType::LeafBlock;
+}
+
 ItemStack VisibleHeldItemForPlayer(const Player& player, const ItemStack& localHeldItem)
 {
     if (player.IsLocal())
@@ -591,6 +615,25 @@ void DrawHeldItemModel(const ItemStack& stack, Vector3 hand, Vector3 forward, Ve
     const Vector3 outward = firstPerson
         ? Normalize(Add(Add(Scale(right, -0.58f), Scale(up, 0.96f)), Scale(forward, 0.18f)))
         : Normalize(Add(Scale(forward, 0.68f), Scale(up, 0.32f)));
+    const bool iconHeldItem = itemTexture != nullptr
+        && (ItemIsWeapon(stack.type)
+            || ItemIsPickaxe(stack.type)
+            || stack.type == ItemType::EnergyArrow
+            || stack.type == ItemType::Fireball
+            || stack.type == ItemType::Molotov);
+    if (iconHeldItem)
+    {
+        const Vector3 center = Add(grip, Scale(outward, 0.34f * scale));
+        const Camera3D itemCamera {
+            Add(center, Scale(forward, firstPerson ? -2.0f : -2.8f)),
+            center,
+            up,
+            45.0f,
+            CAMERA_PERSPECTIVE
+        };
+        DrawBillboard(itemCamera, *itemTexture, center, 0.46f * scale, WHITE);
+        return;
+    }
 
     switch (stack.type)
     {
@@ -802,15 +845,8 @@ void Renderer::RenderScene(
         DrawCube(Vector3 { x + width * 0.35f, 28.0f + static_cast<float>(i % 2) * 2.4f, z + depth * 0.65f }, width * 0.55f, 0.10f, depth * 0.85f, Fade(WHITE, 0.16f));
     }
 
-    for (const auto& entry : world.GetBlocks())
+    const auto drawWorldBlock = [this, &world, &teams](const GridPos& pos, const Block& block)
     {
-        const GridPos& pos = entry.first;
-        const Block& block = entry.second;
-        if (block.type == BlockType::EnergyCoreBlock)
-        {
-            continue;
-        }
-
         const Vector3 center = world.GridToWorld(pos);
         const Color color = GetBlockColor(block, teams);
         if (const Texture2D* texture = GetBlockTexture(block.type))
@@ -822,6 +858,29 @@ void Renderer::RenderScene(
             DrawCube(center, 1.0f, 1.0f, 1.0f, color);
         }
         DrawCubeWires(center, 1.01f, 1.01f, 1.01f, Color { 24, 28, 36, 180 });
+    };
+
+    std::vector<TransparentBlockDraw> transparentBlocks;
+    for (const auto& entry : world.GetBlocks())
+    {
+        const GridPos& pos = entry.first;
+        const Block& block = entry.second;
+        if (block.type == BlockType::EnergyCoreBlock)
+        {
+            continue;
+        }
+
+        const Color color = GetBlockColor(block, teams);
+        if (IsTransparentBlock(block.type, color))
+        {
+            transparentBlocks.push_back(TransparentBlockDraw {
+                pos,
+                block,
+                DistanceSquared(world.GridToWorld(pos), camera.position)
+            });
+            continue;
+        }
+        drawWorldBlock(pos, block);
     }
 
     for (const Team& team : teams)
@@ -864,6 +923,20 @@ void Renderer::RenderScene(
                 Color { 20, 24, 32, 230 });
         }
     }
+
+    std::sort(
+        transparentBlocks.begin(),
+        transparentBlocks.end(),
+        [](const TransparentBlockDraw& a, const TransparentBlockDraw& b)
+        {
+            return a.distance > b.distance;
+        });
+    rlDisableDepthMask();
+    for (const TransparentBlockDraw& entry : transparentBlocks)
+    {
+        drawWorldBlock(entry.pos, entry.block);
+    }
+    rlEnableDepthMask();
 
     for (const Player& player : players)
     {

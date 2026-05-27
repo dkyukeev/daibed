@@ -40,6 +40,8 @@ add_executable(DaiBed
     src/CombatSystem.cpp
     src/Core.cpp
     src/Game.cpp
+    src/GameBotAI.cpp
+    src/GameUI.cpp
     src/GameRules.cpp
     src/Generator.cpp
     src/InputSystem.cpp

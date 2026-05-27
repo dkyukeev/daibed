@@ -39,3 +39,32 @@ const char* ToString(BotRole role)
 
     return "Unknown";
 }
+
+const char* ToString(BotIntent intent)
+{
+    switch (intent)
+    {
+    case BotIntent::DefendCore:
+        return "DefendCore";
+    case BotIntent::RepairCoreDefense:
+        return "RepairDefense";
+    case BotIntent::GearUp:
+        return "GearUp";
+    case BotIntent::SecureResources:
+        return "Resources";
+    case BotIntent::PressureCore:
+        return "PressureCore";
+    case BotIntent::BreakCoreDefense:
+        return "BreakDefense";
+    case BotIntent::FightEnemy:
+        return "Fight";
+    case BotIntent::ChaseWeakEnemy:
+        return "Chase";
+    case BotIntent::RetreatHome:
+        return "Retreat";
+    case BotIntent::Recover:
+        return "Recover";
+    }
+
+    return "Unknown";
+}

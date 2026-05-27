@@ -3,6 +3,8 @@
 #include "Block.h"
 #include "raylib.h"
 
+#include <string>
+
 enum class BotState
 {
     Collect,
@@ -22,12 +24,31 @@ enum class BotRole
     Fighter
 };
 
+enum class BotIntent
+{
+    DefendCore,
+    RepairCoreDefense,
+    GearUp,
+    SecureResources,
+    PressureCore,
+    BreakCoreDefense,
+    FightEnemy,
+    ChaseWeakEnemy,
+    RetreatHome,
+    Recover
+};
+
 struct BotMemory
 {
     int playerId = -1;
     BotState state = BotState::Collect;
     BotRole role = BotRole::Rusher;
+    BotIntent intent = BotIntent::SecureResources;
     float stateTimer = 0.0f;
+    float intentTimer = 0.0f;
+    float intentLockTimer = 0.0f;
+    float intentScore = 0.0f;
+    std::string intentReason;
     GridPos breakTarget {};
     bool hasBreakTarget = false;
     float breakProgress = 0.0f;
@@ -55,3 +76,4 @@ struct BotMemory
 
 const char* ToString(BotState state);
 const char* ToString(BotRole role);
+const char* ToString(BotIntent intent);
