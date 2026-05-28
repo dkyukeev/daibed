@@ -307,6 +307,7 @@ float IntentLockSeconds(BotIntent intent, BotDifficulty difficulty)
         return 0.35f;
     case BotIntent::FightEnemy:
     case BotIntent::ChaseWeakEnemy:
+    case BotIntent::FinalDuel:
         return 0.55f * difficultyScale;
     case BotIntent::RetreatHome:
         return 1.10f * difficultyScale;
@@ -314,12 +315,16 @@ float IntentLockSeconds(BotIntent intent, BotDifficulty difficulty)
         return 1.45f * difficultyScale;
     case BotIntent::PressureCore:
     case BotIntent::BreakCoreDefense:
+    case BotIntent::AttackCore:
         return 1.05f * difficultyScale;
     case BotIntent::SecureResources:
+    case BotIntent::BridgeToMid:
+    case BotIntent::BridgeToEnemy:
         return 1.20f * difficultyScale;
     case BotIntent::RepairCoreDefense:
+    case BotIntent::UpgradeCoreDefense:
         return 0.90f * difficultyScale;
-    case BotIntent::Recover:
+    case BotIntent::RecoverFromStuck:
         return 0.32f;
     }
     return 0.8f;
@@ -332,19 +337,24 @@ BotState StateForIntent(BotIntent intent)
     case BotIntent::DefendCore:
     case BotIntent::FightEnemy:
     case BotIntent::ChaseWeakEnemy:
+    case BotIntent::FinalDuel:
         return BotState::Fight;
     case BotIntent::GearUp:
         return BotState::Shop;
     case BotIntent::SecureResources:
         return BotState::Collect;
     case BotIntent::PressureCore:
+    case BotIntent::AttackCore:
         return BotState::AttackCore;
     case BotIntent::BreakCoreDefense:
         return BotState::BreakDefense;
     case BotIntent::RetreatHome:
     case BotIntent::RepairCoreDefense:
+    case BotIntent::UpgradeCoreDefense:
         return BotState::Retreat;
-    case BotIntent::Recover:
+    case BotIntent::BridgeToMid:
+    case BotIntent::BridgeToEnemy:
+    case BotIntent::RecoverFromStuck:
         return BotState::Bridge;
     }
     return BotState::Bridge;
@@ -785,7 +795,7 @@ void Game::UpdateBots(float dt)
             }
             else if (memory.intentLockTimer > 0.0f
                 && intent != BotIntent::DefendCore
-                && intent != BotIntent::Recover
+                && intent != BotIntent::RecoverFromStuck
                 && intent != BotIntent::RetreatHome)
             {
                 score -= 140.0f;
@@ -816,7 +826,7 @@ void Game::UpdateBots(float dt)
             {
                 recoverTarget = homeTarget;
             }
-            consider(BotIntent::Recover, 980.0f + memory.stuckTimer * 120.0f, recoverTarget, nullptr, "unstick");
+            consider(BotIntent::RecoverFromStuck, 980.0f + memory.stuckTimer * 120.0f, recoverTarget, nullptr, "unstick");
         }
 
         if (enemyAtCore != nullptr)
@@ -944,7 +954,7 @@ void Game::UpdateBots(float dt)
         if (finalDuelPhase && huntEnemy != nullptr && bot.GetHealth() > fightHealth)
         {
             consider(
-                BotIntent::ChaseWeakEnemy,
+                BotIntent::FinalDuel,
                 430.0f + (team->coreAlive ? 0.0f : 120.0f),
                 huntEnemy->GetPosition(),
                 huntEnemy,
@@ -974,7 +984,7 @@ void Game::UpdateBots(float dt)
             memory.intentTimer = 0.0f;
             memory.intentLockTimer = IntentLockSeconds(decision.intent, botDifficulty_);
             memory.hasNavWaypoint = false;
-            if (decision.intent == BotIntent::Recover)
+            if (decision.intent == BotIntent::RecoverFromStuck)
             {
                 memory.hasBreakTarget = false;
                 memory.breakProgress = 0.0f;
@@ -1126,7 +1136,7 @@ void Game::UpdateBots(float dt)
             || memory.state == BotState::Collect
             || memory.state == BotState::Retreat
             || memory.intent == BotIntent::GearUp
-            || memory.intent == BotIntent::Recover
+            || memory.intent == BotIntent::RecoverFromStuck
             || memory.stuckTimer > 0.35f
             || edgePressure;
         if (shouldBridge)
@@ -1144,7 +1154,7 @@ void Game::UpdateBots(float dt)
         const bool shouldMineObstacle = memory.state == BotState::AttackCore
             || memory.state == BotState::BreakDefense
             || memory.state == BotState::Bridge
-            || memory.intent == BotIntent::Recover
+            || memory.intent == BotIntent::RecoverFromStuck
             || memory.stuckTimer > 0.20f;
         if (shouldMineObstacle && TryBotBreakBlockingBlock(bot, wish, dt))
         {

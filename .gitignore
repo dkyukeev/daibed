@@ -1,20 +1,43 @@
-build/
-.vs/
-.vscode/
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-*.sln
-*.vcxproj
-*.vcxproj.filters
-*.vcxproj.user
+```
+# Compiled and build artifacts
+*.o
 *.obj
-*.pdb
-*.ilk
 *.exe
 *.dll
-*.lib
+*.so
+*.a
+*.out
+
+# Dependencies
+node_modules/
+venv/
+.venv/
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+target/
+.gradle/
+
+# Logs and temp files
 *.log
-*.user
-*.suo
-DaiBed.settings
+*.tmp
+*.swp
+
+# Editors
+.vscode/
+.idea/
+
+# Environment
+.env
+.env.local
+*.env.*
+
+# Coverage reports
+coverage/
+htmlcov/
+.coverage
+
+# OS generated files
+.DS_Store
+Thumbs.db
+```

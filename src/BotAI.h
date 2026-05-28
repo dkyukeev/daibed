@@ -28,14 +28,19 @@ enum class BotIntent
 {
     DefendCore,
     RepairCoreDefense,
+    UpgradeCoreDefense,
     GearUp,
     SecureResources,
+    BridgeToMid,
+    BridgeToEnemy,
     PressureCore,
     BreakCoreDefense,
+    AttackCore,
     FightEnemy,
     ChaseWeakEnemy,
     RetreatHome,
-    Recover
+    RecoverFromStuck,
+    FinalDuel
 };
 
 struct BotMemory

@@ -48,22 +48,32 @@ const char* ToString(BotIntent intent)
         return "DefendCore";
     case BotIntent::RepairCoreDefense:
         return "RepairDefense";
+    case BotIntent::UpgradeCoreDefense:
+        return "UpgradeDefense";
     case BotIntent::GearUp:
         return "GearUp";
     case BotIntent::SecureResources:
         return "Resources";
+    case BotIntent::BridgeToMid:
+        return "BridgeMid";
+    case BotIntent::BridgeToEnemy:
+        return "BridgeEnemy";
     case BotIntent::PressureCore:
         return "PressureCore";
     case BotIntent::BreakCoreDefense:
         return "BreakDefense";
+    case BotIntent::AttackCore:
+        return "AttackCore";
     case BotIntent::FightEnemy:
         return "Fight";
     case BotIntent::ChaseWeakEnemy:
         return "Chase";
     case BotIntent::RetreatHome:
         return "Retreat";
-    case BotIntent::Recover:
+    case BotIntent::RecoverFromStuck:
         return "Recover";
+    case BotIntent::FinalDuel:
+        return "FinalDuel";
     }
 
     return "Unknown";
