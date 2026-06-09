@@ -1,5 +1,6 @@
 #include "Game.h"
 
+#include "CrashLogger.h"
 #include "raylib.h"
 
 #include <algorithm>
@@ -10,6 +11,7 @@
 #include <limits>
 #include <optional>
 #include <sstream>
+#include <string>
 #include <unordered_map>
 #include <utility>
 
@@ -69,6 +71,50 @@ float DistanceSquared(Vector3 a, Vector3 b)
 float Length2D(Vector3 value)
 {
     return std::sqrt(value.x * value.x + value.z * value.z);
+}
+
+float Distance3D(Vector3 a, Vector3 b)
+{
+    const float dx = a.x - b.x;
+    const float dy = a.y - b.y;
+    const float dz = a.z - b.z;
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+std::string JsonEscape(const std::string& value)
+{
+    std::string escaped;
+    escaped.reserve(value.size() + 8);
+    for (char ch : value)
+    {
+        switch (ch)
+        {
+        case '"':
+            escaped += "\\\"";
+            break;
+        case '\\':
+            escaped += "\\\\";
+            break;
+        case '\n':
+            escaped += "\\n";
+            break;
+        case '\r':
+            escaped += "\\r";
+            break;
+        case '\t':
+            escaped += "\\t";
+            break;
+        default:
+            escaped += ch;
+            break;
+        }
+    }
+    return escaped;
+}
+
+void WriteJsonVector3(std::ofstream& file, Vector3 value)
+{
+    file << "{\"x\":" << value.x << ",\"y\":" << value.y << ",\"z\":" << value.z << "}";
 }
 
 Vector3 Normalize2D(Vector3 value)
@@ -310,6 +356,84 @@ void AddWoodDock(World& world, GridPos start, int length, int stepX, int stepZ)
     }
 }
 
+void AddRectLayer(World& world, GridPos center, int halfX, int halfZ, BlockType type, bool breakable = false)
+{
+    for (int x = -halfX; x <= halfX; ++x)
+    {
+        for (int z = -halfZ; z <= halfZ; ++z)
+        {
+            PlaceMapBlock(world, GridPos { center.x + x, center.y, center.z + z }, type, -1, breakable);
+        }
+    }
+}
+
+void AddLineBridge(World& world, GridPos from, GridPos to, int width, BlockType type, bool breakable = false)
+{
+    const int dx = (to.x > from.x) ? 1 : (to.x < from.x ? -1 : 0);
+    const int dz = (to.z > from.z) ? 1 : (to.z < from.z ? -1 : 0);
+    const int steps = std::max(std::abs(to.x - from.x), std::abs(to.z - from.z));
+    const bool xMajor = std::abs(to.x - from.x) >= std::abs(to.z - from.z);
+
+    for (int i = 0; i <= steps; ++i)
+    {
+        const int x = from.x + dx * std::min(i, std::abs(to.x - from.x));
+        const int z = from.z + dz * std::min(i, std::abs(to.z - from.z));
+        const int sideMin = -width / 2;
+        const int sideMax = width - 1 + sideMin;
+        for (int side = sideMin; side <= sideMax; ++side)
+        {
+            const GridPos pos {
+                x + (xMajor ? 0 : side),
+                from.y,
+                z + (xMajor ? side : 0)
+            };
+            PlaceMapBlock(world, pos, type, -1, breakable);
+        }
+    }
+}
+
+void AddSteppedBridge(World& world, GridPos from, GridPos to, int width, BlockType type, bool breakable = false)
+{
+    const int dx = (to.x > from.x) ? 1 : (to.x < from.x ? -1 : 0);
+    const int dz = (to.z > from.z) ? 1 : (to.z < from.z ? -1 : 0);
+    const int steps = std::max(std::abs(to.x - from.x), std::abs(to.z - from.z));
+    const bool xMajor = std::abs(to.x - from.x) >= std::abs(to.z - from.z);
+
+    for (int i = 0; i <= steps; ++i)
+    {
+        const float t = steps > 0 ? static_cast<float>(i) / static_cast<float>(steps) : 0.0f;
+        const int y = static_cast<int>(std::round(static_cast<float>(from.y) + static_cast<float>(to.y - from.y) * t));
+        const int x = from.x + dx * std::min(i, std::abs(to.x - from.x));
+        const int z = from.z + dz * std::min(i, std::abs(to.z - from.z));
+        const int sideMin = -width / 2;
+        const int sideMax = width - 1 + sideMin;
+        for (int side = sideMin; side <= sideMax; ++side)
+        {
+            const GridPos pos {
+                x + (xMajor ? 0 : side),
+                y,
+                z + (xMajor ? side : 0)
+            };
+            PlaceMapBlock(world, pos, type, -1, breakable);
+        }
+    }
+}
+
+void AddSquareRing(World& world, GridPos center, int innerRadius, int outerRadius, BlockType type, bool breakable = false)
+{
+    for (int x = -outerRadius; x <= outerRadius; ++x)
+    {
+        for (int z = -outerRadius; z <= outerRadius; ++z)
+        {
+            const int radius = std::max(std::abs(x), std::abs(z));
+            if (radius >= innerRadius && radius <= outerRadius)
+            {
+                PlaceMapBlock(world, GridPos { center.x + x, center.y, center.z + z }, type, -1, breakable);
+            }
+        }
+    }
+}
+
 void AddCenterMonument(World& world)
 {
     AddOvalLayer(world, Vector3 { 0.0f, 0.0f, 0.0f }, 4, 4, 1, BlockType::GrassBlock);
@@ -374,6 +498,11 @@ void Game::Shutdown()
 bool Game::ShouldClose() const
 {
     return exitRequested_;
+}
+
+void Game::SetSelectedBiome(ArenaBiome biome)
+{
+    arenaBiome_ = biome;
 }
 
 void Game::HandleInput()
@@ -478,10 +607,13 @@ void Game::HandleInput()
         return;
     }
 
-    cameraController_.AddLook(currentInput_.yawDelta, currentInput_.pitchDelta);
-    localPlayer->SetYaw(cameraController_.GetYaw());
+    if (!shopOpen_)
+    {
+        cameraController_.AddLook(currentInput_.yawDelta, currentInput_.pitchDelta);
+        localPlayer->SetYaw(cameraController_.GetYaw());
+    }
 
-    if (currentInput_.cameraTogglePressed)
+    if (!shopOpen_ && currentInput_.cameraTogglePressed)
     {
         cameraController_.ToggleMode();
         SetMessage(std::string("Camera: ") + cameraController_.GetModeName(), 1.6f);
@@ -538,7 +670,42 @@ void Game::HandleInput()
         shopCategoryIndex_ = (shopCategoryIndex_ + shop_.GetCategoryCount() - 1) % shop_.GetCategoryCount();
     }
 
-    if (shopOpen_ && (currentInput_.shopChoice > 0 || IsMouseButtonPressed(MOUSE_BUTTON_LEFT)))
+    bool shopCategoryClicked = false;
+    if (shopOpen_ && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+    {
+        const Vector2 mouse = GetMousePosition();
+        const int panelWidth = 790;
+        const int panelHeight = 420;
+        const int panelX = GetScreenWidth() / 2 - panelWidth / 2;
+        const int panelY = GetScreenHeight() / 2 - panelHeight / 2;
+        const int categoryCount = shop_.GetCategoryCount();
+        const int tabWidth = 118;
+        const int tabHeight = 26;
+        const int tabY = panelY + 52;
+        bool clickedCategory = false;
+        for (int category = 0; category < categoryCount; ++category)
+        {
+            const Rectangle tab {
+                static_cast<float>(panelX + 24 + category * (tabWidth + 8)),
+                static_cast<float>(tabY),
+                static_cast<float>(tabWidth),
+                static_cast<float>(tabHeight)
+            };
+            if (CheckCollisionPointRec(mouse, tab))
+            {
+                shopCategoryIndex_ = category;
+                clickedCategory = true;
+                break;
+            }
+        }
+        if (clickedCategory)
+        {
+            shopCategoryClicked = true;
+            currentInput_.shopChoice = 0;
+        }
+    }
+
+    if (shopOpen_ && !shopCategoryClicked && (currentInput_.shopChoice > 0 || IsMouseButtonPressed(MOUSE_BUTTON_LEFT)))
     {
         Team* team = FindTeam(localPlayer->GetTeamId());
         if (team != nullptr)
@@ -552,10 +719,10 @@ void Game::HandleInput()
                 const int panelHeight = 420;
                 const int panelX = GetScreenWidth() / 2 - panelWidth / 2;
                 const int panelY = GetScreenHeight() / 2 - panelHeight / 2;
-                const int localY = static_cast<int>(mouse.y) - (panelY + 86);
+                const int localY = static_cast<int>(mouse.y) - (panelY + 104);
                 if (mouse.x >= panelX + 22 && mouse.x <= panelX + panelWidth - 22 && localY >= -6)
                 {
-                    row = (localY + 6) / 32;
+                    row = (localY + 6) / 34;
                 }
             }
             std::string purchaseMessage;
@@ -633,6 +800,19 @@ void Game::Update(float dt)
         return;
     }
 
+    const int ticks = automatch_.active ? std::clamp(automatchTicksPerFrame_, 1, 32) : 1;
+    for (int i = 0; i < ticks; ++i)
+    {
+        UpdateMatchSimulation(dt);
+        if (!automatch_.active)
+        {
+            break;
+        }
+    }
+}
+
+void Game::UpdateMatchSimulation(float dt)
+{
     for (Player& player : players_)
     {
         player.UpdateTimers(dt);
@@ -676,6 +856,8 @@ void Game::Update(float dt)
             audio_.PlayVictory();
         }
     }
+
+    UpdateAutomatch(dt);
 
     if (shopOpen_ && !IsLocalPlayerInShopZone())
     {
@@ -813,6 +995,7 @@ void Game::Render()
         {
             RenderBotDebug();
         }
+        RenderAutomatchOverlay();
         if (scoreboardHeld_)
         {
             RenderScoreboard();
@@ -936,43 +1119,27 @@ void Game::SetupMatch()
     teams_.push_back(green);
     teams_.push_back(yellow);
 
-    AddClassicIsland(world_, Vector3 { -36.0f, 0.0f, 0.0f }, 10, 7);
-    AddClassicIsland(world_, Vector3 { 36.0f, 0.0f, 0.0f }, 10, 7);
-    AddClassicIsland(world_, Vector3 { 0.0f, 0.0f, -36.0f }, 7, 10);
-    AddClassicIsland(world_, Vector3 { 0.0f, 0.0f, 36.0f }, 7, 10);
-
-    AddClassicIsland(world_, Vector3 { 0.0f, 0.0f, 0.0f }, 12, 12);
-    AddClassicIsland(world_, Vector3 { -18.0f, 0.0f, 0.0f }, 5, 4);
-    AddClassicIsland(world_, Vector3 { 18.0f, 0.0f, 0.0f }, 5, 4);
-    AddClassicIsland(world_, Vector3 { 0.0f, 0.0f, -18.0f }, 4, 5);
-    AddClassicIsland(world_, Vector3 { 0.0f, 0.0f, 18.0f }, 4, 5);
-    AddClassicIsland(world_, Vector3 { -20.0f, 0.0f, -20.0f }, 4, 4);
-    AddClassicIsland(world_, Vector3 { 20.0f, 0.0f, -20.0f }, 4, 4);
-    AddClassicIsland(world_, Vector3 { -20.0f, 0.0f, 20.0f }, 4, 4);
-    AddClassicIsland(world_, Vector3 { 20.0f, 0.0f, 20.0f }, 4, 4);
-
-    AddWoodDock(world_, GridPos { -28, 0, 0 }, 4, 1, 0);
-    AddWoodDock(world_, GridPos { 28, 0, 0 }, 4, -1, 0);
-    AddWoodDock(world_, GridPos { 0, 0, -28 }, 4, 0, 1);
-    AddWoodDock(world_, GridPos { 0, 0, 28 }, 4, 0, -1);
-    AddCenterMonument(world_);
-
-    AddTree(world_, GridPos { -39, 1, -5 });
-    AddTree(world_, GridPos { -38, 1, 5 });
-    AddTree(world_, GridPos { 39, 1, 5 });
-    AddTree(world_, GridPos { 38, 1, -5 });
-    AddTree(world_, GridPos { -5, 1, -39 });
-    AddTree(world_, GridPos { 5, 1, -38 });
-    AddTree(world_, GridPos { 5, 1, 39 });
-    AddTree(world_, GridPos { -5, 1, 38 });
-    AddTree(world_, GridPos { -21, 1, -22 });
-    AddTree(world_, GridPos { 21, 1, -22 });
-    AddTree(world_, GridPos { -21, 1, 22 });
-    AddTree(world_, GridPos { 21, 1, 22 });
-
-    if (arenaLayout_ == ArenaLayout::Vertical)
+    switch (arenaBiome_)
     {
-        AddVerticalArenaFeatures();
+    case ArenaBiome::Ice:
+        AddFrozenRingLayout();
+        break;
+    case ArenaBiome::Lava:
+        AddMoltenLayersLayout();
+        break;
+    case ArenaBiome::Space:
+        AddOrbitalShardsLayout();
+        break;
+    case ArenaBiome::Ruins:
+        AddBrokenCitadelLayout();
+        break;
+    case ArenaBiome::Arena:
+        AddClassicArenaLayout();
+        if (arenaLayout_ == ArenaLayout::Vertical)
+        {
+            AddVerticalArenaFeatures();
+        }
+        break;
     }
 
     for (const Team& team : teams_)
@@ -1091,6 +1258,310 @@ void Game::SetupMatch()
     AddEventMessage("Buy blocks, bridge to center, crack enemy defenses", Color { 255, 235, 142, 255 }, 5.5f);
     AddEventMessage("Hold LMB to break blocks or damage an EnergyCore", Color { 112, 232, 255, 255 }, 6.0f);
     AddEventMessage("Gold crosshair = enemy in melee range", Color { 255, 235, 142, 255 }, 6.5f);
+    if (arenaBiome_ != ArenaBiome::Arena)
+    {
+        AddEventMessage(std::string("Biome rule: ") + ArenaBiomeName(), BiomeFogColor(), 6.8f);
+    }
+}
+
+void Game::AddClassicArenaLayout()
+{
+    AddClassicIsland(world_, Vector3 { -36.0f, 0.0f, 0.0f }, 10, 7);
+    AddClassicIsland(world_, Vector3 { 36.0f, 0.0f, 0.0f }, 10, 7);
+    AddClassicIsland(world_, Vector3 { 0.0f, 0.0f, -36.0f }, 7, 10);
+    AddClassicIsland(world_, Vector3 { 0.0f, 0.0f, 36.0f }, 7, 10);
+
+    AddClassicIsland(world_, Vector3 { 0.0f, 0.0f, 0.0f }, 12, 12);
+    AddClassicIsland(world_, Vector3 { -18.0f, 0.0f, 0.0f }, 5, 4);
+    AddClassicIsland(world_, Vector3 { 18.0f, 0.0f, 0.0f }, 5, 4);
+    AddClassicIsland(world_, Vector3 { 0.0f, 0.0f, -18.0f }, 4, 5);
+    AddClassicIsland(world_, Vector3 { 0.0f, 0.0f, 18.0f }, 4, 5);
+    AddClassicIsland(world_, Vector3 { -20.0f, 0.0f, -20.0f }, 4, 4);
+    AddClassicIsland(world_, Vector3 { 20.0f, 0.0f, -20.0f }, 4, 4);
+    AddClassicIsland(world_, Vector3 { -20.0f, 0.0f, 20.0f }, 4, 4);
+    AddClassicIsland(world_, Vector3 { 20.0f, 0.0f, 20.0f }, 4, 4);
+
+    AddWoodDock(world_, GridPos { -28, 0, 0 }, 4, 1, 0);
+    AddWoodDock(world_, GridPos { 28, 0, 0 }, 4, -1, 0);
+    AddWoodDock(world_, GridPos { 0, 0, -28 }, 4, 0, 1);
+    AddWoodDock(world_, GridPos { 0, 0, 28 }, 4, 0, -1);
+    AddCenterMonument(world_);
+
+    AddTree(world_, GridPos { -39, 1, -5 });
+    AddTree(world_, GridPos { -38, 1, 5 });
+    AddTree(world_, GridPos { 39, 1, 5 });
+    AddTree(world_, GridPos { 38, 1, -5 });
+    AddTree(world_, GridPos { -5, 1, -39 });
+    AddTree(world_, GridPos { 5, 1, -38 });
+    AddTree(world_, GridPos { 5, 1, 39 });
+    AddTree(world_, GridPos { -5, 1, 38 });
+    AddTree(world_, GridPos { -21, 1, -22 });
+    AddTree(world_, GridPos { 21, 1, -22 });
+    AddTree(world_, GridPos { -21, 1, 22 });
+    AddTree(world_, GridPos { 21, 1, 22 });
+}
+
+void Game::AddFrozenRingLayout()
+{
+    AddClassicIsland(world_, Vector3 { -36.0f, 0.0f, 0.0f }, 11, 7);
+    AddClassicIsland(world_, Vector3 { 36.0f, 0.0f, 0.0f }, 11, 7);
+    AddClassicIsland(world_, Vector3 { 0.0f, 0.0f, -36.0f }, 7, 11);
+    AddClassicIsland(world_, Vector3 { 0.0f, 0.0f, 36.0f }, 7, 11);
+
+    AddClassicIsland(world_, Vector3 { 0.0f, 0.0f, 0.0f }, 8, 8);
+    AddCenterMonument(world_);
+    AddSquareRing(world_, GridPos { 0, 0, 0 }, 13, 16, BlockType::IceBlock);
+
+    const GridPos sideShrines[] {
+        GridPos { -24, 0, 0 },
+        GridPos { 24, 0, 0 },
+        GridPos { 0, 0, -24 },
+        GridPos { 0, 0, 24 }
+    };
+    for (const GridPos& shrine : sideShrines)
+    {
+        AddRectLayer(world_, shrine, 4, 4, BlockType::StoneBlock);
+        AddRectLayer(world_, GridPos { shrine.x, shrine.y + 1, shrine.z }, 2, 2, BlockType::IceBlock);
+    }
+
+    const GridPos corners[] {
+        GridPos { -24, 0, -24 },
+        GridPos { 24, 0, -24 },
+        GridPos { -24, 0, 24 },
+        GridPos { 24, 0, 24 }
+    };
+    for (const GridPos& corner : corners)
+    {
+        AddRectLayer(world_, corner, 4, 4, BlockType::StoneBlock);
+    }
+
+    AddLineBridge(world_, GridPos { -28, 0, -3 }, GridPos { -24, 0, -24 }, 3, BlockType::StoneBlock);
+    AddLineBridge(world_, GridPos { -28, 0, 3 }, GridPos { -24, 0, 24 }, 3, BlockType::StoneBlock);
+    AddLineBridge(world_, GridPos { 28, 0, -3 }, GridPos { 24, 0, -24 }, 3, BlockType::StoneBlock);
+    AddLineBridge(world_, GridPos { 28, 0, 3 }, GridPos { 24, 0, 24 }, 3, BlockType::StoneBlock);
+    AddLineBridge(world_, GridPos { -3, 0, -28 }, GridPos { -24, 0, -24 }, 3, BlockType::StoneBlock);
+    AddLineBridge(world_, GridPos { 3, 0, -28 }, GridPos { 24, 0, -24 }, 3, BlockType::StoneBlock);
+    AddLineBridge(world_, GridPos { -3, 0, 28 }, GridPos { -24, 0, 24 }, 3, BlockType::StoneBlock);
+    AddLineBridge(world_, GridPos { 3, 0, 28 }, GridPos { 24, 0, 24 }, 3, BlockType::StoneBlock);
+
+    AddLineBridge(world_, GridPos { -24, 0, -24 }, GridPos { -16, 0, -16 }, 3, BlockType::StoneBlock);
+    AddLineBridge(world_, GridPos { 24, 0, -24 }, GridPos { 16, 0, -16 }, 3, BlockType::StoneBlock);
+    AddLineBridge(world_, GridPos { -24, 0, 24 }, GridPos { -16, 0, 16 }, 3, BlockType::StoneBlock);
+    AddLineBridge(world_, GridPos { 24, 0, 24 }, GridPos { 16, 0, 16 }, 3, BlockType::StoneBlock);
+
+    AddLineBridge(world_, GridPos { -28, 0, 0 }, GridPos { -9, 0, 0 }, 2, BlockType::IceBlock);
+    AddLineBridge(world_, GridPos { 28, 0, 0 }, GridPos { 9, 0, 0 }, 2, BlockType::IceBlock);
+    AddLineBridge(world_, GridPos { 0, 0, -28 }, GridPos { 0, 0, -9 }, 2, BlockType::IceBlock);
+    AddLineBridge(world_, GridPos { 0, 0, 28 }, GridPos { 0, 0, 9 }, 2, BlockType::IceBlock);
+    AddLineBridge(world_, GridPos { -16, 0, 0 }, GridPos { -9, 0, 0 }, 3, BlockType::IceBlock);
+    AddLineBridge(world_, GridPos { 16, 0, 0 }, GridPos { 9, 0, 0 }, 3, BlockType::IceBlock);
+    AddLineBridge(world_, GridPos { 0, 0, -16 }, GridPos { 0, 0, -9 }, 3, BlockType::IceBlock);
+    AddLineBridge(world_, GridPos { 0, 0, 16 }, GridPos { 0, 0, 9 }, 3, BlockType::IceBlock);
+}
+
+void Game::AddMoltenLayersLayout()
+{
+    AddClassicIsland(world_, Vector3 { -36.0f, 0.0f, 0.0f }, 10, 7);
+    AddClassicIsland(world_, Vector3 { 36.0f, 0.0f, 0.0f }, 10, 7);
+    AddClassicIsland(world_, Vector3 { 0.0f, 0.0f, -36.0f }, 7, 10);
+    AddClassicIsland(world_, Vector3 { 0.0f, 0.0f, 36.0f }, 7, 10);
+
+    AddRectLayer(world_, GridPos { 0, -1, 0 }, 8, 8, BlockType::StoneBlock);
+    AddRectLayer(world_, GridPos { 0, -1, 0 }, 4, 4, BlockType::LavaBlock);
+    AddRectLayer(world_, GridPos { 0, 2, 0 }, 7, 7, BlockType::StoneBlock);
+    AddRectLayer(world_, GridPos { 0, 3, 0 }, 3, 3, BlockType::EnergyGlassBlock);
+
+    const GridPos highPads[] {
+        GridPos { -21, 2, 0 },
+        GridPos { 21, 2, 0 },
+        GridPos { 0, 2, -21 },
+        GridPos { 0, 2, 21 }
+    };
+    for (const GridPos& pad : highPads)
+    {
+        AddRectLayer(world_, pad, 5, 4, BlockType::StoneBlock);
+    }
+
+    const GridPos lowForges[] {
+        GridPos { -18, -1, -18 },
+        GridPos { 18, -1, -18 },
+        GridPos { -18, -1, 18 },
+        GridPos { 18, -1, 18 }
+    };
+    for (const GridPos& forge : lowForges)
+    {
+        AddRectLayer(world_, forge, 4, 4, BlockType::StoneBlock);
+        AddRectLayer(world_, GridPos { forge.x, forge.y, forge.z }, 2, 2, BlockType::LavaBlock);
+    }
+
+    AddSteppedBridge(world_, GridPos { -28, 0, -3 }, GridPos { -21, 2, 0 }, 3, BlockType::StoneBlock);
+    AddSteppedBridge(world_, GridPos { -28, 0, 3 }, GridPos { -21, 2, 0 }, 3, BlockType::StoneBlock);
+    AddSteppedBridge(world_, GridPos { 28, 0, 3 }, GridPos { 21, 2, 0 }, 3, BlockType::StoneBlock);
+    AddSteppedBridge(world_, GridPos { 28, 0, -3 }, GridPos { 21, 2, 0 }, 3, BlockType::StoneBlock);
+    AddSteppedBridge(world_, GridPos { 3, 0, -28 }, GridPos { 0, 2, -21 }, 3, BlockType::StoneBlock);
+    AddSteppedBridge(world_, GridPos { -3, 0, -28 }, GridPos { 0, 2, -21 }, 3, BlockType::StoneBlock);
+    AddSteppedBridge(world_, GridPos { -3, 0, 28 }, GridPos { 0, 2, 21 }, 3, BlockType::StoneBlock);
+    AddSteppedBridge(world_, GridPos { 3, 0, 28 }, GridPos { 0, 2, 21 }, 3, BlockType::StoneBlock);
+    AddLineBridge(world_, GridPos { -21, 2, 0 }, GridPos { -7, 2, 0 }, 3, BlockType::StoneBlock);
+    AddLineBridge(world_, GridPos { 21, 2, 0 }, GridPos { 7, 2, 0 }, 3, BlockType::StoneBlock);
+    AddLineBridge(world_, GridPos { 0, 2, -21 }, GridPos { 0, 2, -7 }, 3, BlockType::StoneBlock);
+    AddLineBridge(world_, GridPos { 0, 2, 21 }, GridPos { 0, 2, 7 }, 3, BlockType::StoneBlock);
+
+    AddLineBridge(world_, GridPos { -28, -1, 0 }, GridPos { -8, -1, 0 }, 2, BlockType::LavaBlock);
+    AddLineBridge(world_, GridPos { 28, -1, 0 }, GridPos { 8, -1, 0 }, 2, BlockType::LavaBlock);
+    AddLineBridge(world_, GridPos { 0, -1, -28 }, GridPos { 0, -1, -8 }, 2, BlockType::LavaBlock);
+    AddLineBridge(world_, GridPos { 0, -1, 28 }, GridPos { 0, -1, 8 }, 2, BlockType::LavaBlock);
+    AddSteppedBridge(world_, GridPos { -8, -1, 0 }, GridPos { -3, 2, 0 }, 3, BlockType::StoneBlock);
+    AddSteppedBridge(world_, GridPos { 8, -1, 0 }, GridPos { 3, 2, 0 }, 3, BlockType::StoneBlock);
+    AddSteppedBridge(world_, GridPos { 0, -1, -8 }, GridPos { 0, 2, -3 }, 3, BlockType::StoneBlock);
+    AddSteppedBridge(world_, GridPos { 0, -1, 8 }, GridPos { 0, 2, 3 }, 3, BlockType::StoneBlock);
+    AddLineBridge(world_, GridPos { -18, -1, -18 }, GridPos { -8, -1, -8 }, 2, BlockType::StoneBlock);
+    AddLineBridge(world_, GridPos { 18, -1, -18 }, GridPos { 8, -1, -8 }, 2, BlockType::StoneBlock);
+    AddLineBridge(world_, GridPos { -18, -1, 18 }, GridPos { -8, -1, 8 }, 2, BlockType::StoneBlock);
+    AddLineBridge(world_, GridPos { 18, -1, 18 }, GridPos { 8, -1, 8 }, 2, BlockType::StoneBlock);
+}
+
+void Game::AddOrbitalShardsLayout()
+{
+    AddClassicIsland(world_, Vector3 { -36.0f, 0.0f, 0.0f }, 9, 7);
+    AddClassicIsland(world_, Vector3 { 36.0f, 0.0f, 0.0f }, 9, 7);
+    AddClassicIsland(world_, Vector3 { 0.0f, 0.0f, -36.0f }, 7, 9);
+    AddClassicIsland(world_, Vector3 { 0.0f, 0.0f, 36.0f }, 7, 9);
+
+    AddRectLayer(world_, GridPos { 0, 3, 0 }, 7, 7, BlockType::EnergyGlassBlock);
+    AddRectLayer(world_, GridPos { 0, 4, 0 }, 3, 3, BlockType::StoneBlock);
+
+    const GridPos launchPads[] {
+        GridPos { -24, 1, 0 },
+        GridPos { 24, 1, 0 },
+        GridPos { 0, 1, -24 },
+        GridPos { 0, 1, 24 }
+    };
+    for (const GridPos& pad : launchPads)
+    {
+        AddRectLayer(world_, pad, 4, 3, BlockType::StoneBlock);
+        PlaceMapBlock(world_, GridPos { pad.x, pad.y + 1, pad.z }, BlockType::SpringBlock, -1, true);
+    }
+
+    const GridPos shards[] {
+        GridPos { -16, 2, -16 },
+        GridPos { 16, 2, -16 },
+        GridPos { -16, 2, 16 },
+        GridPos { 16, 2, 16 },
+        GridPos { -10, 3, 0 },
+        GridPos { 10, 3, 0 },
+        GridPos { 0, 3, -10 },
+        GridPos { 0, 3, 10 }
+    };
+    for (const GridPos& shard : shards)
+    {
+        AddRectLayer(world_, shard, 3, 3, BlockType::StoneBlock);
+    }
+
+    const GridPos anchors[] {
+        GridPos { -29, 0, 0 },
+        GridPos { -27, 1, 0 },
+        GridPos { -21, 1, 0 },
+        GridPos { 29, 0, 0 },
+        GridPos { 27, 1, 0 },
+        GridPos { 21, 1, 0 },
+        GridPos { 0, 0, -29 },
+        GridPos { 0, 1, -27 },
+        GridPos { 0, 1, -21 },
+        GridPos { 0, 0, 29 },
+        GridPos { 0, 1, 27 },
+        GridPos { 0, 1, 21 }
+    };
+    for (const GridPos& anchor : anchors)
+    {
+        AddRectLayer(world_, anchor, 1, 1, BlockType::StoneBlock);
+    }
+
+    AddLineBridge(world_, GridPos { -24, 1, 0 }, GridPos { -16, 2, -16 }, 2, BlockType::EnergyGlassBlock);
+    AddLineBridge(world_, GridPos { -24, 1, 0 }, GridPos { -16, 2, 16 }, 2, BlockType::EnergyGlassBlock);
+    AddLineBridge(world_, GridPos { 24, 1, 0 }, GridPos { 16, 2, -16 }, 2, BlockType::EnergyGlassBlock);
+    AddLineBridge(world_, GridPos { 24, 1, 0 }, GridPos { 16, 2, 16 }, 2, BlockType::EnergyGlassBlock);
+    AddLineBridge(world_, GridPos { 0, 1, -24 }, GridPos { -16, 2, -16 }, 2, BlockType::EnergyGlassBlock);
+    AddLineBridge(world_, GridPos { 0, 1, -24 }, GridPos { 16, 2, -16 }, 2, BlockType::EnergyGlassBlock);
+    AddLineBridge(world_, GridPos { 0, 1, 24 }, GridPos { -16, 2, 16 }, 2, BlockType::EnergyGlassBlock);
+    AddLineBridge(world_, GridPos { 0, 1, 24 }, GridPos { 16, 2, 16 }, 2, BlockType::EnergyGlassBlock);
+    AddLineBridge(world_, GridPos { -10, 3, 0 }, GridPos { -7, 3, 0 }, 2, BlockType::EnergyGlassBlock);
+    AddLineBridge(world_, GridPos { 10, 3, 0 }, GridPos { 7, 3, 0 }, 2, BlockType::EnergyGlassBlock);
+    AddLineBridge(world_, GridPos { 0, 3, -10 }, GridPos { 0, 3, -7 }, 2, BlockType::EnergyGlassBlock);
+    AddLineBridge(world_, GridPos { 0, 3, 10 }, GridPos { 0, 3, 7 }, 2, BlockType::EnergyGlassBlock);
+}
+
+void Game::AddBrokenCitadelLayout()
+{
+    AddClassicIsland(world_, Vector3 { -36.0f, 0.0f, 0.0f }, 10, 7);
+    AddClassicIsland(world_, Vector3 { 36.0f, 0.0f, 0.0f }, 10, 7);
+    AddClassicIsland(world_, Vector3 { 0.0f, 0.0f, -36.0f }, 7, 10);
+    AddClassicIsland(world_, Vector3 { 0.0f, 0.0f, 36.0f }, 7, 10);
+
+    AddRectLayer(world_, GridPos { 0, 0, 0 }, 9, 9, BlockType::StoneBlock, true);
+    AddRectLayer(world_, GridPos { 0, 1, 0 }, 5, 5, BlockType::StoneBlock, true);
+    AddRectLayer(world_, GridPos { 0, 2, 0 }, 2, 2, BlockType::EnergyGlassBlock, true);
+    const GridPos missingCitadel[] {
+        GridPos { -7, 0, -7 },
+        GridPos { 7, 0, -7 },
+        GridPos { -7, 0, 7 },
+        GridPos { 7, 0, 7 },
+        GridPos { -3, 1, 4 },
+        GridPos { 4, 1, -3 }
+    };
+    for (const GridPos& pos : missingCitadel)
+    {
+        world_.RemoveBlock(pos);
+    }
+
+    const GridPos rooms[] {
+        GridPos { -21, 1, -21 },
+        GridPos { 21, 1, -21 },
+        GridPos { -21, 1, 21 },
+        GridPos { 21, 1, 21 }
+    };
+    for (const GridPos& room : rooms)
+    {
+        AddRectLayer(world_, room, 5, 5, BlockType::StoneBlock, true);
+        AddRectLayer(world_, GridPos { room.x, room.y + 1, room.z }, 3, 3, BlockType::EnergyGlassBlock, true);
+        PlaceMapBlock(world_, GridPos { room.x, room.y + 2, room.z }, BlockType::EnergyGlassBlock, -1, true);
+        world_.RemoveBlock(GridPos { room.x + 5, room.y + 1, room.z });
+        world_.RemoveBlock(GridPos { room.x - 5, room.y + 1, room.z });
+        world_.RemoveBlock(GridPos { room.x, room.y + 1, room.z + 5 });
+        world_.RemoveBlock(GridPos { room.x, room.y + 1, room.z - 5 });
+    }
+
+    AddLineBridge(world_, GridPos { -28, 0, 0 }, GridPos { -9, 0, 0 }, 3, BlockType::WoodBlock, true);
+    AddLineBridge(world_, GridPos { 28, 0, 0 }, GridPos { 9, 0, 0 }, 3, BlockType::WoodBlock, true);
+    AddLineBridge(world_, GridPos { 0, 0, -28 }, GridPos { 0, 0, -9 }, 3, BlockType::WoodBlock, true);
+    AddLineBridge(world_, GridPos { 0, 0, 28 }, GridPos { 0, 0, 9 }, 3, BlockType::WoodBlock, true);
+    AddLineBridge(world_, GridPos { -28, 0, -3 }, GridPos { -21, 1, -21 }, 3, BlockType::StoneBlock, true);
+    AddLineBridge(world_, GridPos { -28, 0, 3 }, GridPos { -21, 1, 21 }, 3, BlockType::StoneBlock, true);
+    AddLineBridge(world_, GridPos { 28, 0, -3 }, GridPos { 21, 1, -21 }, 3, BlockType::StoneBlock, true);
+    AddLineBridge(world_, GridPos { 28, 0, 3 }, GridPos { 21, 1, 21 }, 3, BlockType::StoneBlock, true);
+    AddLineBridge(world_, GridPos { -3, 0, -28 }, GridPos { -21, 1, -21 }, 3, BlockType::StoneBlock, true);
+    AddLineBridge(world_, GridPos { 3, 0, -28 }, GridPos { 21, 1, -21 }, 3, BlockType::StoneBlock, true);
+    AddLineBridge(world_, GridPos { -3, 0, 28 }, GridPos { -21, 1, 21 }, 3, BlockType::StoneBlock, true);
+    AddLineBridge(world_, GridPos { 3, 0, 28 }, GridPos { 21, 1, 21 }, 3, BlockType::StoneBlock, true);
+    AddLineBridge(world_, GridPos { -21, 1, -21 }, GridPos { -8, 1, -8 }, 2, BlockType::WoodBlock, true);
+    AddLineBridge(world_, GridPos { 21, 1, -21 }, GridPos { 8, 1, -8 }, 2, BlockType::WoodBlock, true);
+    AddLineBridge(world_, GridPos { -21, 1, 21 }, GridPos { -8, 1, 8 }, 2, BlockType::WoodBlock, true);
+    AddLineBridge(world_, GridPos { 21, 1, 21 }, GridPos { 8, 1, 8 }, 2, BlockType::WoodBlock, true);
+
+    const GridPos crackedEdges[] {
+        GridPos { -18, 1, -18 },
+        GridPos { 18, 1, -18 },
+        GridPos { -18, 1, 18 },
+        GridPos { 18, 1, 18 },
+        GridPos { -13, 0, 1 },
+        GridPos { 13, 0, -1 },
+        GridPos { 1, 0, -13 },
+        GridPos { -1, 0, 13 }
+    };
+    for (const GridPos& pos : crackedEdges)
+    {
+        world_.RemoveBlock(pos);
+    }
 }
 
 void Game::SetupGenerators()
@@ -1121,6 +1592,52 @@ void Game::SetupGenerators()
         addGenerator(ResourceType::Iron, Vector3 { -1.0f, 1.0f, 39.0f }, 0.78f, 1, 3);
         addGenerator(ResourceType::Gold, Vector3 { 1.0f, 1.0f, 41.0f }, 3.4f, 1, 3);
     }
+
+    if (arenaBiome_ == ArenaBiome::Ice)
+    {
+        addGenerator(ResourceType::Crystal, Vector3 { 0.0f, 2.0f, 0.0f }, 4.6f, 1, -1);
+        addGenerator(ResourceType::Gold, Vector3 { -24.0f, 2.0f, 0.0f }, 3.2f, 1, -1);
+        addGenerator(ResourceType::Gold, Vector3 { 24.0f, 2.0f, 0.0f }, 3.2f, 1, -1);
+        addGenerator(ResourceType::Gold, Vector3 { 0.0f, 2.0f, -24.0f }, 3.2f, 1, -1);
+        addGenerator(ResourceType::Gold, Vector3 { 0.0f, 2.0f, 24.0f }, 3.2f, 1, -1);
+        addGenerator(ResourceType::Crystal, Vector3 { -24.0f, 1.0f, -24.0f }, 6.0f, 1, -1);
+        addGenerator(ResourceType::Crystal, Vector3 { 24.0f, 1.0f, 24.0f }, 6.0f, 1, -1);
+        return;
+    }
+    if (arenaBiome_ == ArenaBiome::Lava)
+    {
+        addGenerator(ResourceType::Crystal, Vector3 { 0.0f, 4.0f, 0.0f }, 5.4f, 1, -1);
+        addGenerator(ResourceType::Gold, Vector3 { -21.0f, 3.0f, 0.0f }, 3.6f, 1, -1);
+        addGenerator(ResourceType::Gold, Vector3 { 21.0f, 3.0f, 0.0f }, 3.6f, 1, -1);
+        addGenerator(ResourceType::Gold, Vector3 { 0.0f, 3.0f, -21.0f }, 3.6f, 1, -1);
+        addGenerator(ResourceType::Gold, Vector3 { 0.0f, 3.0f, 21.0f }, 3.6f, 1, -1);
+        addGenerator(ResourceType::Crystal, Vector3 { -18.0f, 0.0f, -18.0f }, 4.8f, 1, -1);
+        addGenerator(ResourceType::Crystal, Vector3 { 18.0f, 0.0f, 18.0f }, 4.8f, 1, -1);
+        return;
+    }
+    if (arenaBiome_ == ArenaBiome::Space)
+    {
+        addGenerator(ResourceType::Crystal, Vector3 { 0.0f, 5.0f, 0.0f }, 4.4f, 1, -1);
+        addGenerator(ResourceType::Gold, Vector3 { -10.0f, 4.0f, 0.0f }, 3.2f, 1, -1);
+        addGenerator(ResourceType::Gold, Vector3 { 10.0f, 4.0f, 0.0f }, 3.2f, 1, -1);
+        addGenerator(ResourceType::Gold, Vector3 { 0.0f, 4.0f, -10.0f }, 3.2f, 1, -1);
+        addGenerator(ResourceType::Gold, Vector3 { 0.0f, 4.0f, 10.0f }, 3.2f, 1, -1);
+        addGenerator(ResourceType::Crystal, Vector3 { -16.0f, 3.0f, -16.0f }, 6.0f, 1, -1);
+        addGenerator(ResourceType::Crystal, Vector3 { 16.0f, 3.0f, 16.0f }, 6.0f, 1, -1);
+        return;
+    }
+    if (arenaBiome_ == ArenaBiome::Ruins)
+    {
+        addGenerator(ResourceType::Crystal, Vector3 { 0.0f, 3.0f, 0.0f }, 5.2f, 1, -1);
+        addGenerator(ResourceType::Crystal, Vector3 { -21.0f, 3.0f, -21.0f }, 4.8f, 1, -1);
+        addGenerator(ResourceType::Gold, Vector3 { 21.0f, 3.0f, -21.0f }, 3.6f, 1, -1);
+        addGenerator(ResourceType::Gold, Vector3 { -21.0f, 3.0f, 21.0f }, 3.6f, 1, -1);
+        addGenerator(ResourceType::Crystal, Vector3 { 21.0f, 3.0f, 21.0f }, 4.8f, 1, -1);
+        addGenerator(ResourceType::Gold, Vector3 { -6.0f, 1.0f, 0.0f }, 3.4f, 1, -1);
+        addGenerator(ResourceType::Gold, Vector3 { 6.0f, 1.0f, 0.0f }, 3.4f, 1, -1);
+        return;
+    }
+
     addGenerator(ResourceType::Crystal, Vector3 { 0.0f, 2.0f, 0.0f }, 4.8f, 1, -1);
     addGenerator(ResourceType::Gold, Vector3 { -4.0f, 2.0f, 0.0f }, 3.0f, 1, -1);
     addGenerator(ResourceType::Gold, Vector3 { 4.0f, 2.0f, 0.0f }, 3.0f, 1, -1);
@@ -1174,8 +1691,55 @@ void Game::AddVerticalArenaFeatures()
     PlaceMapBlock(world_, GridPos { 0, 3, 0 }, BlockType::SpringBlock, -1, true);
 }
 
+void Game::AddRuinsBiomeFeatures()
+{
+    const GridPos relicPlatforms[] {
+        GridPos { -20, 1, -20 },
+        GridPos { 20, 1, -20 },
+        GridPos { -20, 1, 20 },
+        GridPos { 20, 1, 20 }
+    };
+    for (const GridPos& center : relicPlatforms)
+    {
+        for (int x = -2; x <= 2; ++x)
+        {
+            for (int z = -2; z <= 2; ++z)
+            {
+                if (std::abs(x) + std::abs(z) <= 3)
+                {
+                    PlaceMapBlock(world_, GridPos { center.x + x, center.y, center.z + z }, BlockType::StoneBlock, -1, true);
+                }
+            }
+        }
+        PlaceMapBlock(world_, GridPos { center.x, center.y + 1, center.z }, BlockType::EnergyGlassBlock, -1, true);
+    }
+
+    const GridPos crackedBridges[] {
+        GridPos { -13, 0, 0 },
+        GridPos { -11, 0, 0 },
+        GridPos { 11, 0, 0 },
+        GridPos { 13, 0, 0 },
+        GridPos { 0, 0, -13 },
+        GridPos { 0, 0, -11 },
+        GridPos { 0, 0, 11 },
+        GridPos { 0, 0, 13 },
+        GridPos { -5, 2, 0 },
+        GridPos { 5, 2, 0 },
+        GridPos { 0, 2, -5 },
+        GridPos { 0, 2, 5 }
+    };
+    for (const GridPos& pos : crackedBridges)
+    {
+        if (!world_.IsAir(pos))
+        {
+            PlaceMapBlock(world_, pos, BlockType::WoodBlock, -1, true);
+        }
+    }
+}
+
 void Game::StartSelectedMatch()
 {
+    automatch_.active = false;
     selectedTeamId_ = std::clamp(selectedTeamId_, 0, TeamCountForMode() - 1);
     selectedTeamSize_ = std::clamp(selectedTeamSize_, 1, 4);
     selectedBotCount_ = std::clamp(selectedBotCount_, 0, MaxBotCountForSelection());
@@ -1187,6 +1751,535 @@ void Game::StartSelectedMatch()
     screen_ = GameScreen::Playing;
     DisableCursor();
     SetMessage(std::string("Mode: ") + MatchModeName() + ". Protect your EnergyCore.", 4.0f);
+}
+
+void Game::StartAutomatch()
+{
+    selectedMode_ = MatchMode::FourTeams;
+    selectedTeamId_ = 0;
+    selectedTeamSize_ = 4;
+    selectedBotCount_ = MaxBotCountForSelection();
+    automatch_ = AutomatchState {};
+    automatch_.active = true;
+    automatch_.targetRuns = std::clamp(automatchRunTarget_, 1, 50);
+    automatch_.maxMatchSeconds = static_cast<float>(std::clamp(automatchMaxMinutes_, 3, 30) * 60);
+    SaveSettings();
+    SetupMatch();
+    ConfigureAutomatchMatch();
+    gameplayFov_ = fov_;
+    cameraController_.SetFov(gameplayFov_);
+    UpdateCamera(0.016f);
+    screen_ = GameScreen::Playing;
+    DisableCursor();
+    showBotDebug_ = true;
+    SetMessage("Automatch running: bot-only simulation.", 4.0f);
+}
+
+bool Game::RunAutomatchBatch(int runs, int ticksPerFrame, int maxMinutes)
+{
+    automatchRunTarget_ = std::clamp(runs, 1, 50);
+    automatchTicksPerFrame_ = std::clamp(ticksPerFrame, 1, 32);
+    automatchMaxMinutes_ = std::clamp(maxMinutes, 3, 30);
+    StartAutomatch();
+
+    const int guardFrames = automatchRunTarget_ * automatchMaxMinutes_ * 60 * 90;
+    int frames = 0;
+    while (automatch_.active && frames++ < guardFrames && !ShouldClose())
+    {
+        CrashLogger::Heartbeat("automatch-update");
+        Update(1.0f / 60.0f);
+    }
+    if (automatch_.active)
+    {
+        automatch_.active = false;
+        WriteAutomatchStatsJson();
+        return false;
+    }
+    return automatch_.completedRuns >= automatch_.targetRuns;
+}
+
+void Game::ConfigureAutomatchMatch()
+{
+    automatch_.currentFirstCoreDamageTime = -1.0f;
+    automatch_.currentTeamStats[0] = AutomatchTeamStats {};
+    automatch_.currentTeamStats[1] = AutomatchTeamStats {};
+    automatch_.currentTeamStats[2] = AutomatchTeamStats {};
+    automatch_.currentTeamStats[3] = AutomatchTeamStats {};
+    automatch_.currentTimeline.clear();
+
+    std::array<int, 4> activeBotsByTeam {};
+    int nextId = localPlayerId_ + 1;
+    for (const Player& player : players_)
+    {
+        nextId = std::max(nextId, player.GetId() + 1);
+        if (!player.IsLocal() && IsTeamActiveForMode(player.GetTeamId()))
+        {
+            ++activeBotsByTeam[player.GetTeamId()];
+        }
+    }
+
+    for (Team& team : teams_)
+    {
+        if (!IsTeamActiveForMode(team.id))
+        {
+            continue;
+        }
+        while (activeBotsByTeam[team.id] < selectedTeamSize_)
+        {
+            Player bot(nextId++, std::string(TeamName(team.id)) + " Auto Bot " + std::to_string(activeBotsByTeam[team.id] + 1), team.id, team.spawnPoint, false);
+            bot.SetYaw(YawForTeam(team.id));
+            ApplyBotLoadout(bot);
+            players_.push_back(bot);
+            ++activeBotsByTeam[team.id];
+        }
+    }
+
+    if (Player* localPlayer = GetLocalPlayer())
+    {
+        localPlayer->Kill(true);
+    }
+    for (Player& player : players_)
+    {
+        GetPlayerScore(player.GetId());
+    }
+    spectatorMode_ = true;
+    spectatorFreeCamera_ = false;
+    spectatorTargetIndex_ = 0;
+    for (int i = 0; i < static_cast<int>(players_.size()); ++i)
+    {
+        if (!players_[i].IsLocal() && players_[i].IsAlive() && !players_[i].IsEliminated())
+        {
+            spectatorTargetIndex_ = i;
+            spectatorPosition_ = players_[i].GetPosition();
+            break;
+        }
+    }
+    cameraController_.SetMode(ViewMode::ThirdPerson);
+    automatch_.sampleTimer = 0.0f;
+}
+
+void Game::UpdateAutomatch(float dt)
+{
+    if (!automatch_.active)
+    {
+        return;
+    }
+
+    automatch_.sampleTimer += dt;
+    if (automatch_.sampleTimer >= 1.0f)
+    {
+        automatch_.sampleTimer = 0.0f;
+        SampleAutomatchBots();
+    }
+
+    const bool timeout = !winnerTeamId_.has_value() && matchTime_ >= automatch_.maxMatchSeconds;
+    if (!winnerTeamId_.has_value() && !timeout)
+    {
+        return;
+    }
+
+    FinishAutomatchRun(timeout);
+    if (automatch_.completedRuns >= automatch_.targetRuns)
+    {
+        automatch_.active = false;
+        WriteAutomatchStatsJson();
+        SetMessage("Automatch complete. Review stats overlay.", 8.0f);
+        return;
+    }
+
+    SetupMatch();
+    ConfigureAutomatchMatch();
+}
+
+void Game::SampleAutomatchBots()
+{
+    const auto findBotStats = [this](const Player& player) -> AutomatchBotStats&
+    {
+        for (AutomatchBotStats& stats : automatch_.botStats)
+        {
+            if (stats.teamId == player.GetTeamId() && stats.name == player.GetName())
+            {
+                return stats;
+            }
+        }
+        automatch_.botStats.push_back(AutomatchBotStats { player.GetName(), player.GetTeamId() });
+        return automatch_.botStats.back();
+    };
+
+    for (const Player& player : players_)
+    {
+        if (player.IsLocal())
+        {
+            continue;
+        }
+        const BotMemory* memory = nullptr;
+        for (const BotMemory& candidate : botMemories_)
+        {
+            if (candidate.playerId == player.GetId())
+            {
+                memory = &candidate;
+                break;
+            }
+        }
+        if (memory == nullptr)
+        {
+            continue;
+        }
+
+        AutomatchBotStats& stats = findBotStats(player);
+        ++stats.samples;
+        const int roleIndex = std::clamp(static_cast<int>(memory->role), 0, 3);
+        const int intentIndex = std::clamp(static_cast<int>(memory->intent), 0, 9);
+        ++stats.roleSamples[roleIndex];
+        ++stats.intentSamples[intentIndex];
+        if (stats.lastRole >= 0 && stats.lastRole != roleIndex)
+        {
+            ++stats.roleChanges;
+        }
+        if (stats.lastIntent >= 0 && stats.lastIntent != intentIndex)
+        {
+            ++stats.intentChanges;
+        }
+        stats.lastRole = roleIndex;
+        stats.lastIntent = intentIndex;
+        if (memory->stuckTimer > 1.0f)
+        {
+            ++stats.stuckSamples;
+        }
+
+        if (player.GetTeamId() >= 0 && player.GetTeamId() < 4)
+        {
+            AutomatchTeamStats& teamStats = automatch_.currentTeamStats[player.GetTeamId()];
+            ++teamStats.samples;
+            ++teamStats.roleSamples[roleIndex];
+            ++teamStats.intentSamples[intentIndex];
+            teamStats.resourcesHeld[0] += player.GetInventory().GetResource(ResourceType::Iron);
+            teamStats.resourcesHeld[1] += player.GetInventory().GetResource(ResourceType::Gold);
+            teamStats.resourcesHeld[2] += player.GetInventory().GetResource(ResourceType::Crystal);
+        }
+
+        const Vector3 position = player.GetPosition();
+        const Team* team = FindTeam(player.GetTeamId());
+        const Vector3 base = team != nullptr ? team->spawnPoint : Vector3 {};
+        const float fromBase = Distance3D(position, base);
+        const float fromCenter = Distance3D(position, Vector3 {});
+        if (!stats.hasMovementSample)
+        {
+            stats.hasMovementSample = true;
+            stats.lastPosition = position;
+            stats.minPosition = position;
+            stats.maxPosition = position;
+        }
+        else
+        {
+            stats.totalDistance += Distance3D(stats.lastPosition, position);
+            stats.lastPosition = position;
+            stats.minPosition = Vector3 {
+                std::min(stats.minPosition.x, position.x),
+                std::min(stats.minPosition.y, position.y),
+                std::min(stats.minPosition.z, position.z)
+            };
+            stats.maxPosition = Vector3 {
+                std::max(stats.maxPosition.x, position.x),
+                std::max(stats.maxPosition.y, position.y),
+                std::max(stats.maxPosition.z, position.z)
+            };
+        }
+        stats.maxDistanceFromBase = std::max(stats.maxDistanceFromBase, fromBase);
+        stats.maxDistanceFromCenter = std::max(stats.maxDistanceFromCenter, fromCenter);
+        const float samples = static_cast<float>(std::max(1, stats.samples));
+        stats.averageDistanceFromBase += (fromBase - stats.averageDistanceFromBase) / samples;
+        stats.averageDistanceFromCenter += (fromCenter - stats.averageDistanceFromCenter) / samples;
+    }
+}
+
+void Game::FinishAutomatchRun(bool timeout)
+{
+    SampleAutomatchBots();
+    AutomatchRunStats run {};
+    run.winnerTeamId = winnerTeamId_.value_or(-1);
+    run.duration = matchTime_;
+    run.timeout = timeout;
+    run.firstCoreDamageTime = automatch_.currentFirstCoreDamageTime;
+    run.timeline = automatch_.currentTimeline;
+    for (int teamId = 0; teamId < 4; ++teamId)
+    {
+        run.teamStats[teamId] = automatch_.currentTeamStats[teamId];
+    }
+
+    const auto findBotStats = [this](const Player& player) -> AutomatchBotStats&
+    {
+        for (AutomatchBotStats& stats : automatch_.botStats)
+        {
+            if (stats.teamId == player.GetTeamId() && stats.name == player.GetName())
+            {
+                return stats;
+            }
+        }
+        automatch_.botStats.push_back(AutomatchBotStats { player.GetName(), player.GetTeamId() });
+        return automatch_.botStats.back();
+    };
+
+    for (const Player& player : players_)
+    {
+        if (player.IsLocal())
+        {
+            continue;
+        }
+        const PlayerMatchScore* score = FindPlayerScore(player.GetId());
+        if (score == nullptr)
+        {
+            continue;
+        }
+
+        AutomatchBotStats& stats = findBotStats(player);
+        stats.kills += score->kills;
+        stats.deaths += score->deaths;
+        stats.finalDeaths += score->finalDeaths;
+        stats.coreDamage += score->coreDamage;
+        run.kills += score->kills;
+        run.coreDamage += score->coreDamage;
+        if (player.GetTeamId() >= 0 && player.GetTeamId() < 4)
+        {
+            AutomatchTeamStats& teamStats = run.teamStats[player.GetTeamId()];
+            teamStats.kills += score->kills;
+            teamStats.deaths += score->deaths;
+            teamStats.finalDeaths += score->finalDeaths;
+            teamStats.coreDamage += score->coreDamage;
+        }
+    }
+
+    for (const Player& player : players_)
+    {
+        if (player.IsLocal() || player.GetTeamId() < 0 || player.GetTeamId() >= 4)
+        {
+            continue;
+        }
+
+        AutomatchTeamStats& teamStats = run.teamStats[player.GetTeamId()];
+        if (player.IsEliminated())
+        {
+            ++teamStats.eliminatedPlayers;
+        }
+        else
+        {
+            ++teamStats.alivePlayers;
+        }
+    }
+
+    for (const EnergyCore& core : cores_)
+    {
+        const int teamId = core.GetTeamId();
+        if (teamId < 0 || teamId >= 4)
+        {
+            continue;
+        }
+        AutomatchTeamStats& teamStats = run.teamStats[teamId];
+        teamStats.coreAlive = core.IsAlive();
+        teamStats.coreHealth = core.GetHealth();
+        teamStats.coreMaxHealth = core.GetMaxHealth();
+        if (!core.IsAlive())
+        {
+            ++run.coreDestroyedCount;
+        }
+    }
+    for (int teamId = 0; teamId < 4; ++teamId)
+    {
+        run.finalDeathCount += run.teamStats[teamId].finalDeaths;
+    }
+    if (timeout)
+    {
+        int aliveCores = 0;
+        int teamsWithLives = 0;
+        for (int teamId = 0; teamId < 4; ++teamId)
+        {
+            if (run.teamStats[teamId].coreAlive)
+            {
+                ++aliveCores;
+            }
+            if (run.teamStats[teamId].alivePlayers > 0)
+            {
+                ++teamsWithLives;
+            }
+        }
+        run.finishReason = "timeout: " + std::to_string(aliveCores) + " cores alive, "
+            + std::to_string(teamsWithLives) + " teams with lives";
+    }
+    else
+    {
+        run.finishReason = run.winnerTeamId >= 0
+            ? std::string(TeamName(run.winnerTeamId)) + " was last team standing"
+            : "match ended without winner";
+    }
+
+    ++automatch_.completedRuns;
+    automatch_.totalDuration += run.duration;
+    automatch_.totalKills += run.kills;
+    automatch_.totalCoreDamage += run.coreDamage;
+    automatch_.totalFinalDeaths += run.finalDeathCount;
+    automatch_.totalCoreDestroyed += run.coreDestroyedCount;
+    if (timeout)
+    {
+        ++automatch_.timeouts;
+    }
+    else if (run.winnerTeamId >= 0 && run.winnerTeamId < 4)
+    {
+        ++automatch_.teamWins[run.winnerTeamId];
+    }
+    automatch_.runs.push_back(run);
+}
+
+void Game::WriteAutomatchStatsJson() const
+{
+    std::ofstream file("automatch_stats.json", std::ios::trunc);
+    if (!file)
+    {
+        return;
+    }
+
+    const float avgDuration = automatch_.completedRuns > 0
+        ? automatch_.totalDuration / static_cast<float>(automatch_.completedRuns)
+        : 0.0f;
+    file << "{\n";
+    file << "  \"summary\": {\n";
+    file << "    \"completedRuns\": " << automatch_.completedRuns << ",\n";
+    file << "    \"targetRuns\": " << automatch_.targetRuns << ",\n";
+    file << "    \"biome\": \"" << JsonEscape(ArenaBiomeName()) << "\",\n";
+    file << "    \"timeouts\": " << automatch_.timeouts << ",\n";
+    file << "    \"averageDurationSeconds\": " << avgDuration << ",\n";
+    file << "    \"totalKills\": " << automatch_.totalKills << ",\n";
+    file << "    \"totalCoreDamage\": " << automatch_.totalCoreDamage << ",\n";
+    file << "    \"totalFinalDeaths\": " << automatch_.totalFinalDeaths << ",\n";
+    file << "    \"totalCoreDestroyed\": " << automatch_.totalCoreDestroyed << ",\n";
+    file << "    \"winsByTeam\": {\n";
+    file << "      \"Red\": " << automatch_.teamWins[0] << ",\n";
+    file << "      \"Blue\": " << automatch_.teamWins[1] << ",\n";
+    file << "      \"Green\": " << automatch_.teamWins[2] << ",\n";
+    file << "      \"Yellow\": " << automatch_.teamWins[3] << "\n";
+    file << "    }\n";
+    file << "  },\n";
+
+    file << "  \"runs\": [\n";
+    for (std::size_t i = 0; i < automatch_.runs.size(); ++i)
+    {
+        const AutomatchRunStats& run = automatch_.runs[i];
+        file << "    {\n";
+        file << "      \"index\": " << (i + 1) << ",\n";
+        file << "      \"winnerTeamId\": " << run.winnerTeamId << ",\n";
+        file << "      \"winnerTeam\": \"" << JsonEscape(run.winnerTeamId >= 0 ? TeamName(run.winnerTeamId) : "None") << "\",\n";
+        file << "      \"durationSeconds\": " << run.duration << ",\n";
+        file << "      \"timeout\": " << (run.timeout ? "true" : "false") << ",\n";
+        file << "      \"finishReason\": \"" << JsonEscape(run.finishReason) << "\",\n";
+        file << "      \"firstCoreDamageTime\": " << run.firstCoreDamageTime << ",\n";
+        file << "      \"kills\": " << run.kills << ",\n";
+        file << "      \"finalDeaths\": " << run.finalDeathCount << ",\n";
+        file << "      \"coreDamage\": " << run.coreDamage << ",\n";
+        file << "      \"coresDestroyed\": " << run.coreDestroyedCount << ",\n";
+        file << "      \"teams\": [\n";
+        for (int teamId = 0; teamId < 4; ++teamId)
+        {
+            const AutomatchTeamStats& teamStats = run.teamStats[teamId];
+            const float resourceSamples = static_cast<float>(std::max(1, teamStats.samples));
+            file << "        {\n";
+            file << "          \"teamId\": " << teamId << ",\n";
+            file << "          \"team\": \"" << JsonEscape(TeamName(teamId)) << "\",\n";
+            file << "          \"kills\": " << teamStats.kills << ",\n";
+            file << "          \"deaths\": " << teamStats.deaths << ",\n";
+            file << "          \"finalDeaths\": " << teamStats.finalDeaths << ",\n";
+            file << "          \"coreDamage\": " << teamStats.coreDamage << ",\n";
+            file << "          \"alivePlayers\": " << teamStats.alivePlayers << ",\n";
+            file << "          \"eliminatedPlayers\": " << teamStats.eliminatedPlayers << ",\n";
+            file << "          \"coreAlive\": " << (teamStats.coreAlive ? "true" : "false") << ",\n";
+            file << "          \"coreHealth\": " << teamStats.coreHealth << ",\n";
+            file << "          \"coreMaxHealth\": " << teamStats.coreMaxHealth << ",\n";
+            file << "          \"averageResourcesHeld\": {";
+            file << "\"Iron\": " << static_cast<float>(teamStats.resourcesHeld[0]) / resourceSamples << ", ";
+            file << "\"Gold\": " << static_cast<float>(teamStats.resourcesHeld[1]) / resourceSamples << ", ";
+            file << "\"Crystal\": " << static_cast<float>(teamStats.resourcesHeld[2]) / resourceSamples << "},\n";
+            file << "          \"roleSamples\": {";
+            file << "\"Defender\": " << teamStats.roleSamples[0] << ", ";
+            file << "\"Rusher\": " << teamStats.roleSamples[1] << ", ";
+            file << "\"Collector\": " << teamStats.roleSamples[2] << ", ";
+            file << "\"Fighter\": " << teamStats.roleSamples[3] << "},\n";
+            file << "          \"intentSamples\": {\n";
+            for (int intent = 0; intent < 10; ++intent)
+            {
+                file << "            \"" << ToString(static_cast<BotIntent>(intent)) << "\": " << teamStats.intentSamples[intent]
+                    << (intent < 9 ? "," : "") << "\n";
+            }
+            file << "          }\n";
+            file << "        }" << (teamId < 3 ? "," : "") << "\n";
+        }
+        file << "      ],\n";
+        file << "      \"timeline\": [\n";
+        for (std::size_t eventIndex = 0; eventIndex < run.timeline.size(); ++eventIndex)
+        {
+            const AutomatchTimelineEvent& event = run.timeline[eventIndex];
+            file << "        {";
+            file << "\"time\": " << event.time << ", ";
+            file << "\"type\": \"" << JsonEscape(event.type) << "\", ";
+            file << "\"teamId\": " << event.teamId << ", ";
+            file << "\"actorId\": " << event.actorId << ", ";
+            file << "\"targetId\": " << event.targetId << ", ";
+            file << "\"value\": " << event.value << ", ";
+            file << "\"text\": \"" << JsonEscape(event.text) << "\"";
+            file << "}" << (eventIndex + 1 < run.timeline.size() ? "," : "") << "\n";
+        }
+        file << "      ]\n";
+        file << "    }" << (i + 1 < automatch_.runs.size() ? "," : "") << "\n";
+    }
+    file << "  ],\n";
+
+    file << "  \"bots\": [\n";
+    for (std::size_t i = 0; i < automatch_.botStats.size(); ++i)
+    {
+        const AutomatchBotStats& stats = automatch_.botStats[i];
+        file << "    {\n";
+        file << "      \"name\": \"" << JsonEscape(stats.name) << "\",\n";
+        file << "      \"teamId\": " << stats.teamId << ",\n";
+        file << "      \"team\": \"" << JsonEscape(stats.teamId >= 0 ? TeamName(stats.teamId) : "Unknown") << "\",\n";
+        file << "      \"samples\": " << stats.samples << ",\n";
+        file << "      \"roleChanges\": " << stats.roleChanges << ",\n";
+        file << "      \"intentChanges\": " << stats.intentChanges << ",\n";
+        file << "      \"stuckSamples\": " << stats.stuckSamples << ",\n";
+        file << "      \"voidFalls\": " << stats.voidFalls << ",\n";
+        file << "      \"kills\": " << stats.kills << ",\n";
+        file << "      \"deaths\": " << stats.deaths << ",\n";
+        file << "      \"finalDeaths\": " << stats.finalDeaths << ",\n";
+        file << "      \"coreDamage\": " << stats.coreDamage << ",\n";
+        file << "      \"roleSamples\": {\n";
+        file << "        \"Defender\": " << stats.roleSamples[0] << ",\n";
+        file << "        \"Rusher\": " << stats.roleSamples[1] << ",\n";
+        file << "        \"Collector\": " << stats.roleSamples[2] << ",\n";
+        file << "        \"Fighter\": " << stats.roleSamples[3] << "\n";
+        file << "      },\n";
+        file << "      \"intentSamples\": {\n";
+        for (int intent = 0; intent < 10; ++intent)
+        {
+            file << "        \"" << ToString(static_cast<BotIntent>(intent)) << "\": " << stats.intentSamples[intent]
+                << (intent < 9 ? "," : "") << "\n";
+        }
+        file << "      },\n";
+        file << "      \"movement\": {\n";
+        file << "        \"totalDistance\": " << stats.totalDistance << ",\n";
+        file << "        \"maxDistanceFromBase\": " << stats.maxDistanceFromBase << ",\n";
+        file << "        \"maxDistanceFromCenter\": " << stats.maxDistanceFromCenter << ",\n";
+        file << "        \"averageDistanceFromBase\": " << stats.averageDistanceFromBase << ",\n";
+        file << "        \"averageDistanceFromCenter\": " << stats.averageDistanceFromCenter << ",\n";
+        file << "        \"lastPosition\": ";
+        WriteJsonVector3(file, stats.lastPosition);
+        file << ",\n";
+        file << "        \"minPosition\": ";
+        WriteJsonVector3(file, stats.minPosition);
+        file << ",\n";
+        file << "        \"maxPosition\": ";
+        WriteJsonVector3(file, stats.maxPosition);
+        file << "\n";
+        file << "      }\n";
+        file << "    }" << (i + 1 < automatch_.botStats.size() ? "," : "") << "\n";
+    }
+    file << "  ]\n";
+    file << "}\n";
 }
 
 void Game::TriggerCoreCollapse()
@@ -1253,9 +2346,53 @@ float Game::TerrainSpeedMultiplier(const Player& player) const
     }
     if (block->type == BlockType::IceBlock)
     {
-        return 1.16f;
+        return arenaBiome_ == ArenaBiome::Ice ? 1.28f : 1.16f;
+    }
+    if (arenaBiome_ == ArenaBiome::Ice)
+    {
+        return player.IsLocal() ? 1.08f : 1.03f;
     }
     return 1.0f;
+}
+
+float Game::BiomeGravityMultiplier() const
+{
+    return arenaBiome_ == ArenaBiome::Space ? 0.62f : 1.0f;
+}
+
+float Game::BiomeJumpMultiplier() const
+{
+    return arenaBiome_ == ArenaBiome::Space ? 1.14f : 1.0f;
+}
+
+float Game::BiomeGroundControlMultiplier(const Player& player) const
+{
+    const Vector3 pos = player.GetPosition();
+    const GridPos underFeet = world_.WorldToGrid(Vector3 { pos.x, pos.y - 1.05f, pos.z });
+    const Block* block = world_.GetBlock(underFeet);
+    if (block != nullptr && block->type == BlockType::IceBlock)
+    {
+        return player.IsLocal() ? 0.38f : 0.58f;
+    }
+    if (arenaBiome_ == ArenaBiome::Ice)
+    {
+        return player.IsLocal() ? 0.58f : 0.76f;
+    }
+    if (arenaBiome_ == ArenaBiome::Space)
+    {
+        return 0.86f;
+    }
+    return 1.0f;
+}
+
+float Game::BiomeAirControlMultiplier() const
+{
+    return arenaBiome_ == ArenaBiome::Space ? 0.78f : 1.0f;
+}
+
+float Game::BiomeKnockbackMultiplier() const
+{
+    return arenaBiome_ == ArenaBiome::Space ? 1.18f : 1.0f;
 }
 
 void Game::ApplyStandingBlockEffects(Player& player, bool localPlayer)
@@ -2031,7 +3168,8 @@ void Game::DetonateAt(Vector3 position, int ownerTeamId, int ownerPlayerId, floa
         NoteDamageCredit(player.GetId(), ownerPlayerId);
         player.Damage(scaledDamage);
         const Vector3 away = Normalize2D(Vector3 { player.GetPosition().x - position.x, 0.0f, player.GetPosition().z - position.z });
-        player.ApplyKnockback(Vector3 { away.x * 5.4f, 2.4f, away.z * 5.4f });
+        const float knockback = BiomeKnockbackMultiplier();
+        player.ApplyKnockback(Vector3 { away.x * 5.4f * knockback, 2.4f * knockback, away.z * 5.4f * knockback });
     }
 
     if (createFireZone)
@@ -2212,7 +3350,19 @@ void Game::UpdateLocalPlayer(float dt)
     {
         player->RefreshSprintReset();
     }
-    player->Move(wish, currentInput_.jump, dt, world_, sprint, currentInput_.sneak, TerrainSpeedMultiplier(*player));
+    player->Move(
+        wish,
+        currentInput_.jump,
+        dt,
+        world_,
+        sprint,
+        currentInput_.sneak,
+        TerrainSpeedMultiplier(*player),
+        false,
+        BiomeGravityMultiplier(),
+        BiomeJumpMultiplier(),
+        BiomeGroundControlMultiplier(*player),
+        BiomeAirControlMultiplier());
     ApplyStandingBlockEffects(*player, true);
 
     if (!player->IsOnGround())
@@ -2438,9 +3588,26 @@ void Game::UpdateBlockHazards(float dt)
             const int damage = block->type == BlockType::LavaBlock ? 12 : 7;
             player.Damage(damage);
             AddWorldEffect(player.GetPosition(), block->type == BlockType::LavaBlock ? Color { 255, 88, 42, 255 } : Color { 255, 118, 118, 255 }, 0.20f, 0.20f);
+            AddFloatingText(block->type == BlockType::LavaBlock ? "burn" : "spike", player.GetPosition(), block->type == BlockType::LavaBlock ? Color { 255, 128, 72, 255 } : Color { 255, 118, 118, 255 });
             if (player.IsLocal())
             {
                 damageFlashTimer_ = std::max(damageFlashTimer_, 0.35f);
+            }
+        }
+        else if (arenaBiome_ == ArenaBiome::Lava && pos.y < 0.25f)
+        {
+            const Team* team = FindTeam(player.GetTeamId());
+            const bool inBaseSafeZone = team != nullptr && DistanceSquared(pos, team->spawnPoint) < 105.0f;
+            if (!inBaseSafeZone)
+            {
+                player.Damage(5);
+                AddWorldEffect(player.GetPosition(), Color { 255, 88, 42, 255 }, 0.18f, 0.18f);
+                AddFloatingText("heat", player.GetPosition(), Color { 255, 128, 72, 255 });
+                if (player.IsLocal())
+                {
+                    damageFlashTimer_ = std::max(damageFlashTimer_, 0.32f);
+                    SetMessage("Lava biome heat: climb to safer ground.", 1.2f);
+                }
             }
         }
     }
@@ -2507,7 +3674,8 @@ void Game::UpdateProjectiles(float dt)
                 {
                     NoteDamageCredit(player.GetId(), projectile.ownerId);
                     player.Damage(projectile.damage);
-                    player.ApplyKnockback(Vector3 { projectile.velocity.x * 0.12f, 1.4f, projectile.velocity.z * 0.12f });
+                    const float knockback = BiomeKnockbackMultiplier();
+                    player.ApplyKnockback(Vector3 { projectile.velocity.x * 0.12f * knockback, 1.4f * knockback, projectile.velocity.z * 0.12f * knockback });
                     if (projectile.explosionRadius > 0.0f)
                     {
                         DetonateAt(projectile.position, projectile.ownerTeamId, projectile.ownerId, projectile.explosionRadius, projectile.damage, projectile.fireZone);
@@ -3296,6 +4464,7 @@ void Game::HandleDeathsAndRespawns()
         if (player.IsAlive() && (player.GetHealth() <= 0 || player.GetPosition().y < -12.0f))
         {
             const bool finalDeath = !team->coreAlive;
+            const bool voidDeath = player.GetPosition().y < -12.0f;
             const int killerId = DeathCreditFor(player.GetId());
             HandleDeathInventory(player, killerId);
             damageCredits_.erase(
@@ -3313,6 +4482,32 @@ void Game::HandleDeathsAndRespawns()
             if (finalDeath)
             {
                 ++score.finalDeaths;
+            }
+            if (automatch_.active && !player.IsLocal())
+            {
+                for (AutomatchBotStats& botStats : automatch_.botStats)
+                {
+                    if (botStats.teamId == player.GetTeamId() && botStats.name == player.GetName())
+                    {
+                        if (voidDeath)
+                        {
+                            ++botStats.voidFalls;
+                        }
+                        break;
+                    }
+                }
+                if (voidDeath || finalDeath)
+                {
+                    automatch_.currentTimeline.push_back(AutomatchTimelineEvent {
+                        matchTime_,
+                        voidDeath ? "voidFall" : "finalDeath",
+                        player.GetTeamId(),
+                        killerId,
+                        player.GetId(),
+                        finalDeath ? 1 : 0,
+                        player.GetName() + (voidDeath ? " fell into void" : " final death")
+                    });
+                }
             }
             SetMessage(player.GetName() + (finalDeath ? " was eliminated." : " was defeated and will respawn."));
             AddEventMessage(player.GetName() + (finalDeath ? " eliminated" : " down"), finalDeath ? RED : ORANGE, 2.2f);
@@ -3344,6 +4539,18 @@ void Game::HandleDeathsAndRespawns()
             {
                 player.Kill(true);
                 ++GetPlayerScore(player.GetId()).finalDeaths;
+                if (automatch_.active && !player.IsLocal())
+                {
+                    automatch_.currentTimeline.push_back(AutomatchTimelineEvent {
+                        matchTime_,
+                        "finalDeath",
+                        player.GetTeamId(),
+                        -1,
+                        player.GetId(),
+                        1,
+                        player.GetName() + " lost respawn protection"
+                    });
+                }
                 SetMessage(player.GetName() + " lost respawn protection. Final death.");
                 if (player.IsLocal())
                 {
@@ -3481,6 +4688,21 @@ std::string Game::BotCountName() const
 {
     const int maxBots = MaxBotCountForSelection();
     return std::to_string(std::clamp(selectedBotCount_, 0, maxBots)) + "/" + std::to_string(maxBots);
+}
+
+std::string Game::AutomatchRunCountName() const
+{
+    return std::to_string(std::clamp(automatchRunTarget_, 1, 50));
+}
+
+std::string Game::AutomatchSpeedName() const
+{
+    return std::to_string(std::clamp(automatchTicksPerFrame_, 1, 32)) + "x";
+}
+
+std::string Game::AutomatchDurationName() const
+{
+    return std::to_string(std::clamp(automatchMaxMinutes_, 3, 30)) + " min";
 }
 
 int Game::GetForgeBonusForTeam(int teamId) const
@@ -3966,6 +5188,18 @@ void Game::LoadSettings()
             file >> value;
             arenaBiome_ = static_cast<ArenaBiome>(std::clamp(value, 0, 4));
         }
+        else if (key == "automatchRunTarget")
+        {
+            file >> automatchRunTarget_;
+        }
+        else if (key == "automatchTicksPerFrame")
+        {
+            file >> automatchTicksPerFrame_;
+        }
+        else if (key == "automatchMaxMinutes")
+        {
+            file >> automatchMaxMinutes_;
+        }
     }
 
     resolutionIndex_ = std::clamp(resolutionIndex_, 0, static_cast<int>(std::size(kWindowResolutions)) - 1);
@@ -3973,6 +5207,9 @@ void Game::LoadSettings()
     selectedTeamSize_ = std::clamp(selectedTeamSize_, 1, 4);
     selectedTeamId_ = std::clamp(selectedTeamId_, 0, TeamCountForMode() - 1);
     selectedBotCount_ = std::clamp(selectedBotCount_, 0, MaxBotCountForSelection());
+    automatchRunTarget_ = std::clamp(automatchRunTarget_, 1, 50);
+    automatchTicksPerFrame_ = std::clamp(automatchTicksPerFrame_, 1, 32);
+    automatchMaxMinutes_ = std::clamp(automatchMaxMinutes_, 3, 30);
 }
 
 void Game::SaveSettings() const
@@ -3997,6 +5234,9 @@ void Game::SaveSettings() const
     file << "botDifficulty " << static_cast<int>(botDifficulty_) << "\n";
     file << "arenaLayout " << static_cast<int>(arenaLayout_) << "\n";
     file << "arenaBiome " << static_cast<int>(arenaBiome_) << "\n";
+    file << "automatchRunTarget " << automatchRunTarget_ << "\n";
+    file << "automatchTicksPerFrame " << automatchTicksPerFrame_ << "\n";
+    file << "automatchMaxMinutes " << automatchMaxMinutes_ << "\n";
 }
 
 const char* Game::TeamName(int teamId) const
@@ -4236,6 +5476,51 @@ void Game::RegisterCombatEvent(const CombatEvent& event, const std::string& mess
         if (event.coreHit)
         {
             attackerScore.coreDamage += event.damage;
+            if (automatch_.active)
+            {
+                if (automatch_.currentFirstCoreDamageTime < 0.0f)
+                {
+                    automatch_.currentFirstCoreDamageTime = matchTime_;
+                    automatch_.currentTimeline.push_back(AutomatchTimelineEvent {
+                        matchTime_,
+                        "firstCoreDamage",
+                        event.targetTeamId,
+                        event.attackerId,
+                        -1,
+                        event.damage,
+                        "First Core damage"
+                    });
+                }
+                if (event.coreDestroyed)
+                {
+                    automatch_.currentTimeline.push_back(AutomatchTimelineEvent {
+                        matchTime_,
+                        "coreDestroyed",
+                        event.targetTeamId,
+                        event.attackerId,
+                        -1,
+                        event.damage,
+                        std::string(TeamName(event.targetTeamId)) + " Core destroyed"
+                    });
+                }
+            }
+        }
+    }
+
+    if (!event.coreHit && event.targetId >= 0 && BiomeKnockbackMultiplier() > 1.0f)
+    {
+        for (Player& player : players_)
+        {
+            if (player.GetId() == event.targetId && player.IsAlive() && !player.IsEliminated())
+            {
+                const float bonus = BiomeKnockbackMultiplier() - 1.0f;
+                player.ApplyKnockback(Vector3 {
+                    event.knockback.x * bonus,
+                    event.knockback.y * bonus,
+                    event.knockback.z * bonus
+                });
+                break;
+            }
         }
     }
 

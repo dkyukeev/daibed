@@ -474,5 +474,5 @@ const char* Shop::GetCategoryName(int categoryIndex) const
 
 std::string Shop::GetMenuText() const
 {
-    return "Wheel/Middle category | click or 1-9 buy | Shift buys x4 | R close";
+    return "1-9/click buy | Shift x4 | R close";
 }

@@ -212,7 +212,19 @@ void Player::SetYaw(float yaw)
     yaw_ = yaw;
 }
 
-void Player::Move(Vector3 wishDirection, bool jump, float dt, const World& world, bool sprint, bool sneak, float terrainSpeedMultiplier, bool allowAutoStep)
+void Player::Move(
+    Vector3 wishDirection,
+    bool jump,
+    float dt,
+    const World& world,
+    bool sprint,
+    bool sneak,
+    float terrainSpeedMultiplier,
+    bool allowAutoStep,
+    float gravityMultiplier,
+    float jumpMultiplier,
+    float groundControlMultiplier,
+    float airControlMultiplier)
 {
     if (!alive_ || eliminated_)
     {
@@ -260,8 +272,8 @@ void Player::Move(Vector3 wishDirection, bool jump, float dt, const World& world
     }
 
     const float acceleration = onGround_
-        ? (wantsMovement ? kGroundAcceleration : kGroundDeceleration)
-        : kAirAcceleration;
+        ? (wantsMovement ? kGroundAcceleration : kGroundDeceleration) * std::clamp(groundControlMultiplier, 0.25f, 1.35f)
+        : kAirAcceleration * std::clamp(airControlMultiplier, 0.35f, 1.45f);
     const float knockbackControl = knockbackControlTimer_ > 0.0f
         ? (onGround_ ? 0.34f : 0.48f)
         : 1.0f;
@@ -270,13 +282,13 @@ void Player::Move(Vector3 wishDirection, bool jump, float dt, const World& world
 
     if (jumpBufferTimer_ > 0.0f && coyoteTimer_ > 0.0f)
     {
-        velocity_.y = kJumpSpeed + (jumpBoostTimer_ > 0.0f ? 1.45f : 0.0f);
+        velocity_.y = (kJumpSpeed + (jumpBoostTimer_ > 0.0f ? 1.45f : 0.0f)) * std::clamp(jumpMultiplier, 0.65f, 1.45f);
         onGround_ = false;
         coyoteTimer_ = 0.0f;
         jumpBufferTimer_ = 0.0f;
     }
 
-    velocity_.y -= (velocity_.y < 0.0f ? kFallGravity : kGravity) * dt;
+    velocity_.y -= (velocity_.y < 0.0f ? kFallGravity : kGravity) * std::clamp(gravityMultiplier, 0.45f, 1.35f) * dt;
 
     TryMoveAxis(Vector3 { velocity_.x * dt, 0.0f, 0.0f }, world, sneaking_, allowAutoStep);
     TryMoveAxis(Vector3 { 0.0f, 0.0f, velocity_.z * dt }, world, sneaking_, allowAutoStep);

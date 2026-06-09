@@ -45,7 +45,19 @@ public:
 
     void AddYaw(float delta);
     void SetYaw(float yaw);
-    void Move(Vector3 wishDirection, bool jump, float dt, const World& world, bool sprint = false, bool sneak = false, float terrainSpeedMultiplier = 1.0f, bool allowAutoStep = false);
+    void Move(
+        Vector3 wishDirection,
+        bool jump,
+        float dt,
+        const World& world,
+        bool sprint = false,
+        bool sneak = false,
+        float terrainSpeedMultiplier = 1.0f,
+        bool allowAutoStep = false,
+        float gravityMultiplier = 1.0f,
+        float jumpMultiplier = 1.0f,
+        float groundControlMultiplier = 1.0f,
+        float airControlMultiplier = 1.0f);
     void UpdateTimers(float dt);
 
     void Damage(int amount);

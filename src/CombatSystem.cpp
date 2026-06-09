@@ -28,6 +28,7 @@ struct KnockbackResult
     bool sprintReset = false;
     bool combo = false;
     bool targetAirborne = false;
+    bool weaponSpecial = false;
 };
 
 float KnockbackForSword(int swordLevel)
@@ -41,9 +42,9 @@ float KnockbackForWeapon(WeaponType weapon, int swordLevel)
     switch (weapon)
     {
     case WeaponType::Axe:
-        return base * 1.02f;
+        return base * 1.08f;
     case WeaponType::Spear:
-        return base * 0.72f;
+        return base * 0.66f;
     case WeaponType::Sword:
         break;
     }
@@ -222,7 +223,76 @@ bool IsValidMeleeTarget(const Player& attacker, const Player& target)
         && std::fabs(attacker.GetPosition().y - target.GetPosition().y) <= kMaxAttackHeightDelta;
 }
 
-KnockbackResult CalculateKnockback(const Player& attacker, const Player& target, Vector3 aimDirection, WeaponType weapon, float chargeMultiplier, const AttackOptions* options, bool sprintReset)
+float SpearDistanceMultiplier(float hitDistance)
+{
+    if (hitDistance <= 0.0f)
+    {
+        return 1.0f;
+    }
+    if (hitDistance < 1.95f)
+    {
+        return 0.72f;
+    }
+    if (hitDistance >= 2.65f)
+    {
+        return 1.12f;
+    }
+    return 1.0f;
+}
+
+int ArmorReductionForWeapon(WeaponType weapon, int armorLevel)
+{
+    switch (weapon)
+    {
+    case WeaponType::Axe:
+        return armorLevel * 2;
+    case WeaponType::Spear:
+    case WeaponType::Sword:
+        break;
+    }
+    return armorLevel * 5;
+}
+
+int DamageBeforeShieldAtDistance(const Player& attacker, const Player& target, WeaponType weapon, HitZone hitZone, float chargeMultiplier, float hitDistance, bool heavyAxe)
+{
+    float multiplier = hitZone == HitZone::Head ? 1.35f : 1.0f;
+    if (weapon == WeaponType::Spear)
+    {
+        multiplier *= SpearDistanceMultiplier(hitDistance);
+    }
+    if (heavyAxe)
+    {
+        multiplier *= 1.18f;
+    }
+
+    const int armorReduction = ArmorReductionForWeapon(weapon, target.GetInventory().GetArmorLevel());
+    const int rawDamage = static_cast<int>(static_cast<float>(CombatSystem::BaseDamage(weapon, attacker.GetInventory().GetSwordLevel())) * multiplier * chargeMultiplier + 0.5f);
+    return std::max(6, rawDamage - armorReduction);
+}
+
+int FinalDamageFromPreShield(int damageBeforeShield, const Player& target, WeaponType weapon)
+{
+    if (!target.HasShield())
+    {
+        return damageBeforeShield;
+    }
+    if (weapon == WeaponType::Axe)
+    {
+        return std::max(1, damageBeforeShield * 3 / 4);
+    }
+    return std::max(1, damageBeforeShield / 2);
+}
+
+int DamageInputForPlayerDamage(int damageBeforeShield, const Player& target, WeaponType weapon)
+{
+    if (weapon == WeaponType::Axe && target.HasShield())
+    {
+        return std::max(1, damageBeforeShield * 3 / 2);
+    }
+    return damageBeforeShield;
+}
+
+KnockbackResult CalculateKnockback(const Player& attacker, const Player& target, Vector3 aimDirection, WeaponType weapon, float chargeMultiplier, const AttackOptions* options, bool sprintReset, float hitDistance)
 {
     AttackOptions context {};
     if (options != nullptr)
@@ -242,7 +312,31 @@ KnockbackResult CalculateKnockback(const Player& attacker, const Player& target,
     const float attackerAlong = Dot2D(context.attackerVelocity, hitDirection);
     const float targetAlong = Dot2D(target.GetVelocity(), hitDirection);
 
-    const float baseHorizontal = KnockbackForWeapon(weapon, attacker.GetInventory().GetSwordLevel());
+    float baseHorizontal = KnockbackForWeapon(weapon, attacker.GetInventory().GetSwordLevel());
+    bool weaponSpecial = false;
+    if (weapon == WeaponType::Spear)
+    {
+        if (hitDistance >= 2.65f)
+        {
+            baseHorizontal += 1.45f;
+            weaponSpecial = true;
+        }
+        else if (hitDistance > 0.0f && hitDistance < 1.95f)
+        {
+            baseHorizontal = std::max(0.0f, baseHorizontal - 0.80f);
+        }
+        if (targetAlong < -1.0f)
+        {
+            baseHorizontal += 1.15f;
+            weaponSpecial = true;
+        }
+    }
+    else if (weapon == WeaponType::Axe)
+    {
+        baseHorizontal += 0.55f;
+        weaponSpecial = true;
+    }
+
     const float sprintBonus = sprintReset ? 1.28f : (context.sprinting ? 0.58f : 0.0f);
     const float chargeBonus = (std::clamp(chargeMultiplier, 1.0f, 1.65f) - 1.0f) * 1.65f;
     const float comboBonus = combo ? 0.38f : 0.0f;
@@ -256,7 +350,9 @@ KnockbackResult CalculateKnockback(const Player& attacker, const Player& target,
         0.72f,
         1.08f);
     const float horizontalKnockback = std::max(0.0f, baseHorizontal + sprintBonus + chargeBonus + comboBonus + movementBonus) * targetResistance;
-    const float weaponVertical = weapon == WeaponType::Axe ? 0.10f : (weapon == WeaponType::Spear ? -0.08f : 0.0f);
+    const float weaponVertical = weapon == WeaponType::Axe
+        ? 0.16f
+        : (weapon == WeaponType::Spear ? (hitDistance >= 2.65f || targetAlong < -1.0f ? 0.10f : -0.08f) : 0.0f);
     const float verticalKnockback = std::clamp(
         (targetAirborne ? 0.58f : 0.78f)
             + (sprintReset ? 0.13f : 0.0f)
@@ -274,7 +370,8 @@ KnockbackResult CalculateKnockback(const Player& attacker, const Player& target,
         },
         sprintReset,
         combo,
-        targetAirborne
+        targetAirborne,
+        weaponSpecial
     };
 }
 }
@@ -306,7 +403,7 @@ float CombatSystem::AttackRange(WeaponType weapon, int swordLevel)
     case WeaponType::Axe:
         return base - 0.18f;
     case WeaponType::Spear:
-        return base + 0.48f;
+        return base + 0.95f;
     case WeaponType::Sword:
         break;
     }
@@ -319,7 +416,7 @@ float CombatSystem::AttackCooldown(WeaponType weapon, int swordLevel)
     switch (weapon)
     {
     case WeaponType::Axe:
-        return sword + 0.08f;
+        return sword + 0.12f;
     case WeaponType::Spear:
         return sword + 0.03f;
     case WeaponType::Sword:
@@ -359,16 +456,13 @@ int CombatSystem::BaseDamage(WeaponType weapon, int swordLevel)
 
 int CombatSystem::DamageBeforeShield(const Player& attacker, const Player& target, WeaponType weapon, HitZone hitZone, float chargeMultiplier)
 {
-    const int armorReduction = target.GetInventory().GetArmorLevel() * (weapon == WeaponType::Axe ? 3 : 5);
-    const float zoneMultiplier = hitZone == HitZone::Head ? 1.35f : 1.0f;
-    const int rawDamage = static_cast<int>(static_cast<float>(BaseDamage(weapon, attacker.GetInventory().GetSwordLevel())) * zoneMultiplier * chargeMultiplier + 0.5f);
-    return std::max(6, rawDamage - armorReduction);
+    return DamageBeforeShieldAtDistance(attacker, target, weapon, hitZone, chargeMultiplier, 0.0f, false);
 }
 
 int CombatSystem::FinalDamageAgainstTarget(const Player& attacker, const Player& target, WeaponType weapon, HitZone hitZone, float chargeMultiplier)
 {
     const int damageBeforeShield = DamageBeforeShield(attacker, target, weapon, hitZone, chargeMultiplier);
-    return target.HasShield() ? std::max(1, damageBeforeShield / 2) : damageBeforeShield;
+    return FinalDamageFromPreShield(damageBeforeShield, target, weapon);
 }
 
 float CombatSystem::AttackRangeForSword(int swordLevel)
@@ -422,9 +516,11 @@ std::optional<CombatTargetInfo> CombatSystem::FindMeleeTarget(const Player& atta
             continue;
         }
 
-        const int damage = FinalDamageAgainstTarget(attacker, target, weapon, hit->hitZone, chargeMultiplier);
+        const bool predictedHeavyAxe = weapon == WeaponType::Axe && attacker.IsOnGround();
+        const int damageBeforeShield = DamageBeforeShieldAtDistance(attacker, target, weapon, hit->hitZone, chargeMultiplier, hit->rayDistance, predictedHeavyAxe);
+        const int damage = FinalDamageFromPreShield(damageBeforeShield, target, weapon);
         const bool predictedSprintReset = attacker.HasSprintReset();
-        const KnockbackResult knockback = CalculateKnockback(attacker, target, aimDirection, weapon, chargeMultiplier, nullptr, predictedSprintReset);
+        const KnockbackResult knockback = CalculateKnockback(attacker, target, aimDirection, weapon, chargeMultiplier, nullptr, predictedSprintReset, hit->rayDistance);
         bestTarget = CombatTargetInfo {
             target.GetId(),
             target.GetTeamId(),
@@ -483,9 +579,6 @@ bool CombatSystem::Attack(Player& attacker, std::vector<Player>& players, Vector
         return false;
     }
 
-    const HitZone hitZone = bestHit.hitZone;
-    const int damageBeforeShield = CombatSystem::DamageBeforeShield(attacker, *bestTarget, weapon, hitZone, chargeMultiplier);
-    const int finalDamage = CombatSystem::FinalDamageAgainstTarget(attacker, *bestTarget, weapon, hitZone, chargeMultiplier);
     AttackOptions context {};
     if (options != nullptr)
     {
@@ -498,12 +591,48 @@ bool CombatSystem::Attack(Player& attacker, std::vector<Player>& players, Vector
         context.attackerVelocity = attacker.GetVelocity();
     }
 
+    const HitZone hitZone = bestHit.hitZone;
+    const bool heavyAxe = weapon == WeaponType::Axe && !context.attackerAirborne && context.attackerVelocity.y <= 0.2f;
+    const int damageBeforeShield = DamageBeforeShieldAtDistance(attacker, *bestTarget, weapon, hitZone, chargeMultiplier, bestHit.rayDistance, heavyAxe);
+    const int finalDamage = FinalDamageFromPreShield(damageBeforeShield, *bestTarget, weapon);
     const bool sprintReset = context.sprintReset || attacker.ConsumeSprintReset();
     context.sprintReset = sprintReset;
-    const KnockbackResult knockback = CalculateKnockback(attacker, *bestTarget, aimDirection, weapon, chargeMultiplier, &context, sprintReset);
-    bestTarget->Damage(damageBeforeShield);
+    const KnockbackResult knockback = CalculateKnockback(attacker, *bestTarget, aimDirection, weapon, chargeMultiplier, &context, sprintReset, bestHit.rayDistance);
+    bestTarget->Damage(DamageInputForPlayerDamage(damageBeforeShield, *bestTarget, weapon));
     bestTarget->ActivateHitInvulnerability(kHitInvulnerabilitySeconds);
     bestTarget->ApplyKnockback(knockback.impulse);
+
+    int cleaveHits = 0;
+    if (weapon == WeaponType::Axe && heavyAxe)
+    {
+        const Vector3 hitDirection = FlattenAim(aimDirection, Direction(attacker.GetPosition(), bestTarget->GetPosition()));
+        for (Player& cleaveTarget : players)
+        {
+            if (cleaveTarget.GetId() == bestTarget->GetId()
+                || !IsValidMeleeTarget(attacker, cleaveTarget)
+                || DistanceSquared(cleaveTarget.GetPosition(), bestTarget->GetPosition()) > 2.25f)
+            {
+                continue;
+            }
+
+            const Vector3 toCleave = Direction(attacker.GetPosition(), cleaveTarget.GetPosition());
+            if (Dot2D(hitDirection, toCleave) < 0.45f)
+            {
+                continue;
+            }
+
+            const int cleaveDamage = std::max(5, damageBeforeShield / 2);
+            cleaveTarget.Damage(cleaveDamage);
+            cleaveTarget.ActivateHitInvulnerability(kHitInvulnerabilitySeconds * 0.75f);
+            cleaveTarget.ApplyKnockback(Vector3 { hitDirection.x * 3.1f, 0.72f, hitDirection.z * 3.1f });
+            ++cleaveHits;
+            if (cleaveHits >= 2)
+            {
+                break;
+            }
+        }
+    }
+
     attacker.ResetAttackCooldown(CombatSystem::AttackCooldown(weapon, attacker.GetInventory().GetSwordLevel()) + (chargeMultiplier > 1.05f ? 0.14f : 0.0f));
 
     std::ostringstream stream;
@@ -513,6 +642,18 @@ bool CombatSystem::Attack(Player& attacker, std::vector<Player>& players, Vector
     if (knockback.combo)
     {
         stream << " Combo.";
+    }
+    if (weapon == WeaponType::Spear && knockback.weaponSpecial)
+    {
+        stream << " Reach.";
+    }
+    if (weapon == WeaponType::Axe && heavyAxe)
+    {
+        stream << " Heavy.";
+        if (cleaveHits > 0)
+        {
+            stream << " Cleave x" << cleaveHits << ".";
+        }
     }
     else if (knockback.sprintReset)
     {

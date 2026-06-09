@@ -47,8 +47,11 @@ struct BotMemory
     float stateTimer = 0.0f;
     float intentTimer = 0.0f;
     float intentLockTimer = 0.0f;
+    float roleTimer = 0.0f;
+    float roleLockTimer = 0.0f;
     float intentScore = 0.0f;
     std::string intentReason;
+    std::string roleReason;
     GridPos breakTarget {};
     bool hasBreakTarget = false;
     float breakProgress = 0.0f;

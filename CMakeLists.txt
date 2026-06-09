@@ -39,6 +39,7 @@ add_executable(DaiBed
     src/Block.cpp
     src/CombatSystem.cpp
     src/Core.cpp
+    src/CrashLogger.cpp
     src/Game.cpp
     src/GameBotAI.cpp
     src/GameUI.cpp

@@ -66,6 +66,8 @@ public:
     bool Initialize();
     void Shutdown();
     bool ShouldClose() const;
+    bool RunAutomatchBatch(int runs, int ticksPerFrame, int maxMinutes);
+    void SetSelectedBiome(ArenaBiome biome);
 
     void HandleInput();
     void Update(float dt);
@@ -74,11 +76,22 @@ public:
 private:
     void SetupMatch();
     void SetupGenerators();
+    void AddClassicArenaLayout();
+    void AddFrozenRingLayout();
+    void AddMoltenLayersLayout();
+    void AddOrbitalShardsLayout();
+    void AddBrokenCitadelLayout();
     void AddVerticalArenaFeatures();
+    void AddRuinsBiomeFeatures();
     void StartSelectedMatch();
     void TriggerCoreCollapse();
     void ApplyBotLoadout(Player& bot) const;
     float TerrainSpeedMultiplier(const Player& player) const;
+    float BiomeGravityMultiplier() const;
+    float BiomeJumpMultiplier() const;
+    float BiomeGroundControlMultiplier(const Player& player) const;
+    float BiomeAirControlMultiplier() const;
+    float BiomeKnockbackMultiplier() const;
     void ApplyStandingBlockEffects(Player& player, bool localPlayer);
     void DropPlayerResources(Player& player);
     void UseUtilityInputs(Player& player);
@@ -107,11 +120,20 @@ private:
     void RenderSpectatorOverlay() const;
     void RenderCompass(const Player& localPlayer) const;
     void RenderBotDebug() const;
+    void RenderAutomatchOverlay() const;
     bool TryBotRepairCoreDefense(Player& bot, Team& team, float dt);
     void UpdateCamera(float dt);
     void UpdateSpectator(float dt);
     void UpdateLocalPlayer(float dt);
     void UpdateBots(float dt);
+    void UpdateSingleBot(Player& bot, Team& team, float dt);
+    void UpdateMatchSimulation(float dt);
+    void StartAutomatch();
+    void ConfigureAutomatchMatch();
+    void UpdateAutomatch(float dt);
+    void SampleAutomatchBots();
+    void FinishAutomatchRun(bool timeout);
+    void WriteAutomatchStatsJson() const;
     void UpdateGenerators(float dt);
     void UpdatePickups(float dt);
     void UpdateDroppedItems(float dt);
@@ -152,8 +174,8 @@ private:
     Vector3 ChooseBotPathWaypoint(Player& bot, Vector3 finalTarget, float dt);
     bool TryBotBridgeBlock(Player& bot, Vector3 target);
     bool TryBotBreakCoreDefense(Player& bot, EnergyCore& core, float dt);
-    std::optional<GridPos> FindBotBlockingBlock(const Player& bot, Vector3 wish) const;
-    bool TryBotBreakBlockingBlock(Player& bot, Vector3 wish, float dt);
+    std::optional<GridPos> FindBotBlockingBlock(const Player& bot, Vector3 wish, Vector3 target) const;
+    bool TryBotBreakBlockingBlock(Player& bot, Vector3 wish, Vector3 target, float dt);
     void BotTryShop(Player& bot, Team& team);
     EnergyCore* FindNearestEnemyCore(const Player& player);
     const ResourcePickup* FindBestPickupForBot(const Player& bot) const;
@@ -174,6 +196,9 @@ private:
     int MaxBotCountForSelection() const;
     std::string TeamSizeName() const;
     std::string BotCountName() const;
+    std::string AutomatchRunCountName() const;
+    std::string AutomatchSpeedName() const;
+    std::string AutomatchDurationName() const;
     int GetForgeBonusForTeam(int teamId) const;
     bool RepairTeamCore(Player& player, Team& team, std::string& message);
 
@@ -211,6 +236,93 @@ private:
         int targetId = -1;
         int attackerId = -1;
         float timer = 0.0f;
+    };
+    struct AutomatchBotStats
+    {
+        std::string name;
+        int teamId = -1;
+        int roleSamples[4] {};
+        int intentSamples[10] {};
+        int samples = 0;
+        int roleChanges = 0;
+        int intentChanges = 0;
+        int stuckSamples = 0;
+        int voidFalls = 0;
+        int kills = 0;
+        int deaths = 0;
+        int finalDeaths = 0;
+        int coreDamage = 0;
+        int lastRole = -1;
+        int lastIntent = -1;
+        bool hasMovementSample = false;
+        Vector3 lastPosition {};
+        Vector3 minPosition {};
+        Vector3 maxPosition {};
+        float totalDistance = 0.0f;
+        float maxDistanceFromBase = 0.0f;
+        float maxDistanceFromCenter = 0.0f;
+        float averageDistanceFromBase = 0.0f;
+        float averageDistanceFromCenter = 0.0f;
+    };
+    struct AutomatchTeamStats
+    {
+        int kills = 0;
+        int deaths = 0;
+        int finalDeaths = 0;
+        int coreDamage = 0;
+        int roleSamples[4] {};
+        int intentSamples[10] {};
+        int samples = 0;
+        int resourcesHeld[3] {};
+        int alivePlayers = 0;
+        int eliminatedPlayers = 0;
+        bool coreAlive = false;
+        int coreHealth = 0;
+        int coreMaxHealth = 0;
+    };
+    struct AutomatchTimelineEvent
+    {
+        float time = 0.0f;
+        std::string type;
+        int teamId = -1;
+        int actorId = -1;
+        int targetId = -1;
+        int value = 0;
+        std::string text;
+    };
+    struct AutomatchRunStats
+    {
+        int winnerTeamId = -1;
+        float duration = 0.0f;
+        bool timeout = false;
+        int kills = 0;
+        int coreDamage = 0;
+        int coreDestroyedCount = 0;
+        int finalDeathCount = 0;
+        float firstCoreDamageTime = -1.0f;
+        std::string finishReason;
+        AutomatchTeamStats teamStats[4] {};
+        std::vector<AutomatchTimelineEvent> timeline;
+    };
+    struct AutomatchState
+    {
+        bool active = false;
+        int targetRuns = 5;
+        int completedRuns = 0;
+        int timeouts = 0;
+        int teamWins[4] {};
+        float maxMatchSeconds = 720.0f;
+        float totalDuration = 0.0f;
+        float sampleTimer = 0.0f;
+        int totalKills = 0;
+        int totalCoreDamage = 0;
+        int totalFinalDeaths = 0;
+        int totalCoreDestroyed = 0;
+        float currentFirstCoreDamageTime = -1.0f;
+        AutomatchTeamStats currentTeamStats[4] {};
+        std::vector<AutomatchTimelineEvent> currentTimeline;
+        std::vector<AutomatchBotStats> botStats;
+        std::vector<AutomatchRunStats> runs;
     };
     PlayerMatchScore& GetPlayerScore(int playerId);
     const PlayerMatchScore* FindPlayerScore(int playerId) const;
@@ -265,6 +377,7 @@ private:
     std::vector<PlayerMatchScore> playerScores_;
     std::vector<DamageCredit> damageCredits_;
     std::vector<BotMemory> botMemories_;
+    AutomatchState automatch_;
     std::array<Inventory, 4> teamChests_;
     Inventory personalChest_;
     MatchStats stats_;
@@ -278,6 +391,9 @@ private:
     int selectedTeamId_ = 0;
     int selectedTeamSize_ = 1;
     int selectedBotCount_ = 3;
+    int automatchRunTarget_ = 5;
+    int automatchTicksPerFrame_ = 4;
+    int automatchMaxMinutes_ = 12;
     int menuIndex_ = 0;
     int settingsIndex_ = 0;
     int controlsIndex_ = 0;

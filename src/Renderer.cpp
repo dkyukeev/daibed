@@ -286,6 +286,91 @@ Texture2D LoadProceduralTexture(Image image)
     return texture;
 }
 
+std::string FindAssetFile(const std::string& relativePath)
+{
+    const std::string candidates[] {
+        relativePath,
+        "../" + relativePath,
+        "../../" + relativePath
+    };
+    for (const std::string& candidate : candidates)
+    {
+        if (FileExists(candidate.c_str()))
+        {
+            return candidate;
+        }
+    }
+    return {};
+}
+
+Texture2D LoadCustomizableTexture(const char* assetName, Image fallback)
+{
+    const std::string path = FindAssetFile(std::string("assets/items/") + assetName + ".png");
+    if (!path.empty())
+    {
+        Texture2D texture = LoadTexture(path.c_str());
+        UnloadImage(fallback);
+        SetTextureFilter(texture, TEXTURE_FILTER_POINT);
+        return texture;
+    }
+    return LoadProceduralTexture(fallback);
+}
+
+void DrawDepthTestedBillboard(Camera3D camera, Texture2D texture, Vector3 position, float size, Color tint)
+{
+    rlDrawRenderBatchActive();
+    rlEnableDepthTest();
+    rlDisableDepthMask();
+    DrawBillboard(camera, texture, position, size, tint);
+    rlDrawRenderBatchActive();
+    rlEnableDepthMask();
+}
+
+bool RayIntersectsAabb(Vector3 origin, Vector3 direction, float maxDistance, Vector3 center, Vector3 halfExtents)
+{
+    float tMin = 0.0f;
+    float tMax = maxDistance;
+    const float originValues[3] { origin.x, origin.y, origin.z };
+    const float directionValues[3] { direction.x, direction.y, direction.z };
+    const float minValues[3] {
+        center.x - halfExtents.x,
+        center.y - halfExtents.y,
+        center.z - halfExtents.z
+    };
+    const float maxValues[3] {
+        center.x + halfExtents.x,
+        center.y + halfExtents.y,
+        center.z + halfExtents.z
+    };
+
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        if (std::fabs(directionValues[axis]) < 0.0001f)
+        {
+            if (originValues[axis] < minValues[axis] || originValues[axis] > maxValues[axis])
+            {
+                return false;
+            }
+            continue;
+        }
+
+        float t1 = (minValues[axis] - originValues[axis]) / directionValues[axis];
+        float t2 = (maxValues[axis] - originValues[axis]) / directionValues[axis];
+        if (t1 > t2)
+        {
+            std::swap(t1, t2);
+        }
+        tMin = std::max(tMin, t1);
+        tMax = std::min(tMax, t2);
+        if (tMin > tMax)
+        {
+            return false;
+        }
+    }
+
+    return tMin > 0.05f && tMin < maxDistance - 0.12f;
+}
+
 void DrawTexturedCube(Texture2D texture, Vector3 position, float width, float height, float length, Color tint)
 {
     const float x = position.x;
@@ -470,6 +555,67 @@ bool IsAtMax(const ShopItem& item, const Inventory& inventory, const Team* team)
     return false;
 }
 
+ItemType ShopIconItem(int choice)
+{
+    switch (choice)
+    {
+    case 1:
+        return ItemType::WoodBlock;
+    case 2:
+        return ItemType::LightBlock;
+    case 3:
+        return ItemType::StoneBlock;
+    case 4:
+        return ItemType::ObsidianBlock;
+    case 5:
+        return ItemType::EnergyGlassBlock;
+    case 6:
+        return ItemType::SpringBlock;
+    case 7:
+        return ItemType::StickyBlock;
+    case 8:
+        return ItemType::ExplosiveBlock;
+    case 101:
+        return ItemType::Sword;
+    case 102:
+        return ItemType::Pickaxe;
+    case 103:
+        return ItemType::GoldResource;
+    case 104:
+        return ItemType::EnergyArrow;
+    case 105:
+        return ItemType::Fireball;
+    case 106:
+        return ItemType::Axe;
+    case 107:
+        return ItemType::Spear;
+    case 201:
+        return ItemType::DashPearl;
+    case 202:
+        return ItemType::CrystalResource;
+    case 203:
+        return ItemType::MedKit;
+    case 204:
+        return ItemType::HomeTeleport;
+    case 205:
+        return ItemType::DashPearl;
+    case 206:
+        return ItemType::Molotov;
+    case 207:
+        return ItemType::AlarmTrap;
+    case 301:
+        return ItemType::IronResource;
+    case 302:
+        return ItemType::MedKit;
+    case 303:
+    case 304:
+        return ItemType::CrystalResource;
+    default:
+        break;
+    }
+    return ItemType::None;
+}
+
 float Dot(Vector3 a, Vector3 b)
 {
     return a.x * b.x + a.y * b.y + a.z * b.z;
@@ -631,7 +777,7 @@ void DrawHeldItemModel(const ItemStack& stack, Vector3 hand, Vector3 forward, Ve
             45.0f,
             CAMERA_PERSPECTIVE
         };
-        DrawBillboard(itemCamera, *itemTexture, center, 0.46f * scale, WHITE);
+        DrawDepthTestedBillboard(itemCamera, *itemTexture, center, 0.46f * scale, WHITE);
         return;
     }
 
@@ -716,7 +862,7 @@ void DrawHeldItemModel(const ItemStack& stack, Vector3 hand, Vector3 forward, Ve
         }
         else if (itemTexture != nullptr)
         {
-            DrawBillboard(Camera3D { Add(center, Scale(forward, -2.0f)), center, up, 45.0f, CAMERA_PERSPECTIVE }, *itemTexture, center, 0.34f * scale, WHITE);
+            DrawDepthTestedBillboard(Camera3D { Add(center, Scale(forward, -2.0f)), center, up, 45.0f, CAMERA_PERSPECTIVE }, *itemTexture, center, 0.34f * scale, WHITE);
         }
         else
         {
@@ -735,34 +881,34 @@ bool Renderer::Initialize()
         return true;
     }
 
-    grassTexture_ = LoadProceduralTexture(MakeGrassImage());
-    dirtTexture_ = LoadProceduralTexture(MakeTextureImage(Color { 112, 78, 52, 255 }, Color { 86, 58, 38, 255 }, 5));
-    leafTexture_ = LoadProceduralTexture(MakeTextureImage(Color { 64, 132, 62, 245 }, Color { 112, 178, 86, 255 }, 6));
-    woodTexture_ = LoadProceduralTexture(MakeWoodImage());
-    woolTexture_ = LoadProceduralTexture(MakeWoolImage());
-    stoneTexture_ = LoadProceduralTexture(MakeTextureImage(Color { 132, 138, 148, 255 }, Color { 88, 94, 108, 255 }, 7));
-    obsidianTexture_ = LoadProceduralTexture(MakeTextureImage(Color { 38, 28, 54, 255 }, Color { 90, 52, 132, 255 }, 8));
-    glassTexture_ = LoadProceduralTexture(MakeTextureImage(Color { 112, 232, 255, 150 }, Color { 220, 252, 255, 210 }, 9));
-    springTexture_ = LoadProceduralTexture(MakeTextureImage(Color { 92, 196, 124, 255 }, Color { 255, 235, 142, 255 }, 10));
-    stickyTexture_ = LoadProceduralTexture(MakeTextureImage(Color { 92, 184, 118, 255 }, Color { 40, 112, 72, 255 }, 11));
-    tntTexture_ = LoadProceduralTexture(MakeTntImage());
-    spikeTexture_ = LoadProceduralTexture(MakeTextureImage(Color { 148, 148, 158, 255 }, Color { 236, 236, 244, 255 }, 12));
-    lavaTexture_ = LoadProceduralTexture(MakeTextureImage(Color { 230, 70, 28, 255 }, Color { 255, 210, 66, 255 }, 13));
-    iceTexture_ = LoadProceduralTexture(MakeTextureImage(Color { 150, 225, 255, 190 }, Color { 230, 250, 255, 230 }, 14));
-    swordIcon_ = LoadProceduralTexture(MakeSwordIcon());
-    axeIcon_ = LoadProceduralTexture(MakeAxeIcon());
-    spearIcon_ = LoadProceduralTexture(MakeSpearIcon());
-    pickaxeIcon_ = LoadProceduralTexture(MakePickaxeIcon());
-    arrowIcon_ = LoadProceduralTexture(MakeArrowIcon());
-    fireballIcon_ = LoadProceduralTexture(MakeFireballIcon());
-    medKitIcon_ = LoadProceduralTexture(MakeMedKitIcon());
-    homeIcon_ = LoadProceduralTexture(MakeHomeIcon());
-    dashIcon_ = LoadProceduralTexture(MakeDashIcon());
-    molotovIcon_ = LoadProceduralTexture(MakeMolotovIcon());
-    alarmIcon_ = LoadProceduralTexture(MakeAlarmIcon());
-    ironIcon_ = LoadProceduralTexture(MakeResourceIcon(Color { 188, 198, 210, 255 }, WHITE));
-    goldIcon_ = LoadProceduralTexture(MakeResourceIcon(Color { 246, 196, 74, 255 }, Color { 255, 246, 180, 255 }));
-    crystalIcon_ = LoadProceduralTexture(MakeResourceIcon(Color { 112, 232, 255, 255 }, Color { 225, 252, 255, 255 }));
+    grassTexture_ = LoadCustomizableTexture("grass_block", MakeGrassImage());
+    dirtTexture_ = LoadCustomizableTexture("dirt_block", MakeTextureImage(Color { 112, 78, 52, 255 }, Color { 86, 58, 38, 255 }, 5));
+    leafTexture_ = LoadCustomizableTexture("leaf_block", MakeTextureImage(Color { 64, 132, 62, 245 }, Color { 112, 178, 86, 255 }, 6));
+    woodTexture_ = LoadCustomizableTexture("wood_block", MakeWoodImage());
+    woolTexture_ = LoadCustomizableTexture("wool_block", MakeWoolImage());
+    stoneTexture_ = LoadCustomizableTexture("stone_block", MakeTextureImage(Color { 132, 138, 148, 255 }, Color { 88, 94, 108, 255 }, 7));
+    obsidianTexture_ = LoadCustomizableTexture("obsidian_block", MakeTextureImage(Color { 38, 28, 54, 255 }, Color { 90, 52, 132, 255 }, 8));
+    glassTexture_ = LoadCustomizableTexture("energy_glass_block", MakeTextureImage(Color { 112, 232, 255, 150 }, Color { 220, 252, 255, 210 }, 9));
+    springTexture_ = LoadCustomizableTexture("spring_block", MakeTextureImage(Color { 92, 196, 124, 255 }, Color { 255, 235, 142, 255 }, 10));
+    stickyTexture_ = LoadCustomizableTexture("sticky_block", MakeTextureImage(Color { 92, 184, 118, 255 }, Color { 40, 112, 72, 255 }, 11));
+    tntTexture_ = LoadCustomizableTexture("explosive_block", MakeTntImage());
+    spikeTexture_ = LoadCustomizableTexture("spike_block", MakeTextureImage(Color { 148, 148, 158, 255 }, Color { 236, 236, 244, 255 }, 12));
+    lavaTexture_ = LoadCustomizableTexture("lava_block", MakeTextureImage(Color { 230, 70, 28, 255 }, Color { 255, 210, 66, 255 }, 13));
+    iceTexture_ = LoadCustomizableTexture("ice_block", MakeTextureImage(Color { 150, 225, 255, 190 }, Color { 230, 250, 255, 230 }, 14));
+    swordIcon_ = LoadCustomizableTexture("sword", MakeSwordIcon());
+    axeIcon_ = LoadCustomizableTexture("axe", MakeAxeIcon());
+    spearIcon_ = LoadCustomizableTexture("spear", MakeSpearIcon());
+    pickaxeIcon_ = LoadCustomizableTexture("pickaxe", MakePickaxeIcon());
+    arrowIcon_ = LoadCustomizableTexture("energy_arrow", MakeArrowIcon());
+    fireballIcon_ = LoadCustomizableTexture("fireball", MakeFireballIcon());
+    medKitIcon_ = LoadCustomizableTexture("med_kit", MakeMedKitIcon());
+    homeIcon_ = LoadCustomizableTexture("home_teleport", MakeHomeIcon());
+    dashIcon_ = LoadCustomizableTexture("dash_pearl", MakeDashIcon());
+    molotovIcon_ = LoadCustomizableTexture("molotov", MakeMolotovIcon());
+    alarmIcon_ = LoadCustomizableTexture("alarm_trap", MakeAlarmIcon());
+    ironIcon_ = LoadCustomizableTexture("iron_resource", MakeResourceIcon(Color { 188, 198, 210, 255 }, WHITE));
+    goldIcon_ = LoadCustomizableTexture("gold_resource", MakeResourceIcon(Color { 246, 196, 74, 255 }, Color { 255, 246, 180, 255 }));
+    crystalIcon_ = LoadCustomizableTexture("crystal_resource", MakeResourceIcon(Color { 112, 232, 255, 255 }, Color { 225, 252, 255, 255 }));
 
     texturesReady_ = true;
     return true;
@@ -908,10 +1054,10 @@ void Renderer::RenderScene(
         const Vector3 pos = world.GridToWorld(core.GetBlockPosition());
         const float healthFraction = static_cast<float>(core.GetHealth()) / static_cast<float>(std::max(1, core.GetMaxHealth()));
         const float stageScale = 0.72f + healthFraction * 0.28f;
-        const Vector3 coreCenter { pos.x, pos.y + 0.15f, pos.z };
-        DrawCube(coreCenter, 1.0f * stageScale, 1.3f * stageScale, 1.0f * stageScale, Fade(teamColor, 0.70f + healthFraction * 0.22f));
-        DrawSphere(Vector3 { pos.x, pos.y + 0.95f * stageScale, pos.z }, 0.28f + 0.10f * healthFraction, Color { 178, 245, 255, 255 });
-        DrawCubeWires(coreCenter, 1.05f * stageScale, 1.35f * stageScale, 1.05f * stageScale, WHITE);
+        const Vector3 coreCenter { pos.x, pos.y - 0.06f, pos.z };
+        DrawCube(coreCenter, 0.92f * stageScale, 0.78f * stageScale, 0.92f * stageScale, Fade(teamColor, 0.70f + healthFraction * 0.22f));
+        DrawSphere(Vector3 { pos.x, pos.y + 0.40f * stageScale, pos.z }, 0.18f + 0.08f * healthFraction, Color { 178, 245, 255, 255 });
+        DrawCubeWires(coreCenter, 0.96f * stageScale, 0.82f * stageScale, 0.96f * stageScale, WHITE);
         const int cracks = healthFraction < 0.70f ? (healthFraction < 0.35f ? 6 : 3) : 0;
         for (int i = 0; i < cracks; ++i)
         {
@@ -923,20 +1069,6 @@ void Renderer::RenderScene(
                 Color { 20, 24, 32, 230 });
         }
     }
-
-    std::sort(
-        transparentBlocks.begin(),
-        transparentBlocks.end(),
-        [](const TransparentBlockDraw& a, const TransparentBlockDraw& b)
-        {
-            return a.distance > b.distance;
-        });
-    rlDisableDepthMask();
-    for (const TransparentBlockDraw& entry : transparentBlocks)
-    {
-        drawWorldBlock(entry.pos, entry.block);
-    }
-    rlEnableDepthMask();
 
     for (const Player& player : players)
     {
@@ -1037,9 +1169,7 @@ void Renderer::RenderScene(
         const Vector3 pos { pickup.position.x, pickup.position.y + bob, pickup.position.z };
         if (const Texture2D* texture = GetItemTexture(ItemFromResource(pickup.type)))
         {
-            rlDisableDepthMask();
-            DrawBillboard(camera, *texture, pos, 0.46f, WHITE);
-            rlEnableDepthMask();
+            DrawDepthTestedBillboard(camera, *texture, pos, 0.46f, WHITE);
         }
         else
         {
@@ -1068,9 +1198,7 @@ void Renderer::RenderScene(
         }
         if (const Texture2D* texture = GetItemTexture(dropped.stack.type))
         {
-            rlDisableDepthMask();
-            DrawBillboard(camera, *texture, pos, 0.46f, WHITE);
-            rlEnableDepthMask();
+            DrawDepthTestedBillboard(camera, *texture, pos, 0.46f, WHITE);
         }
         else
         {
@@ -1093,6 +1221,25 @@ void Renderer::RenderScene(
         DrawSphereWires(effect.position, radius * 1.08f, 8, 10, Fade(WHITE, t));
     }
 
+    std::sort(
+        transparentBlocks.begin(),
+        transparentBlocks.end(),
+        [](const TransparentBlockDraw& a, const TransparentBlockDraw& b)
+        {
+            return a.distance > b.distance;
+        });
+    rlDrawRenderBatchActive();
+    rlEnableDepthTest();
+    rlDisableDepthMask();
+    for (const TransparentBlockDraw& entry : transparentBlocks)
+    {
+        drawWorldBlock(entry.pos, entry.block);
+    }
+    rlDrawRenderBatchActive();
+    rlEnableDepthMask();
+
+    rlDrawRenderBatchActive();
+    rlEnableDepthTest();
     DrawDistantFog(skyColor);
 
     EndMode3D();
@@ -1126,6 +1273,44 @@ void Renderer::RenderScene(
             player.GetPosition().z
         };
         if (!IsInFrontOfCamera(labelPoint, camera))
+        {
+            continue;
+        }
+        const Vector3 toLabel {
+            labelPoint.x - camera.position.x,
+            labelPoint.y - camera.position.y,
+            labelPoint.z - camera.position.z
+        };
+        const float labelDistance = std::sqrt(toLabel.x * toLabel.x + toLabel.y * toLabel.y + toLabel.z * toLabel.z);
+        const Vector3 labelDirection = Normalize(toLabel);
+        const std::optional<RaycastHit> terrainOccluder = world.Raycast(camera.position, labelDirection, std::max(0.0f, labelDistance - 0.18f));
+        if (terrainOccluder.has_value())
+        {
+            continue;
+        }
+
+        bool occludedByPlayer = false;
+        for (const Player& occluder : players)
+        {
+            if (occluder.GetId() == player.GetId()
+                || !occluder.IsAlive()
+                || (hideLocalPlayer && occluder.IsLocal()))
+            {
+                continue;
+            }
+
+            const Vector3 occluderCenter {
+                occluder.GetPosition().x,
+                occluder.GetPosition().y + 0.18f,
+                occluder.GetPosition().z
+            };
+            if (RayIntersectsAabb(camera.position, labelDirection, labelDistance, occluderCenter, Vector3 { 0.42f, 1.02f, 0.42f }))
+            {
+                occludedByPlayer = true;
+                break;
+            }
+        }
+        if (occludedByPlayer)
         {
             continue;
         }
@@ -1211,10 +1396,25 @@ void Renderer::RenderUI(
         DrawRectangle(panelX, panelY, panelWidth, panelHeight, Fade(Color { 8, 10, 14, 255 }, 0.88f));
         DrawRectangleLines(panelX, panelY, panelWidth, panelHeight, Fade(WHITE, 0.22f));
         DrawText("Team Shop", panelX + 24, panelY + 20, 28, WHITE);
-        DrawText((std::string("Category: < ") + shop.GetCategoryName(shopCategoryIndex) + " >").c_str(), panelX + 24, panelY + 54, 18, Color { 255, 235, 142, 255 });
-        DrawText(shop.GetMenuText().c_str(), panelX + 330, panelY + 56, 15, Fade(WHITE, 0.68f));
+        const int tabWidth = 118;
+        const int tabHeight = 26;
+        const int tabY = panelY + 52;
+        for (int category = 0; category < shop.GetCategoryCount(); ++category)
+        {
+            const bool active = category == shopCategoryIndex;
+            const Rectangle tab {
+                static_cast<float>(panelX + 24 + category * (tabWidth + 8)),
+                static_cast<float>(tabY),
+                static_cast<float>(tabWidth),
+                static_cast<float>(tabHeight)
+            };
+            DrawRectangleRec(tab, Fade(active ? Color { 68, 82, 96, 255 } : Color { 28, 32, 40, 255 }, 0.90f));
+            DrawRectangleLinesEx(tab, 1.0f, Fade(active ? Color { 255, 235, 142, 255 } : WHITE, active ? 0.80f : 0.22f));
+            DrawText(shop.GetCategoryName(category), static_cast<int>(tab.x) + 12, static_cast<int>(tab.y) + 6, 15, active ? Color { 255, 235, 142, 255 } : Fade(WHITE, 0.72f));
+        }
+        DrawText(shop.GetMenuText().c_str(), panelX + 536, panelY + 58, 14, Fade(WHITE, 0.62f));
 
-        int rowY = panelY + 86;
+        int rowY = panelY + 104;
         const std::vector<ShopItem> visibleItems = shop.GetItemsForCategory(shopCategoryIndex);
         for (int row = 0; row < static_cast<int>(visibleItems.size()); ++row)
         {
@@ -1222,13 +1422,35 @@ void Renderer::RenderUI(
             const bool maxed = IsAtMax(item, inventory, playerTeam);
             const bool affordable = shop.CanAfford(inventory, item) && !maxed;
             const Color rowColor = affordable ? WHITE : Fade(WHITE, 0.38f);
-            DrawRectangle(panelX + 22, rowY - 6, panelWidth - 44, 28, Fade(affordable ? Color { 42, 52, 62, 255 } : Color { 28, 30, 36, 255 }, 0.72f));
-            DrawText((std::to_string(row + 1) + "  " + item.category).c_str(), panelX + 34, rowY, 17, rowColor);
-            DrawText(item.name.c_str(), panelX + 138, rowY, 17, rowColor);
-            DrawText(item.description.c_str(), panelX + 286, rowY, 16, Fade(rowColor, 0.88f));
+            DrawRectangle(panelX + 22, rowY - 6, panelWidth - 44, 30, Fade(affordable ? Color { 42, 52, 62, 255 } : Color { 28, 30, 36, 255 }, 0.72f));
+            const ItemType iconItem = ShopIconItem(item.choice);
+            const Rectangle iconRect {
+                static_cast<float>(panelX + 34),
+                static_cast<float>(rowY - 3),
+                24.0f,
+                24.0f
+            };
+            DrawRectangleRec(Rectangle { iconRect.x - 3.0f, iconRect.y - 3.0f, iconRect.width + 6.0f, iconRect.height + 6.0f }, Fade(Color { 4, 6, 10, 255 }, 0.42f));
+            if (const Texture2D* texture = GetItemTexture(iconItem))
+            {
+                DrawTexturePro(
+                    *texture,
+                    Rectangle { 0.0f, 0.0f, static_cast<float>(texture->width), static_cast<float>(texture->height) },
+                    iconRect,
+                    Vector2 { 0.0f, 0.0f },
+                    0.0f,
+                    WHITE);
+            }
+            else
+            {
+                DrawCircle(static_cast<int>(iconRect.x + 12.0f), static_cast<int>(iconRect.y + 12.0f), 9.0f, ItemUiColor(iconItem));
+            }
+            DrawText(std::to_string(row + 1).c_str(), panelX + 70, rowY, 17, rowColor);
+            DrawText(item.name.c_str(), panelX + 104, rowY, 17, rowColor);
+            DrawText(item.description.c_str(), panelX + 252, rowY, 16, Fade(rowColor, 0.88f));
             DrawText(LevelText(item, inventory, playerTeam).c_str(), panelX + 548, rowY, 16, Fade(rowColor, 0.78f));
             DrawText(maxed ? "MAX" : CostText(item).c_str(), panelX + 618, rowY, 16, affordable ? Color { 128, 238, 166, 255 } : Color { 255, 130, 130, 255 });
-            rowY += 32;
+            rowY += 34;
         }
     }
 

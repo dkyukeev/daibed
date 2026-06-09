@@ -80,7 +80,7 @@ std::string FormatTenths(float value)
 }
 void Game::HandleMenuInput()
 {
-    constexpr int kMenuRows = 11;
+    constexpr int kMenuRows = 15;
     if (IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_S))
     {
         menuIndex_ = (menuIndex_ + 1) % kMenuRows;
@@ -130,6 +130,18 @@ void Game::HandleMenuInput()
             const int value = (static_cast<int>(arenaBiome_) + delta + 5) % 5;
             arenaBiome_ = static_cast<ArenaBiome>(value);
         }
+        else if (menuIndex_ == 9)
+        {
+            automatchRunTarget_ = std::clamp(automatchRunTarget_ + delta, 1, 50);
+        }
+        else if (menuIndex_ == 10)
+        {
+            automatchTicksPerFrame_ = std::clamp(automatchTicksPerFrame_ + delta, 1, 32);
+        }
+        else if (menuIndex_ == 11)
+        {
+            automatchMaxMinutes_ = std::clamp(automatchMaxMinutes_ + delta, 3, 30);
+        }
         SaveSettings();
     }
 
@@ -141,15 +153,19 @@ void Game::HandleMenuInput()
         }
         else if (menuIndex_ == 8)
         {
+            StartAutomatch();
+        }
+        else if (menuIndex_ == 12)
+        {
             returnScreen_ = GameScreen::MainMenu;
             screen_ = GameScreen::Settings;
         }
-        else if (menuIndex_ == 9)
+        else if (menuIndex_ == 13)
         {
             controlsReturnScreen_ = GameScreen::MainMenu;
             screen_ = GameScreen::Controls;
         }
-        else if (menuIndex_ == 10)
+        else if (menuIndex_ == 14)
         {
             exitRequested_ = true;
         }
@@ -412,6 +428,10 @@ void Game::RenderMainMenu() const
         "Bot difficulty",
         "Arena layout",
         "Biome",
+        "Start automatch",
+        "Automatch runs",
+        "Automatch speed",
+        "Automatch max time",
         "Settings",
         "Controls",
         "Quit"
@@ -426,20 +446,24 @@ void Game::RenderMainMenu() const
         ArenaLayoutName(),
         ArenaBiomeName(),
         "",
+        AutomatchRunCountName(),
+        AutomatchSpeedName(),
+        AutomatchDurationName(),
+        "",
         "",
         ""
     };
 
-    DrawCenteredText("DaiBed", 76, 44, WHITE);
-    DrawCenteredText("Choose match setup", 126, 20, Fade(WHITE, 0.72f));
+    DrawCenteredText("DaiBed", 48, 40, WHITE);
+    DrawCenteredText("Choose match setup", 92, 18, Fade(WHITE, 0.72f));
 
     const int panelWidth = 640;
     const int panelX = GetScreenWidth() / 2 - panelWidth / 2;
-    const int panelY = 146;
-    DrawRectangle(panelX, panelY, panelWidth, 386, Fade(Color { 8, 10, 14, 255 }, 0.82f));
-    DrawRectangleLines(panelX, panelY, panelWidth, 386, Fade(WHITE, 0.20f));
+    const int panelY = 116;
+    DrawRectangle(panelX, panelY, panelWidth, 512, Fade(Color { 8, 10, 14, 255 }, 0.82f));
+    DrawRectangleLines(panelX, panelY, panelWidth, 512, Fade(WHITE, 0.20f));
 
-    for (int i = 0; i < 11; ++i)
+    for (int i = 0; i < 15; ++i)
     {
         const int y = panelY + 22 + i * 32;
         const bool selected = i == menuIndex_;
@@ -452,8 +476,26 @@ void Game::RenderMainMenu() const
         }
     }
 
+    std::string biomeHint = "Arena: neutral rules.";
+    switch (arenaBiome_)
+    {
+    case ArenaBiome::Ice:
+        biomeHint = "Ice: faster routes with slippery ground.";
+        break;
+    case ArenaBiome::Lava:
+        biomeHint = "Lava: low ground burns outside base safety.";
+        break;
+    case ArenaBiome::Space:
+        biomeHint = "Space: low gravity and stronger knockback.";
+        break;
+    case ArenaBiome::Ruins:
+        biomeHint = "Ruins: cracked bridges and relic generators.";
+        break;
+    case ArenaBiome::Arena:
+        break;
+    }
     DrawCenteredText("Arrows/WASD navigate | Left/Right change | Enter select", GetScreenHeight() - 70, 18, Fade(WHITE, 0.62f));
-    DrawCenteredText("Vertical arena adds towers, lower bridges and an upper center.", GetScreenHeight() - 42, 16, Fade(WHITE, 0.48f));
+    DrawCenteredText(biomeHint.c_str(), GetScreenHeight() - 42, 16, Fade(WHITE, 0.48f));
 }
 
 void Game::RenderSettings() const
@@ -938,9 +980,118 @@ void Game::RenderBotDebug() const
 
         const std::string label = std::string(ToString(memory->role)) + " / " + ToString(memory->intent)
             + " " + std::to_string(static_cast<int>(memory->intentScore))
-            + (memory->intentReason.empty() ? "" : " / " + memory->intentReason);
+            + (memory->intentReason.empty() ? "" : " / " + memory->intentReason)
+            + (memory->roleReason.empty() ? "" : " / role: " + memory->roleReason);
         const int width = MeasureText(label.c_str(), 14) + 12;
         DrawRectangle(static_cast<int>(screen.x) - width / 2, static_cast<int>(screen.y) - 4, width, 22, Fade(BLACK, 0.55f));
         DrawText(label.c_str(), static_cast<int>(screen.x) - width / 2 + 6, static_cast<int>(screen.y), 14, Color { 255, 235, 142, 255 });
+    }
+}
+
+void Game::RenderAutomatchOverlay() const
+{
+    if (!automatch_.active && automatch_.completedRuns <= 0)
+    {
+        return;
+    }
+
+    const int width = 520;
+    const int height = 286;
+    const int x = 18;
+    const int y = 92;
+    DrawRectangle(x, y, width, height, Fade(Color { 7, 9, 14, 255 }, 0.84f));
+    DrawRectangleLines(x, y, width, height, Fade(WHITE, 0.24f));
+
+    const std::string title = std::string("Automatch ")
+        + std::to_string(automatch_.completedRuns)
+        + "/"
+        + std::to_string(automatch_.targetRuns)
+        + (automatch_.active ? " running" : " complete");
+    DrawText(title.c_str(), x + 14, y + 12, 20, WHITE);
+
+    const float avgDuration = automatch_.completedRuns > 0
+        ? automatch_.totalDuration / static_cast<float>(automatch_.completedRuns)
+        : matchTime_;
+    const std::string totals = "Wins R/B/G/Y "
+        + std::to_string(automatch_.teamWins[0]) + "/"
+        + std::to_string(automatch_.teamWins[1]) + "/"
+        + std::to_string(automatch_.teamWins[2]) + "/"
+        + std::to_string(automatch_.teamWins[3])
+        + " | timeouts " + std::to_string(automatch_.timeouts);
+    DrawText(totals.c_str(), x + 14, y + 42, 15, Fade(WHITE, 0.74f));
+
+    const std::string flow = "Kills " + std::to_string(automatch_.totalKills)
+        + " | Core dmg " + std::to_string(automatch_.totalCoreDamage)
+        + " | Final " + std::to_string(automatch_.totalFinalDeaths)
+        + " | Cores " + std::to_string(automatch_.totalCoreDestroyed)
+        + " | Avg " + std::to_string(static_cast<int>(avgDuration)) + "s"
+        + " | Speed " + AutomatchSpeedName();
+    DrawText(flow.c_str(), x + 14, y + 64, 15, Fade(WHITE, 0.74f));
+
+    DrawRectangle(x + 12, y + 90, width - 24, 24, Fade(Color { 30, 36, 46, 255 }, 0.72f));
+    DrawText("Bot", x + 22, y + 96, 14, Fade(WHITE, 0.70f));
+    DrawText("Role", x + 190, y + 96, 14, Fade(WHITE, 0.70f));
+    DrawText("Intent", x + 272, y + 96, 14, Fade(WHITE, 0.70f));
+    DrawText("K/D", x + 386, y + 96, 14, Fade(WHITE, 0.70f));
+    DrawText("Core", x + 444, y + 96, 14, Fade(WHITE, 0.70f));
+    DrawText("Swap", x + 488, y + 96, 14, Fade(WHITE, 0.70f));
+
+    std::vector<const AutomatchBotStats*> sorted;
+    sorted.reserve(automatch_.botStats.size());
+    for (const AutomatchBotStats& stats : automatch_.botStats)
+    {
+        sorted.push_back(&stats);
+    }
+    std::sort(
+        sorted.begin(),
+        sorted.end(),
+        [](const AutomatchBotStats* a, const AutomatchBotStats* b)
+        {
+            const int aImpact = a->coreDamage + a->kills * 80 + a->samples;
+            const int bImpact = b->coreDamage + b->kills * 80 + b->samples;
+            return aImpact > bImpact;
+        });
+
+    const int rows = std::min(5, static_cast<int>(sorted.size()));
+    for (int i = 0; i < rows; ++i)
+    {
+        const AutomatchBotStats& stats = *sorted[i];
+        const int rowY = y + 124 + i * 24;
+        int roleIndex = 0;
+        int intentIndex = 0;
+        for (int r = 1; r < 4; ++r)
+        {
+            if (stats.roleSamples[r] > stats.roleSamples[roleIndex])
+            {
+                roleIndex = r;
+            }
+        }
+        for (int t = 1; t < 10; ++t)
+        {
+            if (stats.intentSamples[t] > stats.intentSamples[intentIndex])
+            {
+                intentIndex = t;
+            }
+        }
+
+        const Color teamColor = GetTeamColor(static_cast<TeamColor>(std::clamp(stats.teamId, 0, 3)));
+        DrawText(stats.name.c_str(), x + 22, rowY, 14, teamColor);
+        DrawText(ToString(static_cast<BotRole>(roleIndex)), x + 190, rowY, 14, Fade(WHITE, 0.82f));
+        DrawText(ToString(static_cast<BotIntent>(intentIndex)), x + 272, rowY, 14, Fade(WHITE, 0.82f));
+        DrawText((std::to_string(stats.kills) + "/" + std::to_string(stats.deaths)).c_str(), x + 386, rowY, 14, Fade(WHITE, 0.82f));
+        DrawText(std::to_string(stats.coreDamage).c_str(), x + 444, rowY, 14, Fade(WHITE, 0.82f));
+        DrawText(std::to_string(stats.roleChanges).c_str(), x + 492, rowY, 14, Fade(WHITE, 0.82f));
+    }
+
+    if (!automatch_.runs.empty())
+    {
+        const AutomatchRunStats& last = automatch_.runs.back();
+        const std::string lastRun = "Last: "
+            + std::string(last.timeout ? "timeout" : TeamName(last.winnerTeamId))
+            + " | " + std::to_string(static_cast<int>(last.duration)) + "s"
+            + " | kills " + std::to_string(last.kills)
+            + " | core " + std::to_string(last.coreDamage);
+        DrawText(lastRun.c_str(), x + 14, y + height - 46, 14, Fade(WHITE, 0.62f));
+        DrawText(last.finishReason.c_str(), x + 14, y + height - 24, 14, Fade(WHITE, 0.62f));
     }
 }
