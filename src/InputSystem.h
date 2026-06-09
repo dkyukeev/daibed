@@ -13,8 +13,20 @@ struct KeyBindings
     int bridgeMode = KEY_C;
     int sprint = KEY_LEFT_CONTROL;
     int interact = KEY_R;
+    int inventory = KEY_E;
+    int drop = KEY_Q;
     int debugRespawn = KEY_P;
     int cameraToggle = KEY_F5;
+    int heroActive1 = KEY_F;
+    int heroActive2 = KEY_G;
+    int heroUltimate = KEY_H;
+    int shoot = KEY_B;
+    int fireball = KEY_G;
+    int heal = KEY_H;
+    int teleport = KEY_T;
+    int dash = KEY_F;
+    int molotov = KEY_M;
+    int alarm = KEY_N;
 };
 
 struct PlayerInput
@@ -45,6 +57,9 @@ struct PlayerInput
     bool dashPressed = false;
     bool molotovPressed = false;
     bool alarmPressed = false;
+    bool heroActive1Pressed = false;
+    bool heroActive2Pressed = false;
+    bool heroUltimatePressed = false;
     bool dropPressed = false;
     bool botDebugPressed = false;
     int shopChoice = 0;

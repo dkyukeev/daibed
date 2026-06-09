@@ -182,6 +182,11 @@ bool Player::IsInvulnerable() const
     return invulnerabilityTimer_ > 0.0f;
 }
 
+float Player::GetHeroOutgoingDamageMultiplier() const
+{
+    return heroOutgoingDamageMultiplier_;
+}
+
 Inventory& Player::GetInventory()
 {
     return inventory_;
@@ -311,6 +316,27 @@ void Player::UpdateTimers(float dt)
     jumpBoostTimer_ = std::max(0.0f, jumpBoostTimer_ - dt);
     shieldTimer_ = std::max(0.0f, shieldTimer_ - dt);
     invulnerabilityTimer_ = std::max(0.0f, invulnerabilityTimer_ - dt);
+
+    auto updateHeroAbility = [dt](HeroAbilityState& ability)
+    {
+        ability.cooldownRemaining = std::max(0.0f, ability.cooldownRemaining - dt);
+        ability.activeTimer = std::max(0.0f, ability.activeTimer - dt);
+        ability.active = ability.activeTimer > 0.0f;
+    };
+    updateHeroAbility(heroState_.active1);
+    updateHeroAbility(heroState_.active2);
+    updateHeroAbility(heroState_.ultimate);
+    heroState_.animationTimer = std::max(0.0f, heroState_.animationTimer - dt);
+    if (heroState_.animationTimer <= 0.0f
+        && heroState_.animationState != HeroAnimationState::UltPrimed
+        && heroState_.animationState != HeroAnimationState::Overloaded)
+    {
+        heroState_.animationState = HeroAnimationState::Idle;
+        heroState_.animationDuration = 0.0f;
+    }
+    heroState_.ultimateCharge = std::clamp(heroState_.ultimateCharge, 0.0f, 100.0f);
+    heroState_.ultimateReady = heroState_.ultimateCharge >= 100.0f;
+
     if (!alive_ && !eliminated_ && respawnTimer_ > 0.0f)
     {
         respawnTimer_ = std::max(0.0f, respawnTimer_ - dt);
@@ -324,11 +350,16 @@ void Player::Damage(int amount)
         return;
     }
 
-    const int mitigated = shieldTimer_ > 0.0f ? std::max(1, amount / 2) : amount;
+    const int adjusted = static_cast<int>(static_cast<float>(std::max(0, amount)) * heroIncomingDamageMultiplier_ + 0.5f);
+    const int mitigated = shieldTimer_ > 0.0f ? std::max(1, adjusted / 2) : adjusted;
     health_ = std::max(0, health_ - std::max(0, mitigated));
+    if (heroId_ == HeroId::Radon && mitigated > 0)
+    {
+        AddHeroUltimateCharge(static_cast<float>(mitigated));
+    }
     if (inventory_.GetArmorLevel() > 0)
     {
-        inventory_.DamageArmor(std::max(1, amount / 5));
+        inventory_.DamageArmor(std::max(1, adjusted / 5));
     }
 }
 
@@ -380,6 +411,108 @@ void Player::ActivateShield(float seconds)
     shieldTimer_ = std::max(shieldTimer_, seconds);
 }
 
+HeroId Player::GetHeroId() const
+{
+    return heroId_;
+}
+
+const HeroRuntimeState& Player::GetHeroState() const
+{
+    return heroState_;
+}
+
+HeroRuntimeState& Player::MutableHeroState()
+{
+    return heroState_;
+}
+
+void Player::SetHeroId(HeroId heroId)
+{
+    heroId_ = heroId;
+    heroState_ = HeroRuntimeState {};
+    heroIncomingDamageMultiplier_ = 1.0f;
+    heroOutgoingDamageMultiplier_ = 1.0f;
+}
+
+void Player::SetHeroDamageMultipliers(float incomingMultiplier, float outgoingMultiplier)
+{
+    heroIncomingDamageMultiplier_ = std::clamp(incomingMultiplier, 0.2f, 3.0f);
+    heroOutgoingDamageMultiplier_ = std::clamp(outgoingMultiplier, 0.2f, 3.0f);
+}
+
+void Player::AddHeroUltimateCharge(float amount)
+{
+    SetHeroUltimateCharge(heroState_.ultimateCharge + amount);
+}
+
+void Player::SetHeroUltimateCharge(float amount)
+{
+    heroState_.ultimateCharge = std::clamp(amount, 0.0f, 100.0f);
+    heroState_.ultimateReady = heroState_.ultimateCharge >= 100.0f;
+}
+
+bool Player::IsHeroAbilityReady(HeroAbilitySlot slot) const
+{
+    const HeroAbilityState* ability = nullptr;
+    switch (slot)
+    {
+    case HeroAbilitySlot::Active1:
+        ability = &heroState_.active1;
+        break;
+    case HeroAbilitySlot::Active2:
+        ability = &heroState_.active2;
+        break;
+    case HeroAbilitySlot::Ultimate:
+        ability = &heroState_.ultimate;
+        break;
+    }
+
+    if (ability == nullptr || ability->cooldownRemaining > 0.0f)
+    {
+        return false;
+    }
+    return slot != HeroAbilitySlot::Ultimate || heroState_.ultimateReady;
+}
+
+void Player::StartHeroAbilityCooldown(HeroAbilitySlot slot, float cooldownSeconds, float durationSeconds)
+{
+    HeroAbilityState* ability = nullptr;
+    switch (slot)
+    {
+    case HeroAbilitySlot::Active1:
+        ability = &heroState_.active1;
+        break;
+    case HeroAbilitySlot::Active2:
+        ability = &heroState_.active2;
+        break;
+    case HeroAbilitySlot::Ultimate:
+        ability = &heroState_.ultimate;
+        heroState_.ultimateCharge = 0.0f;
+        heroState_.ultimateReady = false;
+        heroState_.ultimatePrimed = false;
+        break;
+    }
+
+    if (ability == nullptr)
+    {
+        return;
+    }
+
+    ability->cooldownRemaining = std::max(0.0f, cooldownSeconds);
+    ability->activeTimer = std::max(0.0f, durationSeconds);
+    ability->active = ability->activeTimer > 0.0f;
+}
+
+void Player::ClearHeroActiveEffects()
+{
+    heroState_.active1.active = false;
+    heroState_.active1.activeTimer = 0.0f;
+    heroState_.active2.active = false;
+    heroState_.active2.activeTimer = 0.0f;
+    heroState_.ultimate.active = false;
+    heroState_.ultimate.activeTimer = 0.0f;
+}
+
 void Player::Respawn(Vector3 spawnPoint)
 {
     position_ = spawnPoint;
@@ -401,6 +534,7 @@ void Player::Respawn(Vector3 spawnPoint)
     jumpBoostTimer_ = 0.0f;
     shieldTimer_ = 0.0f;
     invulnerabilityTimer_ = 1.65f;
+    ClearHeroActiveEffects();
 }
 
 void Player::Kill(bool finalDeath)
@@ -416,6 +550,13 @@ void Player::Kill(bool finalDeath)
     sprintResetTimer_ = 0.0f;
     knockbackControlTimer_ = 0.0f;
     invulnerabilityTimer_ = 0.0f;
+    ClearHeroActiveEffects();
+}
+
+void Player::KillWithRespawn(float seconds)
+{
+    Kill(false);
+    respawnTimer_ = std::max(0.0f, seconds);
 }
 
 bool Player::CanAttack() const

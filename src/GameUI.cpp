@@ -1,13 +1,19 @@
 #include "Game.h"
 
+#include "HeroSystem.h"
+#include "UiText.h"
 #include "raylib.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <iterator>
+#include <sstream>
 #include <string>
 #include <vector>
+
+#define DrawText DrawTextUtf8
+#define MeasureText MeasureTextUtf8
 
 namespace
 {
@@ -72,10 +78,90 @@ void DrawCenteredText(const std::string& text, int y, int fontSize, Color color)
     DrawText(text.c_str(), GetScreenWidth() / 2 - MeasureText(text.c_str(), fontSize) / 2, y, fontSize, color);
 }
 
+int DrawWrappedText(const std::string& text, int x, int y, int fontSize, int maxWidth, Color color)
+{
+    std::istringstream stream(text);
+    std::string word;
+    std::string line;
+    const int lineHeight = fontSize + 6;
+    int currentY = y;
+    while (stream >> word)
+    {
+        const std::string candidate = line.empty() ? word : line + " " + word;
+        if (!line.empty() && MeasureText(candidate.c_str(), fontSize) > maxWidth)
+        {
+            DrawText(line.c_str(), x, currentY, fontSize, color);
+            currentY += lineHeight;
+            line = word;
+        }
+        else
+        {
+            line = candidate;
+        }
+    }
+
+    if (!line.empty())
+    {
+        DrawText(line.c_str(), x, currentY, fontSize, color);
+        currentY += lineHeight;
+    }
+    return currentY;
+}
+
+int DrawWrappedTextLimited(const std::string& text, int x, int y, int fontSize, int maxWidth, int maxLines, Color color)
+{
+    std::istringstream stream(text);
+    std::string word;
+    std::string line;
+    const int lineHeight = fontSize + 5;
+    int currentY = y;
+    int lines = 0;
+    while (stream >> word && lines < maxLines)
+    {
+        const std::string candidate = line.empty() ? word : line + " " + word;
+        if (!line.empty() && MeasureText(candidate.c_str(), fontSize) > maxWidth)
+        {
+            DrawText(line.c_str(), x, currentY, fontSize, color);
+            currentY += lineHeight;
+            ++lines;
+            line = word;
+        }
+        else
+        {
+            line = candidate;
+        }
+    }
+
+    if (!line.empty() && lines < maxLines)
+    {
+        DrawText(line.c_str(), x, currentY, fontSize, color);
+        currentY += lineHeight;
+    }
+    return currentY;
+}
+
 std::string FormatTenths(float value)
 {
     const int tenths = static_cast<int>(value * 10.0f + 0.5f);
     return std::to_string(tenths / 10) + "." + std::to_string(tenths % 10);
+}
+
+std::string AbilityMetaText(const HeroAbilityDefinition& ability)
+{
+    std::string result;
+    if (ability.cooldownSeconds > 0.0f)
+    {
+        result += "Кулдаун: " + FormatTenths(ability.cooldownSeconds) + " с";
+    }
+    if (ability.durationSeconds > 0.0f)
+    {
+        if (!result.empty())
+        {
+            result += " | ";
+        }
+        result += "Длительность: " + FormatTenths(ability.durationSeconds) + " с";
+    }
+    return result;
 }
 }
 void Game::HandleMenuInput()
@@ -149,7 +235,8 @@ void Game::HandleMenuInput()
     {
         if (menuIndex_ == 0)
         {
-            StartSelectedMatch();
+            heroSelectIndex_ = HeroSystem::IndexOf(selectedHeroId_);
+            screen_ = GameScreen::HeroSelect;
         }
         else if (menuIndex_ == 8)
         {
@@ -174,6 +261,91 @@ void Game::HandleMenuInput()
     if (IsKeyPressed(KEY_ESCAPE))
     {
         exitRequested_ = true;
+    }
+}
+
+void Game::HandleHeroSelectInput()
+{
+    constexpr int heroCount = HeroSystem::kHeroCount;
+    if (IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_S))
+    {
+        heroSelectIndex_ = (heroSelectIndex_ + 1) % heroCount;
+    }
+    if (IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_W))
+    {
+        heroSelectIndex_ = (heroSelectIndex_ + heroCount - 1) % heroCount;
+    }
+    const float wheel = GetMouseWheelMove();
+    if (wheel > 0.01f)
+    {
+        heroSelectIndex_ = (heroSelectIndex_ + heroCount - 1) % heroCount;
+    }
+    if (wheel < -0.01f)
+    {
+        heroSelectIndex_ = (heroSelectIndex_ + 1) % heroCount;
+    }
+
+    const int panelWidth = std::min(1040, GetScreenWidth() - 72);
+    const int panelHeight = std::min(560, GetScreenHeight() - 142);
+    const int panelX = GetScreenWidth() / 2 - panelWidth / 2;
+    const int panelY = 116;
+    const int listX = panelX + 22;
+    const int listY = panelY + 56;
+    const int rowHeight = 54;
+    const Rectangle startButton {
+        static_cast<float>(panelX + panelWidth - 276),
+        static_cast<float>(panelY + panelHeight - 60),
+        128.0f,
+        38.0f
+    };
+    const Rectangle backButton {
+        static_cast<float>(panelX + panelWidth - 136),
+        static_cast<float>(panelY + panelHeight - 60),
+        92.0f,
+        38.0f
+    };
+
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+    {
+        const Vector2 mouse = GetMousePosition();
+        for (int i = 0; i < heroCount; ++i)
+        {
+            const Rectangle row {
+                static_cast<float>(listX),
+                static_cast<float>(listY + i * rowHeight),
+                286.0f,
+                static_cast<float>(rowHeight - 8)
+            };
+            if (CheckCollisionPointRec(mouse, row))
+            {
+                heroSelectIndex_ = i;
+                break;
+            }
+        }
+
+        if (CheckCollisionPointRec(mouse, startButton))
+        {
+            selectedHeroId_ = HeroSystem::IdFromIndex(heroSelectIndex_);
+            SaveSettings();
+            StartSelectedMatch();
+            return;
+        }
+        if (CheckCollisionPointRec(mouse, backButton))
+        {
+            screen_ = GameScreen::MainMenu;
+            return;
+        }
+    }
+
+    if (IsKeyPressed(KEY_ENTER))
+    {
+        selectedHeroId_ = HeroSystem::IdFromIndex(heroSelectIndex_);
+        SaveSettings();
+        StartSelectedMatch();
+    }
+    if (IsKeyPressed(KEY_ESCAPE))
+    {
+        screen_ = GameScreen::MainMenu;
     }
 }
 
@@ -274,8 +446,9 @@ void Game::HandleSettingsInput()
 
 void Game::HandleControlsInput()
 {
-    constexpr int kActionCount = 11;
+    constexpr int kActionCount = 23;
     constexpr int kControlRows = kActionCount + 1;
+    constexpr int kRowsPerColumn = 12;
     KeyBindings& bindings = input_.MutableBindings();
 
     const auto setBinding = [&bindings](int index, int key)
@@ -310,10 +483,46 @@ void Game::HandleControlsInput()
             bindings.interact = key;
             break;
         case 9:
-            bindings.cameraToggle = key;
+            bindings.inventory = key;
             break;
         case 10:
+            bindings.drop = key;
+            break;
+        case 11:
+            bindings.cameraToggle = key;
+            break;
+        case 12:
             bindings.debugRespawn = key;
+            break;
+        case 13:
+            bindings.heroActive1 = key;
+            break;
+        case 14:
+            bindings.heroActive2 = key;
+            break;
+        case 15:
+            bindings.heroUltimate = key;
+            break;
+        case 16:
+            bindings.shoot = key;
+            break;
+        case 17:
+            bindings.fireball = key;
+            break;
+        case 18:
+            bindings.heal = key;
+            break;
+        case 19:
+            bindings.teleport = key;
+            break;
+        case 20:
+            bindings.dash = key;
+            break;
+        case 21:
+            bindings.molotov = key;
+            break;
+        case 22:
+            bindings.alarm = key;
             break;
         default:
             break;
@@ -333,6 +542,7 @@ void Game::HandleControlsInput()
         {
             setBinding(controlsIndex_, key);
             waitingForKey_ = false;
+            SaveSettings();
         }
         return;
     }
@@ -344,6 +554,14 @@ void Game::HandleControlsInput()
     if (IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_W))
     {
         controlsIndex_ = (controlsIndex_ + kControlRows - 1) % kControlRows;
+    }
+    if (IsKeyPressed(KEY_RIGHT))
+    {
+        controlsIndex_ = std::min(controlsIndex_ + kRowsPerColumn, kControlRows - 1);
+    }
+    if (IsKeyPressed(KEY_LEFT))
+    {
+        controlsIndex_ = std::max(controlsIndex_ - kRowsPerColumn, 0);
     }
     if (IsKeyPressed(KEY_ENTER))
     {
@@ -433,7 +651,7 @@ void Game::RenderMainMenu() const
         "Automatch speed",
         "Automatch max time",
         "Settings",
-        "Controls",
+        "Управление",
         "Quit"
     };
     const std::string values[] {
@@ -498,6 +716,89 @@ void Game::RenderMainMenu() const
     DrawCenteredText(biomeHint.c_str(), GetScreenHeight() - 42, 16, Fade(WHITE, 0.48f));
 }
 
+void Game::RenderHeroSelect() const
+{
+    const int panelWidth = std::min(1040, GetScreenWidth() - 72);
+    const int panelHeight = std::min(560, GetScreenHeight() - 142);
+    const int panelX = GetScreenWidth() / 2 - panelWidth / 2;
+    const int panelY = 116;
+    const int listX = panelX + 22;
+    const int listY = panelY + 56;
+    const int rowHeight = 54;
+    const int detailX = panelX + 340;
+    const int detailWidth = panelWidth - 382;
+    const auto& selected = HeroSystem::GetDefinitionByIndex(heroSelectIndex_);
+
+    DrawCenteredText("Выбор героя", 42, 38, WHITE);
+    DrawCenteredText("Стрелки/WASD - выбрать | Enter - начать матч | Esc - назад", 86, 18, Fade(WHITE, 0.66f));
+    DrawRectangle(panelX, panelY, panelWidth, panelHeight, Fade(Color { 8, 10, 14, 255 }, 0.86f));
+    DrawRectangleLines(panelX, panelY, panelWidth, panelHeight, Fade(WHITE, 0.22f));
+    DrawText("Герои", listX, panelY + 22, 22, WHITE);
+
+    for (int i = 0; i < HeroSystem::kHeroCount; ++i)
+    {
+        const HeroDefinition& hero = HeroSystem::GetDefinitionByIndex(i);
+        const int y = listY + i * rowHeight;
+        const bool current = i == heroSelectIndex_;
+        DrawRectangle(listX, y, 286, rowHeight - 8, current ? Fade(Color { 54, 66, 80, 255 }, 0.95f) : Fade(Color { 18, 21, 29, 255 }, 0.54f));
+        DrawRectangleLines(listX, y, 286, rowHeight - 8, current ? Fade(Color { 255, 235, 142, 255 }, 0.75f) : Fade(WHITE, 0.16f));
+        DrawText(hero.name.c_str(), listX + 14, y + 8, 20, current ? Color { 255, 235, 142, 255 } : Fade(WHITE, 0.82f));
+        DrawText(hero.passiveName.c_str(), listX + 14, y + 30, 14, Fade(WHITE, current ? 0.72f : 0.48f));
+    }
+
+    DrawText(selected.name.c_str(), detailX, panelY + 22, 30, Color { 255, 235, 142, 255 });
+
+    int y = panelY + 64;
+    const int contentBottom = panelY + panelHeight - 78;
+    const auto drawSection = [&y, detailX, detailWidth, contentBottom](const std::string& title, const std::string& description, const std::string& meta, int maxLines)
+    {
+        if (y >= contentBottom)
+        {
+            return;
+        }
+        DrawText(title.c_str(), detailX, y, 17, Color { 112, 232, 255, 255 });
+        y += 22;
+        if (!meta.empty() && y < contentBottom)
+        {
+            DrawText(meta.c_str(), detailX, y, 14, Color { 255, 235, 142, 255 });
+            y += 19;
+        }
+        y = DrawWrappedTextLimited(description, detailX, y, 13, detailWidth, maxLines, Fade(WHITE, 0.76f));
+        y += 10;
+    };
+
+    drawSection("Пассивка: " + selected.passiveName, selected.passiveDescription, "", 2);
+    drawSection(std::string(KeyLabel(input_.GetBindings().heroActive1)) + ": " + selected.active1.name, selected.active1.description, AbilityMetaText(selected.active1), 3);
+    drawSection(std::string(KeyLabel(input_.GetBindings().heroActive2)) + ": " + selected.active2.name, selected.active2.description, AbilityMetaText(selected.active2), 3);
+    drawSection(std::string(KeyLabel(input_.GetBindings().heroUltimate)) + ": " + selected.ultimate.name, selected.ultimate.description, AbilityMetaText(selected.ultimate), 3);
+
+    if (y < contentBottom - 24)
+    {
+        DrawText("Заряд ульты", detailX, y, 17, Color { 112, 232, 255, 255 });
+        y += 22;
+        DrawWrappedTextLimited(selected.ultimateChargeDescription, detailX, y, 13, detailWidth, 2, Fade(WHITE, 0.76f));
+    }
+
+    const Rectangle startButton {
+        static_cast<float>(panelX + panelWidth - 276),
+        static_cast<float>(panelY + panelHeight - 60),
+        128.0f,
+        38.0f
+    };
+    const Rectangle backButton {
+        static_cast<float>(panelX + panelWidth - 136),
+        static_cast<float>(panelY + panelHeight - 60),
+        92.0f,
+        38.0f
+    };
+    DrawRectangleRec(startButton, Fade(Color { 54, 66, 80, 255 }, 0.95f));
+    DrawRectangleLinesEx(startButton, 1.0f, Fade(Color { 255, 235, 142, 255 }, 0.75f));
+    DrawText("Старт", static_cast<int>(startButton.x) + 30, static_cast<int>(startButton.y) + 10, 18, Color { 255, 235, 142, 255 });
+    DrawRectangleRec(backButton, Fade(Color { 24, 28, 36, 255 }, 0.95f));
+    DrawRectangleLinesEx(backButton, 1.0f, Fade(WHITE, 0.24f));
+    DrawText("Назад", static_cast<int>(backButton.x) + 22, static_cast<int>(backButton.y) + 10, 18, Fade(WHITE, 0.82f));
+}
+
 void Game::RenderSettings() const
 {
     const std::string labels[] {
@@ -548,18 +849,30 @@ void Game::RenderControls() const
 {
     const KeyBindings& bindings = input_.GetBindings();
     const char* labels[] {
-        "Move forward",
-        "Move backward",
-        "Move left",
-        "Move right",
-        "Jump",
-        "Sneak",
-        "Bridge mode",
-        "Sprint hold",
-        "Shop / interact",
-        "Camera toggle",
-        "Debug respawn",
-        "Back"
+        "Вперед",
+        "Назад",
+        "Влево",
+        "Вправо",
+        "Прыжок",
+        "Скрытность",
+        "Мост",
+        "Спринт",
+        "Магазин / действие",
+        "Инвентарь",
+        "Выбросить",
+        "Камера",
+        "Отладочный респаун",
+        "Активка 1",
+        "Активка 2",
+        "Ульта",
+        "Огненный шар",
+        "Быстрый огонь",
+        "Лечение",
+        "Телепорт",
+        "Рывок",
+        "Молотов",
+        "Сигнал",
+        "Назад"
     };
     const int keys[] {
         bindings.moveForward,
@@ -571,30 +884,50 @@ void Game::RenderControls() const
         bindings.bridgeMode,
         bindings.sprint,
         bindings.interact,
+        bindings.inventory,
+        bindings.drop,
         bindings.cameraToggle,
         bindings.debugRespawn,
+        bindings.heroActive1,
+        bindings.heroActive2,
+        bindings.heroUltimate,
+        bindings.shoot,
+        bindings.fireball,
+        bindings.heal,
+        bindings.teleport,
+        bindings.dash,
+        bindings.molotov,
+        bindings.alarm,
         KEY_NULL
     };
+    constexpr int kActionCount = 23;
+    constexpr int kControlRows = kActionCount + 1;
+    constexpr int kRowsPerColumn = 12;
+    constexpr int kColumnWidth = 440;
 
-    DrawCenteredText("Controls", 60, 40, WHITE);
-    DrawCenteredText(waitingForKey_ ? "Press a key for the selected action. Esc cancels." : "Enter starts rebinding selected action.", 106, 18, Fade(WHITE, 0.64f));
+    DrawCenteredText("Управление", 60, 40, WHITE);
+    DrawCenteredText(waitingForKey_ ? "Нажмите клавишу для выбранного действия. Esc отменяет." : "Enter меняет выбранную клавишу.", 106, 18, Fade(WHITE, 0.64f));
 
-    const int panelWidth = 640;
+    const int panelWidth = 900;
     const int panelX = GetScreenWidth() / 2 - panelWidth / 2;
     const int panelY = 142;
-    DrawRectangle(panelX, panelY, panelWidth, 448, Fade(Color { 8, 10, 14, 255 }, 0.86f));
-    DrawRectangleLines(panelX, panelY, panelWidth, 448, Fade(WHITE, 0.20f));
+    const int panelHeight = 456;
+    DrawRectangle(panelX, panelY, panelWidth, panelHeight, Fade(Color { 8, 10, 14, 255 }, 0.86f));
+    DrawRectangleLines(panelX, panelY, panelWidth, panelHeight, Fade(WHITE, 0.20f));
 
-    for (int i = 0; i < 12; ++i)
+    for (int i = 0; i < kControlRows; ++i)
     {
-        const int y = panelY + 22 + i * 37;
+        const int column = i / kRowsPerColumn;
+        const int row = i % kRowsPerColumn;
+        const int x = panelX + 20 + column * kColumnWidth;
+        const int y = panelY + 18 + row * 35;
         const bool selected = i == controlsIndex_;
         const Color color = selected ? Color { 255, 235, 142, 255 } : Fade(WHITE, 0.78f);
-        DrawRectangle(panelX + 20, y - 7, panelWidth - 40, 28, selected ? Fade(Color { 42, 52, 62, 255 }, 0.92f) : Fade(Color { 18, 21, 29, 255 }, 0.40f));
-        DrawText(labels[i], panelX + 38, y, 18, color);
-        if (i < 11)
+        DrawRectangle(x, y - 7, kColumnWidth - 28, 28, selected ? Fade(Color { 42, 52, 62, 255 }, 0.92f) : Fade(Color { 18, 21, 29, 255 }, 0.40f));
+        DrawText(labels[i], x + 18, y, 18, color);
+        if (i < kActionCount)
         {
-            DrawText(KeyLabel(keys[i]), panelX + 420, y, 18, color);
+            DrawText(KeyLabel(keys[i]), x + 306, y, 18, color);
         }
     }
 }
@@ -622,17 +955,29 @@ void Game::RenderPauseOverlay() const
 void Game::RenderGameHints(const Player& localPlayer) const
 {
     const KeyBindings& bindings = input_.GetBindings();
-    const std::string hints = std::string(KeyLabel(bindings.interact)) + " shop"
-        + " | " + KeyLabel(bindings.sneak) + " sneak"
-        + " | " + KeyLabel(bindings.bridgeMode) + " bridge"
-        + " | " + KeyLabel(bindings.sprint) + " / double " + KeyLabel(bindings.moveForward) + " sprint"
-        + " | " + KeyLabel(bindings.cameraToggle) + " camera"
-        + " | Tab scoreboard"
-        + " | E inventory Q drop wheel hotbar F3 bots"
-        + " | RMB use/place | B/G/H/F/T/M/N hotbar utility"
-        + " | Esc pause";
-    const int y = GetScreenHeight() - 20;
-    DrawText(hints.c_str(), GetScreenWidth() / 2 - MeasureText(hints.c_str(), 14) / 2, y, 14, Fade(WHITE, 0.56f));
+    const std::string mainHints = std::string(KeyLabel(bindings.interact)) + " магазин"
+        + " | " + KeyLabel(bindings.sneak) + " скрытность"
+        + " | " + KeyLabel(bindings.bridgeMode) + " мост"
+        + " | " + KeyLabel(bindings.sprint) + " / двойной " + KeyLabel(bindings.moveForward) + " спринт"
+        + " | " + KeyLabel(bindings.cameraToggle) + " камера"
+        + " | Tab таблица";
+    const std::string combatHints = std::string(KeyLabel(bindings.heroActive1)) + "/"
+        + KeyLabel(bindings.heroActive2) + "/"
+        + KeyLabel(bindings.heroUltimate) + " способности"
+        + " | " + KeyLabel(bindings.inventory) + " инвентарь"
+        + " | " + KeyLabel(bindings.drop) + " выброс"
+        + " | RMB использовать/ставить"
+        + " | утилиты " + KeyLabel(bindings.shoot) + "/" + KeyLabel(bindings.fireball) + "/" + KeyLabel(bindings.heal)
+        + "/" + KeyLabel(bindings.teleport) + "/" + KeyLabel(bindings.dash) + "/" + KeyLabel(bindings.molotov) + "/" + KeyLabel(bindings.alarm)
+        + " | Esc пауза";
+    const auto drawHintLine = [](const std::string& text, int y)
+    {
+        const int textWidth = MeasureText(text.c_str(), 14);
+        const int x = std::max(12, GetScreenWidth() / 2 - textWidth / 2);
+        DrawText(text.c_str(), x, y, 14, Fade(WHITE, 0.56f));
+    };
+    drawHintLine(mainHints, GetScreenHeight() - 38);
+    drawHintLine(combatHints, GetScreenHeight() - 20);
 
     if (!localPlayer.IsAlive())
     {
@@ -740,7 +1085,7 @@ void Game::RenderKillFeed() const
 
 void Game::RenderScoreboard() const
 {
-    const int width = std::min(900, GetScreenWidth() - 80);
+    const int width = std::min(1040, GetScreenWidth() - 80);
     const int rowHeight = 28;
     const int height = std::min(GetScreenHeight() - 96, 88 + static_cast<int>(players_.size()) * rowHeight);
     const int x = GetScreenWidth() / 2 - width / 2;
@@ -748,20 +1093,21 @@ void Game::RenderScoreboard() const
 
     DrawRectangle(x, y, width, height, Fade(Color { 7, 9, 14, 255 }, 0.88f));
     DrawRectangleLines(x, y, width, height, Fade(WHITE, 0.28f));
-    const std::string title = std::string("Match scoreboard  |  ") + MatchModeName()
+    const std::string title = std::string("Таблица матча  |  ") + MatchModeName()
         + "  |  " + TeamSizeName()
-        + "  |  Bots " + BotCountName();
+        + "  |  Боты " + BotCountName();
     DrawText(title.c_str(), x + 18, y + 16, 20, WHITE);
 
     const int headerY = y + 52;
     DrawRectangle(x + 14, headerY - 7, width - 28, 26, Fade(Color { 30, 36, 46, 255 }, 0.82f));
-    DrawText("Team", x + 26, headerY, 16, Fade(WHITE, 0.70f));
-    DrawText("Player", x + 118, headerY, 16, Fade(WHITE, 0.70f));
-    DrawText("HP", x + 328, headerY, 16, Fade(WHITE, 0.70f));
-    DrawText("State", x + 420, headerY, 16, Fade(WHITE, 0.70f));
-    DrawText("Core", x + 570, headerY, 16, Fade(WHITE, 0.70f));
-    DrawText("K/D", x + 690, headerY, 16, Fade(WHITE, 0.70f));
-    DrawText("Core dmg", x + 770, headerY, 16, Fade(WHITE, 0.70f));
+    DrawText("Команда", x + 26, headerY, 16, Fade(WHITE, 0.70f));
+    DrawText("Игрок", x + 118, headerY, 16, Fade(WHITE, 0.70f));
+    DrawText("Класс", x + 314, headerY, 16, Fade(WHITE, 0.70f));
+    DrawText("HP", x + 492, headerY, 16, Fade(WHITE, 0.70f));
+    DrawText("Состояние", x + 582, headerY, 16, Fade(WHITE, 0.70f));
+    DrawText("Кор", x + 734, headerY, 16, Fade(WHITE, 0.70f));
+    DrawText("K/D", x + 842, headerY, 16, Fade(WHITE, 0.70f));
+    DrawText("Урон Кору", x + 910, headerY, 16, Fade(WHITE, 0.70f));
 
     for (int i = 0; i < static_cast<int>(players_.size()); ++i)
     {
@@ -778,38 +1124,40 @@ void Game::RenderScoreboard() const
         const bool local = player.GetId() == localPlayerId_;
         DrawRectangle(x + 14, rowY - 5, width - 28, 24, local ? Fade(Color { 56, 64, 76, 255 }, 0.82f) : Fade(Color { 14, 17, 24, 255 }, 0.48f));
         DrawText(team != nullptr ? team->name.c_str() : "?", x + 26, rowY, 16, teamColor);
-        DrawText((player.GetName() + (local ? " (you)" : "")).c_str(), x + 118, rowY, 16, player.IsAlive() ? WHITE : Fade(WHITE, 0.46f));
+        DrawText((player.GetName() + (local ? " (вы)" : "")).c_str(), x + 118, rowY, 16, player.IsAlive() ? WHITE : Fade(WHITE, 0.46f));
+        const HeroDefinition& hero = HeroSystem::GetDefinition(player.GetHeroId());
+        DrawText(hero.name.c_str(), x + 314, rowY, 15, player.IsAlive() ? Fade(WHITE, 0.72f) : Fade(WHITE, 0.38f));
 
         const std::string hp = player.IsAlive()
             ? std::to_string(player.GetHealth()) + "/" + std::to_string(player.GetMaxHealth())
             : "-";
-        DrawText(hp.c_str(), x + 328, rowY, 16, player.IsAlive() ? Color { 128, 238, 166, 255 } : Fade(WHITE, 0.42f));
+        DrawText(hp.c_str(), x + 492, rowY, 16, player.IsAlive() ? Color { 128, 238, 166, 255 } : Fade(WHITE, 0.42f));
 
-        std::string state = "Alive";
+        std::string state = "Жив";
         Color stateColor = Color { 128, 238, 166, 255 };
         if (player.IsEliminated())
         {
-            state = "Final death";
+            state = "Финальная смерть";
             stateColor = Color { 255, 118, 118, 255 };
         }
         else if (!player.IsAlive())
         {
-            state = "Respawn " + std::to_string(static_cast<int>(std::ceil(player.GetRespawnTimer()))) + "s";
+            state = "Респаун " + std::to_string(static_cast<int>(std::ceil(player.GetRespawnTimer()))) + "с";
             stateColor = Color { 255, 190, 122, 255 };
         }
-        DrawText(state.c_str(), x + 420, rowY, 16, stateColor);
+        DrawText(state.c_str(), x + 582, rowY, 16, stateColor);
 
         const bool coreAlive = team != nullptr && team->coreAlive;
-        DrawText(coreAlive ? "Online" : "Broken", x + 570, rowY, 16, coreAlive ? Color { 112, 232, 255, 255 } : Color { 255, 118, 118, 255 });
+        DrawText(coreAlive ? "Цел" : "Сломан", x + 734, rowY, 16, coreAlive ? Color { 112, 232, 255, 255 } : Color { 255, 118, 118, 255 });
 
         const int kills = score != nullptr ? score->kills : 0;
         const int deaths = score != nullptr ? score->deaths : 0;
         const int coreDamage = score != nullptr ? score->coreDamage : 0;
-        DrawText((std::to_string(kills) + "/" + std::to_string(deaths)).c_str(), x + 690, rowY, 16, Fade(WHITE, 0.82f));
-        DrawText(std::to_string(coreDamage).c_str(), x + 770, rowY, 16, Fade(WHITE, 0.82f));
+        DrawText((std::to_string(kills) + "/" + std::to_string(deaths)).c_str(), x + 842, rowY, 16, Fade(WHITE, 0.82f));
+        DrawText(std::to_string(coreDamage).c_str(), x + 910, rowY, 16, Fade(WHITE, 0.82f));
     }
 
-    DrawText("Hold Tab to view | Final death players can spectate", x + 18, y + height - 24, 14, Fade(WHITE, 0.52f));
+    DrawText("Удерживайте Tab для просмотра | Игроки с финальной смертью могут наблюдать", x + 18, y + height - 24, 14, Fade(WHITE, 0.52f));
 }
 
 void Game::RenderDeathOverlay(const Player& localPlayer) const

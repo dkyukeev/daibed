@@ -1,12 +1,17 @@
 #include "Renderer.h"
 
 #include "CombatSystem.h"
+#include "HeroSystem.h"
+#include "UiText.h"
 #include "rlgl.h"
 
 #include <algorithm>
 #include <cmath>
 #include <string>
 #include <vector>
+
+#define DrawText DrawTextUtf8
+#define MeasureText MeasureTextUtf8
 
 namespace
 {
@@ -674,6 +679,151 @@ std::string FormatTenths(float value)
     return std::to_string(tenths / 10) + "." + std::to_string(tenths % 10);
 }
 
+Color HeroUiColor(HeroId id)
+{
+    switch (id)
+    {
+    case HeroId::Radon:
+        return Color { 92, 164, 255, 255 };
+    case HeroId::Orbita:
+        return Color { 255, 96, 82, 255 };
+    case HeroId::Brom:
+        return Color { 96, 202, 118, 255 };
+    case HeroId::Konvoy:
+        return Color { 92, 210, 255, 255 };
+    case HeroId::Likho:
+        return Color { 104, 238, 92, 255 };
+    case HeroId::Svidetel:
+        return Color { 180, 104, 255, 255 };
+    }
+    return WHITE;
+}
+
+std::string AbilityStateText(const HeroAbilityState& state, bool ultimate, float ultimateCharge, bool primed)
+{
+    if (ultimate && primed)
+    {
+        return "включена";
+    }
+    if (state.activeTimer > 0.0f)
+    {
+        return "активно " + FormatTenths(state.activeTimer) + "с";
+    }
+    if (state.cooldownRemaining > 0.0f)
+    {
+        return FormatTenths(state.cooldownRemaining) + "с";
+    }
+    if (ultimate && ultimateCharge < 100.0f)
+    {
+        return std::to_string(static_cast<int>(ultimateCharge)) + "%";
+    }
+    return "готово";
+}
+
+Vector3 RotateFlat(Vector3 direction, float radians)
+{
+    const float c = std::cos(radians);
+    const float s = std::sin(radians);
+    return Vector3 {
+        direction.x * c - direction.z * s,
+        0.0f,
+        direction.x * s + direction.z * c
+    };
+}
+
+float HeroAnimationFraction(const HeroRuntimeState& state)
+{
+    if (state.animationDuration <= 0.001f)
+    {
+        return 0.0f;
+    }
+    return 1.0f - std::clamp(state.animationTimer / state.animationDuration, 0.0f, 1.0f);
+}
+
+void DrawRadonPresentationEffect(const WorldEffect& effect)
+{
+    const float progress = std::clamp(effect.age / std::max(0.001f, effect.lifetime), 0.0f, 1.0f);
+    const float t = 1.0f - progress;
+    const Color color = Fade(effect.color, t);
+    const Vector3 base { effect.position.x, effect.position.y + 0.05f, effect.position.z };
+
+    switch (effect.kind)
+    {
+    case WorldEffectKind::Ring:
+    {
+        const float radius = effect.radius * (0.16f + progress * 0.84f);
+        DrawCylinder(base, radius, radius, 0.045f, 36, Fade(effect.color, t * 0.20f));
+        DrawCylinderWires(base, radius, radius, 0.055f, 36, Fade(effect.color, t * 0.92f));
+        break;
+    }
+    case WorldEffectKind::Cone:
+    case WorldEffectKind::Pull:
+    {
+        const float radius = effect.radius * (0.28f + progress * 0.72f);
+        const float halfAngle = effect.kind == WorldEffectKind::Pull ? 0.46f : 0.56f;
+        const int segments = 9;
+        const Vector3 origin { effect.position.x, effect.position.y + 0.42f, effect.position.z };
+        Vector3 previous {};
+        for (int i = 0; i <= segments; ++i)
+        {
+            const float u = -1.0f + 2.0f * static_cast<float>(i) / static_cast<float>(segments);
+            const Vector3 ray = RotateFlat(effect.direction, u * halfAngle);
+            const Vector3 end { origin.x + ray.x * radius, origin.y + 0.10f * std::sin(progress * 6.28f), origin.z + ray.z * radius };
+            DrawLine3D(origin, end, Fade(effect.color, t * 0.82f));
+            if (i > 0)
+            {
+                DrawLine3D(previous, end, Fade(effect.color, t * 0.58f));
+            }
+            if (effect.kind == WorldEffectKind::Pull && i % 2 == 0)
+            {
+                const Vector3 inner { origin.x + ray.x * radius * 0.52f, origin.y, origin.z + ray.z * radius * 0.52f };
+                DrawLine3D(end, inner, Fade(Color { 178, 245, 255, 255 }, t * 0.76f));
+            }
+            previous = end;
+        }
+        break;
+    }
+    case WorldEffectKind::Trail:
+    {
+        const Vector3 tail {
+            base.x - effect.direction.x * effect.radius * (1.2f + progress),
+            base.y - 0.12f * progress,
+            base.z - effect.direction.z * effect.radius * (1.2f + progress)
+        };
+        DrawLine3D(tail, base, Fade(effect.color, t * 0.95f));
+        DrawSphere(base, effect.radius * (0.42f + t * 0.24f), Fade(effect.color, t * 0.70f));
+        break;
+    }
+    case WorldEffectKind::FireZone:
+    {
+        const float radius = effect.radius * (0.92f + 0.08f * std::sin(effect.age * 14.0f));
+        DrawCylinder(base, radius, radius, 0.035f, 32, Fade(effect.color, t * 0.24f));
+        DrawCylinderWires(base, radius, radius, 0.045f, 32, Fade(effect.color, t * 0.80f));
+        DrawSphere(Vector3 { base.x, base.y + 0.16f + std::sin(effect.age * 18.0f) * 0.05f, base.z }, radius * 0.18f, Fade(effect.color, t * 0.50f));
+        break;
+    }
+    case WorldEffectKind::CorePulse:
+    {
+        const float radius = effect.radius * (0.65f + 0.25f * std::sin(effect.age * 9.0f));
+        DrawSphereWires(Vector3 { base.x, base.y + 0.35f, base.z }, radius, 10, 16, Fade(effect.color, t * 0.86f));
+        DrawSphere(Vector3 { base.x, base.y + 0.35f, base.z }, radius * 0.18f, Fade(Color { 178, 245, 255, 255 }, t * 0.50f));
+        break;
+    }
+    case WorldEffectKind::Sacrifice:
+    {
+        const float radius = effect.radius * (0.20f + progress * 0.90f);
+        DrawCylinderWires(base, radius, radius, 0.08f, 40, Fade(Color { 178, 245, 255, 255 }, t));
+        DrawSphere(Vector3 { base.x, base.y + 0.42f, base.z }, 0.38f + progress * 0.42f, Fade(effect.color, t * 0.62f));
+        break;
+    }
+    case WorldEffectKind::Burst:
+    default:
+        DrawSphere(effect.position, effect.radius + effect.age * 1.4f, Fade(effect.color, t * 0.65f));
+        DrawSphereWires(effect.position, (effect.radius + effect.age * 1.4f) * 1.08f, 8, 10, Fade(WHITE, t));
+        break;
+    }
+}
+
 Color ItemUiColor(ItemType type)
 {
     switch (type)
@@ -969,11 +1119,13 @@ void Renderer::RenderScene(
     bool hideLocalPlayer) const
 {
     int localTeamId = -1;
+    const Player* localPlayer = nullptr;
     for (const Player& player : players)
     {
         if (player.IsLocal())
         {
             localTeamId = player.GetTeamId();
+            localPlayer = &player;
             break;
         }
     }
@@ -1051,6 +1203,18 @@ void Renderer::RenderScene(
 
         const Team* team = FindTeam(teams, core.GetTeamId());
         const Color teamColor = team != nullptr ? GetTeamColor(team->color) : WHITE;
+        bool radonPrimedForCore = false;
+        for (const Player& player : players)
+        {
+            if (player.GetTeamId() == core.GetTeamId()
+                && player.GetHeroId() == HeroId::Radon
+                && player.GetHeroState().ultimatePrimed
+                && player.IsAlive())
+            {
+                radonPrimedForCore = true;
+                break;
+            }
+        }
         const Vector3 pos = world.GridToWorld(core.GetBlockPosition());
         const float healthFraction = static_cast<float>(core.GetHealth()) / static_cast<float>(std::max(1, core.GetMaxHealth()));
         const float stageScale = 0.72f + healthFraction * 0.28f;
@@ -1058,6 +1222,12 @@ void Renderer::RenderScene(
         DrawCube(coreCenter, 0.92f * stageScale, 0.78f * stageScale, 0.92f * stageScale, Fade(teamColor, 0.70f + healthFraction * 0.22f));
         DrawSphere(Vector3 { pos.x, pos.y + 0.40f * stageScale, pos.z }, 0.18f + 0.08f * healthFraction, Color { 178, 245, 255, 255 });
         DrawCubeWires(coreCenter, 0.96f * stageScale, 0.82f * stageScale, 0.96f * stageScale, WHITE);
+        if (radonPrimedForCore)
+        {
+            const float pulse = 1.02f + 0.12f * std::sin(static_cast<float>(GetTime()) * 6.0f);
+            DrawSphereWires(Vector3 { pos.x, pos.y + 0.18f, pos.z }, pulse, 12, 18, Fade(Color { 92, 164, 255, 255 }, 0.82f));
+            DrawCylinderWires(Vector3 { pos.x, pos.y - 0.47f, pos.z }, pulse * 1.18f, pulse * 1.18f, 0.05f, 36, Fade(Color { 178, 245, 255, 255 }, 0.62f));
+        }
         const int cracks = healthFraction < 0.70f ? (healthFraction < 0.35f ? 6 : 3) : 0;
         for (int i = 0; i < cracks; ++i)
         {
@@ -1082,11 +1252,52 @@ void Renderer::RenderScene(
         }
 
         const Team* team = FindTeam(teams, player.GetTeamId());
-        const Color color = team != nullptr ? GetTeamColor(team->color) : WHITE;
+        const Color baseColor = team != nullptr ? GetTeamColor(team->color) : WHITE;
+        Color color = baseColor;
         const bool enemy = localTeamId >= 0 && player.GetTeamId() != localTeamId;
         const Vector3 pos = player.GetPosition();
-        DrawCube(pos, 0.68f, 1.7f, 0.68f, color);
-        DrawSphere(Vector3 { pos.x, pos.y + 1.08f, pos.z }, 0.36f, Color { 238, 230, 210, 255 });
+        const bool radon = player.GetHeroId() == HeroId::Radon;
+        const HeroRuntimeState& heroState = player.GetHeroState();
+        const float anim = HeroAnimationFraction(heroState);
+        float bodyPulse = 1.0f;
+        float bodyLift = 0.0f;
+        float shoulderLean = 0.0f;
+        if (radon)
+        {
+            if (heroState.radonProtected)
+            {
+                color = MixColor(color, Color { 92, 164, 255, 255 }, 0.28f + 0.10f * std::sin(static_cast<float>(GetTime()) * 5.0f));
+                bodyPulse += 0.025f * std::sin(static_cast<float>(GetTime()) * 6.0f);
+            }
+            if (heroState.radonOverloaded || heroState.animationState == HeroAnimationState::Overloaded)
+            {
+                color = MixColor(color, Color { 255, 118, 70, 255 }, 0.34f + 0.12f * std::sin(static_cast<float>(GetTime()) * 9.0f));
+                bodyPulse += 0.045f * std::sin(static_cast<float>(GetTime()) * 11.0f);
+            }
+            if (heroState.ultimatePrimed || heroState.animationState == HeroAnimationState::UltPrimed)
+            {
+                color = MixColor(color, Color { 178, 245, 255, 255 }, 0.38f);
+                bodyPulse += 0.05f * std::sin(static_cast<float>(GetTime()) * 7.0f);
+            }
+            if (heroState.animationState == HeroAnimationState::WindUp)
+            {
+                shoulderLean = -0.16f * (1.0f - anim);
+                bodyPulse += 0.07f * anim;
+            }
+            else if (heroState.animationState == HeroAnimationState::Cast)
+            {
+                shoulderLean = 0.20f * std::sin(anim * 3.14159f);
+                bodyPulse += 0.10f * (1.0f - anim);
+                bodyLift = 0.04f * std::sin(anim * 3.14159f);
+            }
+            else if (heroState.animationState == HeroAnimationState::Recovery)
+            {
+                bodyPulse -= 0.03f * (1.0f - anim);
+            }
+        }
+        const Vector3 drawPos { pos.x, pos.y + bodyLift, pos.z };
+        DrawCube(drawPos, 0.68f * bodyPulse, 1.7f * (0.98f + (bodyPulse - 1.0f) * 0.45f), 0.68f * bodyPulse, color);
+        DrawSphere(Vector3 { pos.x, pos.y + 1.08f + bodyLift, pos.z }, 0.36f * (radon ? bodyPulse : 1.0f), radon ? MixColor(Color { 238, 230, 210, 255 }, Color { 178, 245, 255, 255 }, heroState.ultimatePrimed ? 0.32f : 0.0f) : Color { 238, 230, 210, 255 });
         if (enemy)
         {
             DrawCylinderWires(Vector3 { pos.x, pos.y - 0.84f, pos.z }, 0.62f, 0.62f, 0.04f, 24, Color { 255, 118, 118, 220 });
@@ -1098,6 +1309,29 @@ void Renderer::RenderScene(
 
         const Vector3 forward = player.Forward();
         const Vector3 right { -forward.z, 0.0f, forward.x };
+        if (radon)
+        {
+            const Color radonColor = heroState.radonOverloaded ? Color { 255, 118, 70, 255 } : Color { 92, 164, 255, 255 };
+            if (heroState.radonProtected || heroState.ultimatePrimed)
+            {
+                const float ringRadius = heroState.ultimatePrimed ? 1.10f + 0.10f * std::sin(static_cast<float>(GetTime()) * 7.0f) : 0.86f;
+                DrawSphereWires(Vector3 { pos.x, pos.y + 0.22f, pos.z }, ringRadius, 10, 14, Fade(radonColor, heroState.ultimatePrimed ? 0.80f : 0.36f));
+            }
+            if (heroState.radonOverloaded)
+            {
+                DrawSphereWires(Vector3 { pos.x, pos.y + 0.38f, pos.z }, 0.78f + 0.08f * std::sin(static_cast<float>(GetTime()) * 12.0f), 8, 12, Fade(Color { 255, 118, 70, 255 }, 0.58f));
+            }
+            if (heroState.animationState == HeroAnimationState::WindUp || heroState.animationState == HeroAnimationState::Cast)
+            {
+                const float glow = heroState.animationState == HeroAnimationState::WindUp ? anim : 1.0f - anim * 0.55f;
+                const Vector3 leftHand { pos.x - right.x * 0.48f + forward.x * (0.16f + shoulderLean), pos.y + 0.26f + bodyLift, pos.z - right.z * 0.48f + forward.z * (0.16f + shoulderLean) };
+                const Vector3 rightHand { pos.x + right.x * 0.48f + forward.x * (0.16f + shoulderLean), pos.y + 0.26f + bodyLift, pos.z + right.z * 0.48f + forward.z * (0.16f + shoulderLean) };
+                DrawSphere(leftHand, 0.13f + glow * 0.08f, Fade(radonColor, 0.70f));
+                DrawSphere(rightHand, 0.13f + glow * 0.08f, Fade(radonColor, 0.70f));
+                DrawLine3D(leftHand, Vector3 { leftHand.x + forward.x * (0.6f + glow), leftHand.y, leftHand.z + forward.z * (0.6f + glow) }, Fade(radonColor, 0.70f));
+                DrawLine3D(rightHand, Vector3 { rightHand.x + forward.x * (0.6f + glow), rightHand.y, rightHand.z + forward.z * (0.6f + glow) }, Fade(radonColor, 0.70f));
+            }
+        }
         const ItemStack heldItem = VisibleHeldItemForPlayer(player, localHeldItem);
         if (!heldItem.IsEmpty())
         {
@@ -1157,6 +1391,34 @@ void Renderer::RenderScene(
         const float firstPersonScale = ItemIsBlock(localHeldItem.type) ? 0.54f : 0.66f;
         DrawHeldItemModel(localHeldItem, hand, cameraForward, cameraRight, cameraUp, firstPersonScale, GetItemTexture(localHeldItem.type), blockTexture, itemTint, true);
     }
+    if (hideLocalPlayer
+        && localPlayer != nullptr
+        && localPlayer->GetHeroId() == HeroId::Radon)
+    {
+        const HeroRuntimeState& heroState = localPlayer->GetHeroState();
+        if (heroState.animationState == HeroAnimationState::WindUp
+            || heroState.animationState == HeroAnimationState::Cast
+            || heroState.ultimatePrimed
+            || heroState.radonOverloaded)
+        {
+            const Vector3 cameraForward = Normalize(Vector3 {
+                camera.target.x - camera.position.x,
+                camera.target.y - camera.position.y,
+                camera.target.z - camera.position.z
+            });
+            const Vector3 cameraRight = Normalize(Cross(cameraForward, camera.up));
+            const Vector3 cameraUp = Normalize(Cross(cameraRight, cameraForward));
+            const float anim = HeroAnimationFraction(heroState);
+            const Color radonColor = heroState.radonOverloaded ? Color { 255, 118, 70, 255 } : Color { 92, 164, 255, 255 };
+            const Vector3 leftHand = Add(Add(camera.position, Scale(cameraForward, 0.58f + anim * 0.12f)), Add(Scale(cameraRight, -0.32f), Scale(cameraUp, -0.30f)));
+            const Vector3 rightHand = Add(Add(camera.position, Scale(cameraForward, 0.58f + anim * 0.12f)), Add(Scale(cameraRight, 0.32f), Scale(cameraUp, -0.30f)));
+            const float pulse = 0.09f + 0.05f * std::sin(static_cast<float>(GetTime()) * 12.0f);
+            DrawSphere(leftHand, pulse, Fade(radonColor, 0.62f));
+            DrawSphere(rightHand, pulse, Fade(radonColor, 0.62f));
+            DrawLine3D(leftHand, Add(leftHand, Scale(cameraForward, 0.55f + anim * 0.35f)), Fade(radonColor, 0.74f));
+            DrawLine3D(rightHand, Add(rightHand, Scale(cameraForward, 0.55f + anim * 0.35f)), Fade(radonColor, 0.74f));
+        }
+    }
 
     for (const ResourcePickup& pickup : pickups)
     {
@@ -1215,10 +1477,7 @@ void Renderer::RenderScene(
 
     for (const WorldEffect& effect : worldEffects)
     {
-        const float t = 1.0f - std::clamp(effect.age / std::max(0.001f, effect.lifetime), 0.0f, 1.0f);
-        const float radius = effect.radius + effect.age * 1.4f;
-        DrawSphere(effect.position, radius, Fade(effect.color, t * 0.65f));
-        DrawSphereWires(effect.position, radius * 1.08f, 8, 10, Fade(WHITE, t));
+        DrawRadonPresentationEffect(effect);
     }
 
     std::sort(
@@ -1364,6 +1623,9 @@ void Renderer::RenderUI(
     float hitMarkerTimer,
     float damageFlashTimer,
     float matchTime,
+    const char* heroActive1KeyText,
+    const char* heroActive2KeyText,
+    const char* heroUltimateKeyText,
     std::optional<int> winnerTeamId) const
 {
     const Team* playerTeam = FindTeam(teams, localPlayer.GetTeamId());
@@ -1565,6 +1827,30 @@ void Renderer::RenderUI(
         const int x = hotbarX + i * (slotSize + gap);
         drawSlot(hotbar[i], x, hotbarY, slotSize, i == selectedHotbarSlot, inventoryOpen && inventoryCursorSlot == i);
     }
+
+    const HeroDefinition& hero = HeroSystem::GetDefinition(localPlayer.GetHeroId());
+    const HeroRuntimeState& heroState = localPlayer.GetHeroState();
+    const Color heroColor = HeroUiColor(hero.id);
+    const int abilityPanelWidth = 360;
+    const int abilityPanelHeight = 64;
+    const int abilityPanelX = GetScreenWidth() - abilityPanelWidth - 18;
+    const int abilityPanelY = hotbarY - abilityPanelHeight - 12;
+    DrawRectangle(abilityPanelX, abilityPanelY, abilityPanelWidth, abilityPanelHeight, Fade(Color { 8, 10, 14, 255 }, 0.66f));
+    DrawRectangleLines(abilityPanelX, abilityPanelY, abilityPanelWidth, abilityPanelHeight, Fade(WHITE, 0.16f));
+    DrawText(hero.name.c_str(), abilityPanelX + 12, abilityPanelY + 8, 18, heroColor);
+
+    const auto drawAbility = [abilityPanelY, heroColor](const char* key, const char* label, const std::string& stateText, int x)
+    {
+        DrawRectangle(x, abilityPanelY + 26, 106, 32, Fade(Color { 18, 21, 29, 255 }, 0.74f));
+        DrawRectangleLines(x, abilityPanelY + 26, 106, 32, Fade(heroColor, 0.36f));
+        DrawText(key, x + 7, abilityPanelY + 32, 15, heroColor);
+        DrawText(label, x + 28, abilityPanelY + 30, 11, Fade(WHITE, 0.82f));
+        DrawText(stateText.c_str(), x + 28, abilityPanelY + 44, 10, Fade(WHITE, 0.62f));
+    };
+    const int abilityX = abilityPanelX + 12;
+    drawAbility(heroActive1KeyText, "Активка 1", AbilityStateText(heroState.active1, false, heroState.ultimateCharge, false), abilityX);
+    drawAbility(heroActive2KeyText, "Активка 2", AbilityStateText(heroState.active2, false, heroState.ultimateCharge, false), abilityX + 116);
+    drawAbility(heroUltimateKeyText, "Ульта", AbilityStateText(heroState.ultimate, true, heroState.ultimateCharge, heroState.ultimatePrimed), abilityX + 232);
 
     if (inventoryOpen)
     {

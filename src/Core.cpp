@@ -58,6 +58,12 @@ void EnergyCore::Repair(int amount)
     health_ = std::min(maxHealth_, health_ + std::max(0, amount));
 }
 
+void EnergyCore::SetHealth(int health)
+{
+    health_ = std::clamp(health, 0, maxHealth_);
+    alive_ = health_ > 0;
+}
+
 void EnergyCore::Restore()
 {
     health_ = maxHealth_;

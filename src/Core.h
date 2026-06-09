@@ -16,6 +16,7 @@ public:
 
     bool Damage(int amount);
     void Repair(int amount);
+    void SetHealth(int health);
     void Restore();
 
 private:

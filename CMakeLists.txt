@@ -45,6 +45,8 @@ add_executable(DaiBed
     src/GameUI.cpp
     src/GameRules.cpp
     src/Generator.cpp
+    src/Hero.cpp
+    src/HeroSystem.cpp
     src/InputSystem.cpp
     src/Inventory.cpp
     src/Player.cpp
@@ -52,6 +54,7 @@ add_executable(DaiBed
     src/Resource.cpp
     src/Shop.cpp
     src/Team.cpp
+    src/UiText.cpp
     src/World.cpp
     src/Network/Client.cpp
     src/Network/LocalNetworkMock.cpp

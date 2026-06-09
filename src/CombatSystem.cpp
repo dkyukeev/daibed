@@ -266,7 +266,12 @@ int DamageBeforeShieldAtDistance(const Player& attacker, const Player& target, W
     }
 
     const int armorReduction = ArmorReductionForWeapon(weapon, target.GetInventory().GetArmorLevel());
-    const int rawDamage = static_cast<int>(static_cast<float>(CombatSystem::BaseDamage(weapon, attacker.GetInventory().GetSwordLevel())) * multiplier * chargeMultiplier + 0.5f);
+    const int rawDamage = static_cast<int>(
+        static_cast<float>(CombatSystem::BaseDamage(weapon, attacker.GetInventory().GetSwordLevel()))
+            * multiplier
+            * chargeMultiplier
+            * attacker.GetHeroOutgoingDamageMultiplier()
+            + 0.5f);
     return std::max(6, rawDamage - armorReduction);
 }
 
@@ -692,7 +697,7 @@ bool CombatSystem::DamageCore(Player& attacker, EnergyCore& core, std::string& m
     }
 
     const int toolLevel = toolLevelOverride >= 0 ? toolLevelOverride : attacker.GetInventory().GetToolLevel();
-    const int damage = 14 + toolLevel * 12;
+    const int damage = static_cast<int>(static_cast<float>(14 + toolLevel * 12) * attacker.GetHeroOutgoingDamageMultiplier() + 0.5f);
     const bool destroyed = core.Damage(damage);
     attacker.ResetAttackCooldown(0.45f);
 

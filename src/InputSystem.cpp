@@ -8,6 +8,11 @@ constexpr double kDoubleTapSprintWindow = 0.28;
 PlayerInput InputSystem::Poll() const
 {
     PlayerInput input {};
+    const auto reservedForHeroAbility = [this](int key)
+    {
+        return key == bindings_.heroActive1 || key == bindings_.heroActive2 || key == bindings_.heroUltimate;
+    };
+
     const bool forwardDown = IsKeyDown(bindings_.moveForward);
     const bool forwardPressed = forwardDown && !forwardWasDown_;
     const double now = GetTime();
@@ -56,18 +61,21 @@ PlayerInput InputSystem::Poll() const
     input.cameraTogglePressed = IsKeyPressed(bindings_.cameraToggle);
     input.sprint = IsKeyDown(bindings_.sprint) || doubleTapSprintActive_;
     input.interactPressed = IsKeyPressed(bindings_.interact);
-    input.inventoryPressed = IsKeyPressed(KEY_E);
+    input.inventoryPressed = IsKeyPressed(bindings_.inventory);
     input.debugRespawnPressed = IsKeyPressed(bindings_.debugRespawn);
     input.restartPressed = IsKeyPressed(KEY_ENTER);
     input.exitPressed = IsKeyPressed(KEY_ESCAPE);
-    input.shootPressed = IsKeyPressed(KEY_B);
-    input.fireballPressed = IsKeyPressed(KEY_G);
-    input.healPressed = IsKeyPressed(KEY_H);
-    input.teleportPressed = IsKeyPressed(KEY_T);
-    input.dashPressed = IsKeyPressed(KEY_F);
-    input.molotovPressed = IsKeyPressed(KEY_M);
-    input.alarmPressed = IsKeyPressed(KEY_N);
-    input.dropPressed = IsKeyPressed(KEY_Q);
+    input.heroActive1Pressed = IsKeyPressed(bindings_.heroActive1);
+    input.heroActive2Pressed = IsKeyPressed(bindings_.heroActive2);
+    input.heroUltimatePressed = IsKeyPressed(bindings_.heroUltimate);
+    input.shootPressed = IsKeyPressed(bindings_.shoot) && !reservedForHeroAbility(bindings_.shoot);
+    input.fireballPressed = IsKeyPressed(bindings_.fireball) && !reservedForHeroAbility(bindings_.fireball);
+    input.healPressed = IsKeyPressed(bindings_.heal) && !reservedForHeroAbility(bindings_.heal);
+    input.teleportPressed = IsKeyPressed(bindings_.teleport) && !reservedForHeroAbility(bindings_.teleport);
+    input.dashPressed = IsKeyPressed(bindings_.dash) && !reservedForHeroAbility(bindings_.dash);
+    input.molotovPressed = IsKeyPressed(bindings_.molotov) && !reservedForHeroAbility(bindings_.molotov);
+    input.alarmPressed = IsKeyPressed(bindings_.alarm) && !reservedForHeroAbility(bindings_.alarm);
+    input.dropPressed = IsKeyPressed(bindings_.drop);
     input.botDebugPressed = IsKeyPressed(KEY_F3);
 
     if (IsKeyPressed(KEY_ONE))

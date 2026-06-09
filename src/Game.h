@@ -24,6 +24,7 @@
 enum class GameScreen
 {
     MainMenu,
+    HeroSelect,
     Settings,
     Controls,
     Playing,
@@ -94,6 +95,15 @@ private:
     float BiomeKnockbackMultiplier() const;
     void ApplyStandingBlockEffects(Player& player, bool localPlayer);
     void DropPlayerResources(Player& player);
+    void UseHeroAbilityInputs(Player& player);
+    bool UseHeroAbility(Player& player, HeroAbilitySlot slot);
+    bool UseRadonAbility(Player& player, HeroAbilitySlot slot);
+    void UseRadonForcePulse(Player& player, bool pull);
+    void UseRadonMolotov(Player& player);
+    void UseRadonDestroyedCoreUltimate(Player& player);
+    bool TryRadonCoreSacrifice(EnergyCore& core);
+    void EmitRadonCoreWave(Vector3 position, int ownerTeamId, int ownerPlayerId, float radius, float damage, float force);
+    void SetHeroAnimation(Player& player, HeroAnimationState state, float seconds);
     void UseUtilityInputs(Player& player);
     bool UseUtility(Player& player, UtilityType type);
     bool SpendUtilityItem(Player& player, UtilityType type);
@@ -101,7 +111,7 @@ private:
     void LaunchProjectile(Player& player, UtilityType type);
     void LaunchProjectileDirected(Player& player, UtilityType type, Vector3 direction, bool announce);
     bool BotUseUtility(Player& bot, Team& team, Player* enemy, EnergyCore* enemyCore);
-    void DetonateAt(Vector3 position, int ownerTeamId, int ownerPlayerId, float radius, int damage, bool createFireZone);
+    void DetonateAt(Vector3 position, int ownerTeamId, int ownerPlayerId, float radius, int damage, bool createFireZone, bool blueFire = false);
     void HandleInventoryInput(Player& player);
     bool TryDropInventoryStack(Player& player, int slot, int amount);
     bool TryQuickMoveInventorySlot(Player& player, int slot);
@@ -141,6 +151,7 @@ private:
     void UpdateExplosives(float dt);
     void UpdateProjectiles(float dt);
     void UpdateHazardZones(float dt);
+    void UpdateHeroPassives();
     void UpdatePassiveRegeneration(float dt);
     void UpdateBaseHealing(float dt);
     void UpdateFeedback(float dt);
@@ -154,10 +165,12 @@ private:
     void HandleDeathsAndRespawns();
     void SendMockNetworkInput();
     void HandleMenuInput();
+    void HandleHeroSelectInput();
     void HandleSettingsInput();
     void HandleControlsInput();
     void HandlePauseInput();
     void RenderMainMenu() const;
+    void RenderHeroSelect() const;
     void RenderSettings() const;
     void RenderControls() const;
     void RenderPauseOverlay() const;
@@ -220,6 +233,7 @@ private:
     void SetMessage(std::string message, float seconds = 3.0f);
     void AddEventMessage(std::string message, Color color = WHITE, float seconds = 2.4f);
     void AddWorldEffect(Vector3 position, Color color, float radius = 0.35f, float seconds = 0.35f);
+    void AddWorldEffect(Vector3 position, Vector3 direction, Color color, float radius, float seconds, WorldEffectKind kind);
     void AddFloatingText(std::string text, Vector3 position, Color color);
     void AddKillFeed(std::string text, Color color = WHITE, float seconds = 5.0f);
     void RegisterCombatEvent(const CombatEvent& event, const std::string& message);
@@ -336,6 +350,7 @@ private:
     const char* FpsLimitName() const;
     void ApplyWindowSettings();
     void ApplyFrameRateLimit();
+    void CenterWindowOnCurrentMonitor() const;
     const char* TeamName(int teamId) const;
     Color BiomeSkyColor() const;
     Color BiomeFogColor() const;
@@ -388,6 +403,7 @@ private:
     BotDifficulty botDifficulty_ = BotDifficulty::Normal;
     ArenaLayout arenaLayout_ = ArenaLayout::Classic;
     ArenaBiome arenaBiome_ = ArenaBiome::Arena;
+    HeroId selectedHeroId_ = HeroId::Radon;
     int selectedTeamId_ = 0;
     int selectedTeamSize_ = 1;
     int selectedBotCount_ = 3;
@@ -395,6 +411,7 @@ private:
     int automatchTicksPerFrame_ = 4;
     int automatchMaxMinutes_ = 12;
     int menuIndex_ = 0;
+    int heroSelectIndex_ = 0;
     int settingsIndex_ = 0;
     int controlsIndex_ = 0;
     int pauseIndex_ = 0;

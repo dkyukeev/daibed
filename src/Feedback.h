@@ -49,13 +49,27 @@ struct CombatPreview
     std::string label;
 };
 
+enum class WorldEffectKind
+{
+    Burst,
+    Ring,
+    Cone,
+    Pull,
+    Trail,
+    FireZone,
+    CorePulse,
+    Sacrifice
+};
+
 struct WorldEffect
 {
     Vector3 position {};
+    Vector3 direction { 0.0f, 0.0f, 1.0f };
     Color color = WHITE;
     float radius = 0.25f;
     float lifetime = 0.35f;
     float age = 0.0f;
+    WorldEffectKind kind = WorldEffectKind::Burst;
 };
 
 struct TimedExplosion
@@ -78,6 +92,7 @@ struct EnergyProjectile
     float explosionRadius = 0.0f;
     float lifetime = 2.8f;
     bool fireZone = false;
+    bool blueFire = false;
 };
 
 struct HazardZone
@@ -88,6 +103,8 @@ struct HazardZone
     float radius = 2.4f;
     float lifetime = 5.0f;
     float tickTimer = 0.0f;
+    int damagePerTick = 8;
+    bool blueFire = false;
 };
 
 struct AlarmTrap

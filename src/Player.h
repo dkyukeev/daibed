@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Hero.h"
 #include "Inventory.h"
 #include "World.h"
 #include "raylib.h"
@@ -36,6 +37,10 @@ public:
     float GetInvulnerabilityTimer() const;
     bool HasShield() const;
     bool IsInvulnerable() const;
+    float GetHeroOutgoingDamageMultiplier() const;
+    HeroId GetHeroId() const;
+    const HeroRuntimeState& GetHeroState() const;
+    HeroRuntimeState& MutableHeroState();
 
     Inventory& GetInventory();
     const Inventory& GetInventory() const;
@@ -67,8 +72,16 @@ public:
     void ActivateSpeedBoost(float seconds);
     void ActivateJumpBoost(float seconds);
     void ActivateShield(float seconds);
+    void SetHeroId(HeroId heroId);
+    void SetHeroDamageMultipliers(float incomingMultiplier, float outgoingMultiplier);
+    void AddHeroUltimateCharge(float amount);
+    void SetHeroUltimateCharge(float amount);
+    bool IsHeroAbilityReady(HeroAbilitySlot slot) const;
+    void StartHeroAbilityCooldown(HeroAbilitySlot slot, float cooldownSeconds, float durationSeconds = 0.0f);
+    void ClearHeroActiveEffects();
     void Respawn(Vector3 spawnPoint);
     void Kill(bool finalDeath);
+    void KillWithRespawn(float seconds);
 
     bool CanAttack() const;
     void ResetAttackCooldown(float seconds);
@@ -104,5 +117,9 @@ private:
     float jumpBoostTimer_ = 0.0f;
     float shieldTimer_ = 0.0f;
     float invulnerabilityTimer_ = 0.0f;
+    HeroId heroId_ = HeroId::Radon;
+    HeroRuntimeState heroState_ {};
+    float heroIncomingDamageMultiplier_ = 1.0f;
+    float heroOutgoingDamageMultiplier_ = 1.0f;
     Inventory inventory_;
 };

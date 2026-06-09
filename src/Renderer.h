@@ -55,6 +55,9 @@ public:
         float hitMarkerTimer,
         float damageFlashTimer,
         float matchTime,
+        const char* heroActive1KeyText,
+        const char* heroActive2KeyText,
+        const char* heroUltimateKeyText,
         std::optional<int> winnerTeamId) const;
 
 private:

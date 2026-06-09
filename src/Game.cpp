@@ -1,6 +1,7 @@
 #include "Game.h"
 
 #include "CrashLogger.h"
+#include "HeroSystem.h"
 #include "raylib.h"
 
 #include <algorithm>
@@ -29,6 +30,8 @@ constexpr float kDroppedItemMagnetMaxSpeed = 7.0f;
 constexpr int kBuildMinY = -2;
 constexpr int kBuildMaxY = 64;
 constexpr int kBuildMapRadius = 72;
+constexpr float kRadonBaseRadiusSq = 105.0f;
+constexpr float kRadonSacrificeRespawnSeconds = 7.0f;
 
 struct WindowResolution
 {
@@ -71,6 +74,11 @@ float DistanceSquared(Vector3 a, Vector3 b)
 float Length2D(Vector3 value)
 {
     return std::sqrt(value.x * value.x + value.z * value.z);
+}
+
+float Dot2D(Vector3 a, Vector3 b)
+{
+    return a.x * b.x + a.z * b.z;
 }
 
 float Distance3D(Vector3 a, Vector3 b)
@@ -261,6 +269,26 @@ float YawFromDirection(Vector3 direction)
 std::string BoolCoreState(bool alive)
 {
     return alive ? "Core online." : "Core destroyed. Final Life!";
+}
+
+Color HeroAccentColor(HeroId id)
+{
+    switch (id)
+    {
+    case HeroId::Radon:
+        return Color { 92, 164, 255, 255 };
+    case HeroId::Orbita:
+        return Color { 255, 96, 82, 255 };
+    case HeroId::Brom:
+        return Color { 96, 202, 118, 255 };
+    case HeroId::Konvoy:
+        return Color { 92, 210, 255, 255 };
+    case HeroId::Likho:
+        return Color { 104, 238, 92, 255 };
+    case HeroId::Svidetel:
+        return Color { 180, 104, 255, 255 };
+    }
+    return WHITE;
 }
 
 std::string FormatTenths(float value)
@@ -460,7 +488,7 @@ void AddCenterMonument(World& world)
 
 bool Game::Initialize()
 {
-    SetConfigFlags(FLAG_MSAA_4X_HINT);
+    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
     LoadSettings();
     resolutionIndex_ = std::clamp(resolutionIndex_, 0, static_cast<int>(std::size(kWindowResolutions)) - 1);
     const WindowResolution& resolution = kWindowResolutions[resolutionIndex_];
@@ -470,6 +498,7 @@ bool Game::Initialize()
         return false;
     }
 
+    ApplyWindowSettings();
     ApplyFrameRateLimit();
     SetExitKey(KEY_NULL);
     EnableCursor();
@@ -510,6 +539,11 @@ void Game::HandleInput()
     if (screen_ == GameScreen::MainMenu)
     {
         HandleMenuInput();
+        return;
+    }
+    if (screen_ == GameScreen::HeroSelect)
+    {
+        HandleHeroSelectInput();
         return;
     }
     if (screen_ == GameScreen::Settings)
@@ -594,6 +628,35 @@ void Game::HandleInput()
         pauseIndex_ = 0;
         EnableCursor();
         return;
+    }
+
+    const bool heroAbilityPressed = currentInput_.heroActive1Pressed
+        || currentInput_.heroActive2Pressed
+        || currentInput_.heroUltimatePressed;
+    const bool keepUltimateKeyForShop = currentInput_.heroUltimatePressed && IsLocalPlayerInShopZone();
+    if (!shopOpen_ && localPlayer->IsAlive() && heroAbilityPressed && !keepUltimateKeyForShop)
+    {
+        const KeyBindings& bindings = input_.GetBindings();
+        const auto heroInputUsesKey = [&bindings, this](int key)
+        {
+            return (currentInput_.heroActive1Pressed && bindings.heroActive1 == key)
+                || (currentInput_.heroActive2Pressed && bindings.heroActive2 == key)
+                || (currentInput_.heroUltimatePressed && bindings.heroUltimate == key);
+        };
+
+        UseHeroAbilityInputs(*localPlayer);
+        if (heroInputUsesKey(bindings.drop))
+        {
+            currentInput_.dropPressed = false;
+        }
+        if (heroInputUsesKey(bindings.inventory))
+        {
+            currentInput_.inventoryPressed = false;
+        }
+        if (heroInputUsesKey(bindings.interact))
+        {
+            currentInput_.interactPressed = false;
+        }
     }
 
     if (currentInput_.inventoryPressed && !shopOpen_)
@@ -817,6 +880,7 @@ void Game::UpdateMatchSimulation(float dt)
     {
         player.UpdateTimers(dt);
     }
+    UpdateHeroPassives();
 
     if (!winnerTeamId_.has_value())
     {
@@ -905,6 +969,12 @@ void Game::Render()
         EndDrawing();
         return;
     }
+    if (screen_ == GameScreen::HeroSelect)
+    {
+        RenderHeroSelect();
+        EndDrawing();
+        return;
+    }
     if (screen_ == GameScreen::Settings)
     {
         RenderSettings();
@@ -965,6 +1035,9 @@ void Game::Render()
             hitMarkerTimer_,
             damageFlashTimer_,
             matchTime_,
+            KeyLabel(input_.GetBindings().heroActive1),
+            KeyLabel(input_.GetBindings().heroActive2),
+            KeyLabel(input_.GetBindings().heroUltimate),
             winnerTeamId_);
 
         RenderKillFeed();
@@ -1166,6 +1239,7 @@ void Game::SetupMatch()
     }
 
     Player local(localPlayerId_, "Local Runner", selectedTeamId_, localTeam->spawnPoint, true);
+    local.SetHeroId(selectedHeroId_);
     local.SetYaw(YawForTeam(selectedTeamId_));
     local.GetInventory().AddItem(ItemType::Sword, 1);
     local.GetInventory().AddBlock(BlockType::WoodBlock, 24);
@@ -1190,6 +1264,7 @@ void Game::SetupMatch()
         const std::string name = std::string(ally ? "Ally" : TeamName(teamId))
             + " Bot " + std::to_string(teamRoster[teamId] + 1);
         Player bot(nextBotId++, name, teamId, team->spawnPoint, false);
+        bot.SetHeroId(HeroSystem::IdFromIndex((nextBotId - 3) % HeroSystem::kHeroCount));
         bot.SetYaw(YawForTeam(teamId));
         ApplyBotLoadout(bot);
         players_.push_back(bot);
@@ -1827,6 +1902,7 @@ void Game::ConfigureAutomatchMatch()
         while (activeBotsByTeam[team.id] < selectedTeamSize_)
         {
             Player bot(nextId++, std::string(TeamName(team.id)) + " Auto Bot " + std::to_string(activeBotsByTeam[team.id] + 1), team.id, team.spawnPoint, false);
+            bot.SetHeroId(HeroSystem::IdFromIndex((nextId - localPlayerId_ - 2) % HeroSystem::kHeroCount));
             bot.SetYaw(YawForTeam(team.id));
             ApplyBotLoadout(bot);
             players_.push_back(bot);
@@ -2297,6 +2373,11 @@ void Game::TriggerCoreCollapse()
         {
             core.Damage(core.GetMaxHealth());
         }
+        if (TryRadonCoreSacrifice(core))
+        {
+            AddWorldEffect(world_.GridToWorld(core.GetBlockPosition()), HeroAccentColor(HeroId::Radon), 0.75f, 0.8f);
+            continue;
+        }
         world_.RemoveBlock(core.GetBlockPosition());
         Team* team = FindTeam(core.GetTeamId());
         if (team != nullptr)
@@ -2437,6 +2518,361 @@ void Game::DropPlayerResources(Player& player)
             0.0f,
             false });
     }
+}
+
+void Game::UseHeroAbilityInputs(Player& player)
+{
+    if (shopOpen_ || inventoryOpen_)
+    {
+        return;
+    }
+
+    if (currentInput_.heroActive1Pressed)
+    {
+        UseHeroAbility(player, HeroAbilitySlot::Active1);
+    }
+    if (currentInput_.heroActive2Pressed)
+    {
+        UseHeroAbility(player, HeroAbilitySlot::Active2);
+    }
+    if (currentInput_.heroUltimatePressed)
+    {
+        UseHeroAbility(player, HeroAbilitySlot::Ultimate);
+    }
+}
+
+bool Game::UseHeroAbility(Player& player, HeroAbilitySlot slot)
+{
+    if (!player.IsAlive() || player.IsEliminated())
+    {
+        return false;
+    }
+
+    if (player.GetHeroId() == HeroId::Radon)
+    {
+        return UseRadonAbility(player, slot);
+    }
+
+    const HeroDefinition& hero = HeroSystem::GetDefinition(player.GetHeroId());
+    const HeroAbilityDefinition* ability = nullptr;
+    const HeroAbilityState* state = nullptr;
+    switch (slot)
+    {
+    case HeroAbilitySlot::Active1:
+        ability = &hero.active1;
+        state = &player.GetHeroState().active1;
+        break;
+    case HeroAbilitySlot::Active2:
+        ability = &hero.active2;
+        state = &player.GetHeroState().active2;
+        break;
+    case HeroAbilitySlot::Ultimate:
+        ability = &hero.ultimate;
+        state = &player.GetHeroState().ultimate;
+        break;
+    }
+
+    if (ability == nullptr || state == nullptr)
+    {
+        return false;
+    }
+    if (state->cooldownRemaining > 0.0f)
+    {
+        SetMessage(hero.name + ": " + ability->name + " на кулдауне еще "
+            + FormatTenths(state->cooldownRemaining) + " с.", 1.7f);
+        audio_.PlayDenied();
+        return false;
+    }
+    if (slot == HeroAbilitySlot::Ultimate && !player.GetHeroState().ultimateReady)
+    {
+        SetMessage(hero.name + ": ульта не готова, заряд "
+            + std::to_string(static_cast<int>(player.GetHeroState().ultimateCharge)) + "%.", 1.8f);
+        audio_.PlayDenied();
+        return false;
+    }
+
+    player.StartHeroAbilityCooldown(slot, ability->cooldownSeconds, ability->durationSeconds);
+    const Color accent = HeroAccentColor(hero.id);
+    AddWorldEffect(player.GetPosition(), accent, slot == HeroAbilitySlot::Ultimate ? 0.62f : 0.38f, 0.45f);
+    AddFloatingText(HeroAbilitySlotName(slot), Vector3 { player.GetPosition().x, player.GetPosition().y + 1.4f, player.GetPosition().z }, accent);
+    const std::string message = hero.name + ": " + ability->name + " - базовый каркас активирован.";
+    SetMessage(message, 2.2f);
+    AddEventMessage(message, accent, 2.8f);
+    audio_.PlayPickup();
+    return true;
+}
+
+void Game::SetHeroAnimation(Player& player, HeroAnimationState state, float seconds)
+{
+    HeroRuntimeState& heroState = player.MutableHeroState();
+    heroState.animationState = state;
+    heroState.animationTimer = std::max(0.0f, seconds);
+    heroState.animationDuration = std::max(0.0f, seconds);
+}
+
+bool Game::UseRadonAbility(Player& player, HeroAbilitySlot slot)
+{
+    const HeroDefinition& hero = HeroSystem::GetDefinition(HeroId::Radon);
+    const HeroAbilityDefinition* ability = slot == HeroAbilitySlot::Active1
+        ? &hero.active1
+        : (slot == HeroAbilitySlot::Active2 ? &hero.active2 : &hero.ultimate);
+    const HeroAbilityState* state = slot == HeroAbilitySlot::Active1
+        ? &player.GetHeroState().active1
+        : (slot == HeroAbilitySlot::Active2 ? &player.GetHeroState().active2 : &player.GetHeroState().ultimate);
+
+    if (state->cooldownRemaining > 0.0f)
+    {
+        SetMessage(hero.name + ": " + ability->name + " на кулдауне еще " + FormatTenths(state->cooldownRemaining) + " с.", 1.7f);
+        audio_.PlayDenied();
+        return false;
+    }
+
+    EnergyCore* core = FindCoreByTeam(player.GetTeamId());
+    const bool coreAlive = core != nullptr && core->IsAlive();
+    if (slot == HeroAbilitySlot::Ultimate)
+    {
+        if (!player.GetHeroState().ultimateReady)
+        {
+            SetMessage("Радон: ульта не готова, заряд " + std::to_string(static_cast<int>(player.GetHeroState().ultimateCharge)) + "%.", 1.8f);
+            audio_.PlayDenied();
+            return false;
+        }
+
+        if (coreAlive)
+        {
+            HeroRuntimeState& heroState = player.MutableHeroState();
+            heroState.ultimatePrimed = !heroState.ultimatePrimed;
+            SetHeroAnimation(player, heroState.ultimatePrimed ? HeroAnimationState::UltPrimed : HeroAnimationState::Recovery, 0.45f);
+            if (core != nullptr)
+            {
+                AddWorldEffect(world_.GridToWorld(core->GetBlockPosition()), player.Forward(), HeroAccentColor(HeroId::Radon), 1.05f, 0.85f, WorldEffectKind::CorePulse);
+            }
+            SetMessage(heroState.ultimatePrimed
+                    ? "Радон: перехват разрушения Кора включен."
+                    : "Радон: перехват разрушения Кора выключен.",
+                2.2f);
+            AddEventMessage(heroState.ultimatePrimed ? "Ульта Радона ожидает угрозу Кору." : "Ульта Радона снята с подтверждения.",
+                HeroAccentColor(HeroId::Radon),
+                2.6f);
+            audio_.PlayPickup();
+            return true;
+        }
+
+        player.StartHeroAbilityCooldown(HeroAbilitySlot::Ultimate, 40.0f, 0.0f);
+        UseRadonDestroyedCoreUltimate(player);
+        return true;
+    }
+
+    player.StartHeroAbilityCooldown(slot, ability->cooldownSeconds, ability->durationSeconds);
+    if (slot == HeroAbilitySlot::Active1)
+    {
+        const bool pull = !coreAlive && (IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT) || IsMouseButtonDown(MOUSE_BUTTON_RIGHT));
+        SetHeroAnimation(player, HeroAnimationState::WindUp, pull ? 0.44f : 0.40f);
+        UseRadonForcePulse(player, pull);
+        return true;
+    }
+
+    SetHeroAnimation(player, HeroAnimationState::Cast, 0.46f);
+    UseRadonMolotov(player);
+    return true;
+}
+
+void Game::UseRadonForcePulse(Player& player, bool pull)
+{
+    const Vector3 origin {
+        player.GetPosition().x,
+        player.GetPosition().y + 0.72f,
+        player.GetPosition().z
+    };
+    Vector3 forward = player.IsLocal() ? cameraController_.GetFlatForward() : player.Forward();
+    forward = Normalize2D(forward);
+    if (Length2D(forward) <= 0.0001f)
+    {
+        forward = player.Forward();
+    }
+
+    int affected = 0;
+    const Color pulseColor = pull ? Color { 92, 164, 255, 255 } : HeroAccentColor(HeroId::Radon);
+    AddWorldEffect(origin, forward, pulseColor, pull ? 5.2f : 5.6f, 0.34f, pull ? WorldEffectKind::Pull : WorldEffectKind::Cone);
+    for (Player& target : players_)
+    {
+        if (target.GetId() == player.GetId()
+            || target.GetTeamId() == player.GetTeamId()
+            || !target.IsAlive()
+            || target.IsEliminated())
+        {
+            continue;
+        }
+
+        const Vector3 toTarget {
+            target.GetPosition().x - player.GetPosition().x,
+            0.0f,
+            target.GetPosition().z - player.GetPosition().z
+        };
+        const float distance = Length2D(toTarget);
+        if (distance <= 0.1f || distance > 5.6f)
+        {
+            continue;
+        }
+        const Vector3 direction = Normalize2D(toTarget);
+        if (Dot2D(forward, direction) < 0.48f)
+        {
+            continue;
+        }
+
+        const Vector3 targetEye {
+            target.GetPosition().x,
+            target.GetPosition().y + 0.72f,
+            target.GetPosition().z
+        };
+        const Vector3 ray {
+            targetEye.x - origin.x,
+            targetEye.y - origin.y,
+            targetEye.z - origin.z
+        };
+        const float rayDistance = Length(ray);
+        const std::optional<RaycastHit> wall = world_.Raycast(origin, ray, rayDistance);
+        if (wall.has_value() && wall->distance < rayDistance - 0.45f)
+        {
+            continue;
+        }
+
+        const float sneakMultiplier = pull && target.IsSneaking() ? 0.65f : 1.0f;
+        const float force = (pull ? 5.4f : 6.8f) * sneakMultiplier * BiomeKnockbackMultiplier();
+        const Vector3 impulseDirection = pull ? Vector3 { -direction.x, 0.0f, -direction.z } : direction;
+        target.Damage(2);
+        target.ApplyKnockback(Vector3 { impulseDirection.x * force, pull ? 0.42f : 0.82f, impulseDirection.z * force });
+        AddWorldEffect(target.GetPosition(), impulseDirection, pulseColor, 0.34f, 0.30f, WorldEffectKind::Burst);
+        AddFloatingText(pull ? "притяжение" : "толчок", target.GetPosition(), HeroAccentColor(HeroId::Radon));
+        ++affected;
+    }
+
+    AddWorldEffect(player.GetPosition(), forward, pulseColor, 0.62f, 0.42f, WorldEffectKind::Ring);
+    SetMessage(pull
+            ? "Радон притянул цели перед собой."
+            : "Радон выпустил силовой толчок.",
+        2.0f);
+    if (affected == 0)
+    {
+        AddEventMessage("Импульс Радона не задел врагов.", Fade(WHITE, 0.76f), 1.8f);
+    }
+    else
+    {
+        AddEventMessage("Импульс Радона задел целей: " + std::to_string(affected) + ".", HeroAccentColor(HeroId::Radon), 2.2f);
+    }
+    audio_.PlayBreakBlock();
+}
+
+void Game::UseRadonMolotov(Player& player)
+{
+    EnergyCore* core = FindCoreByTeam(player.GetTeamId());
+    const bool blueFire = core == nullptr || !core->IsAlive();
+    Vector3 direction = player.IsLocal() ? cameraController_.GetAimDirection() : player.Forward();
+    const float directionLength = Length(direction);
+    if (directionLength <= 0.0001f)
+    {
+        direction = player.Forward();
+    }
+    else
+    {
+        direction = Vector3 { direction.x / directionLength, direction.y / directionLength, direction.z / directionLength };
+    }
+
+    EnergyProjectile projectile {};
+    projectile.position = Vector3 {
+        player.GetPosition().x + direction.x * 0.75f,
+        player.GetPosition().y + 0.82f + direction.y * 0.75f,
+        player.GetPosition().z + direction.z * 0.75f
+    };
+    projectile.ownerId = player.GetId();
+    projectile.ownerTeamId = player.GetTeamId();
+    projectile.velocity = Vector3 { direction.x * 10.0f, direction.y * 10.0f + 2.0f, direction.z * 10.0f };
+    projectile.damage = blueFire ? 24 : 12;
+    projectile.radius = 0.28f;
+    projectile.explosionRadius = 1.6f;
+    projectile.fireZone = true;
+    projectile.blueFire = blueFire;
+    projectiles_.push_back(projectile);
+    AddWorldEffect(projectile.position, direction, blueFire ? Color { 92, 164, 255, 255 } : Color { 255, 118, 70, 255 }, 0.36f, 0.32f, WorldEffectKind::Trail);
+
+    SetMessage(blueFire ? "Радон бросил синий Молотов." : "Радон бросил коктейль Молотова.", 2.0f);
+    AddEventMessage(blueFire ? "Синий огонь Радона горит в 2 раза горячее." : "Огненная область Радона создана.", blueFire ? Color { 92, 164, 255, 255 } : Color { 255, 118, 70, 255 }, 2.4f);
+    audio_.PlayBreakBlock();
+}
+
+void Game::UseRadonDestroyedCoreUltimate(Player& player)
+{
+    SetHeroAnimation(player, HeroAnimationState::Cast, 0.72f);
+    EmitRadonCoreWave(player.GetPosition(), player.GetTeamId(), player.GetId(), 5.8f, 28.0f, 8.2f);
+    SetMessage("Радон выпустил нестабильную энергию разрушенного Кора.", 2.6f);
+    AddEventMessage("Ульта Радона: нестабильная энергия Кора.", HeroAccentColor(HeroId::Radon), 3.0f);
+    audio_.PlayCoreDestroyed();
+}
+
+bool Game::TryRadonCoreSacrifice(EnergyCore& core)
+{
+    for (Player& player : players_)
+    {
+        HeroRuntimeState& heroState = player.MutableHeroState();
+        if (player.GetTeamId() != core.GetTeamId()
+            || player.GetHeroId() != HeroId::Radon
+            || !player.IsAlive()
+            || player.IsEliminated()
+            || !heroState.ultimatePrimed
+            || !heroState.ultimateReady
+            || heroState.ultimate.cooldownRemaining > 0.0f)
+        {
+            continue;
+        }
+
+        core.SetHealth(20);
+        Team* team = FindTeam(core.GetTeamId());
+        if (team != nullptr)
+        {
+            team->coreAlive = true;
+        }
+        player.StartHeroAbilityCooldown(HeroAbilitySlot::Ultimate, 20.0f, 0.0f);
+        SetHeroAnimation(player, HeroAnimationState::DeathSacrifice, 0.85f);
+        player.KillWithRespawn(kRadonSacrificeRespawnSeconds);
+        const Vector3 corePosition = world_.GridToWorld(core.GetBlockPosition());
+        EmitRadonCoreWave(corePosition, player.GetTeamId(), player.GetId(), 7.2f, 0.0f, 9.4f);
+        AddWorldEffect(corePosition, player.Forward(), HeroAccentColor(HeroId::Radon), 1.8f, 1.05f, WorldEffectKind::Sacrifice);
+        AddEventMessage("Радон принял разрушение Кора на себя. Кор оставлен на 20 HP.", HeroAccentColor(HeroId::Radon), 5.0f);
+        AddKillFeed("Радон спас Core ценой жизни", HeroAccentColor(HeroId::Radon), 6.0f);
+        return true;
+    }
+    return false;
+}
+
+void Game::EmitRadonCoreWave(Vector3 position, int ownerTeamId, int ownerPlayerId, float radius, float damage, float force)
+{
+    for (Player& target : players_)
+    {
+        if (!target.IsAlive() || target.IsEliminated() || target.GetTeamId() == ownerTeamId)
+        {
+            continue;
+        }
+        const float distance = std::sqrt(DistanceSquared(target.GetPosition(), position));
+        if (distance > radius)
+        {
+            continue;
+        }
+
+        const float fraction = 1.0f - std::clamp(distance / std::max(0.1f, radius), 0.0f, 1.0f);
+        if (damage > 0.0f)
+        {
+            const int scaledDamage = std::max(4, static_cast<int>(damage * (0.55f + fraction * 0.45f) + 0.5f));
+            NoteDamageCredit(target.GetId(), ownerPlayerId);
+            target.Damage(scaledDamage);
+        }
+        const Vector3 away = Normalize2D(Vector3 { target.GetPosition().x - position.x, 0.0f, target.GetPosition().z - position.z });
+        const float scaledForce = force * (0.55f + fraction * 0.45f) * BiomeKnockbackMultiplier();
+        target.ApplyKnockback(Vector3 { away.x * scaledForce, 1.05f + fraction * 0.75f, away.z * scaledForce });
+        AddFloatingText(damage > 0.0f ? "нестабильно" : "волна", target.GetPosition(), HeroAccentColor(HeroId::Radon));
+    }
+
+    AddWorldEffect(position, Vector3 { 0.0f, 0.0f, 1.0f }, HeroAccentColor(HeroId::Radon), radius, 0.70f, WorldEffectKind::Ring);
+    cameraController_.AddShake(0.28f, 0.28f);
 }
 
 void Game::UseUtilityInputs(Player& player)
@@ -2754,7 +3190,7 @@ void Game::HandleInventoryInput(Player& player)
         }
         return;
     }
-    if (IsKeyPressed(KEY_Q) && heldInventoryStack_.IsEmpty() && inventoryCursorSlot_ >= 0)
+    if (IsKeyPressed(input_.GetBindings().drop) && heldInventoryStack_.IsEmpty() && inventoryCursorSlot_ >= 0)
     {
         const ItemStack stack = player.GetInventory().GetSlot(inventoryCursorSlot_);
         if (!stack.IsEmpty())
@@ -3129,7 +3565,7 @@ void Game::LaunchProjectileDirected(Player& player, UtilityType type, Vector3 di
     }
 }
 
-void Game::DetonateAt(Vector3 position, int ownerTeamId, int ownerPlayerId, float radius, int damage, bool createFireZone)
+void Game::DetonateAt(Vector3 position, int ownerTeamId, int ownerPlayerId, float radius, int damage, bool createFireZone, bool blueFire)
 {
     const int blockRadius = static_cast<int>(std::ceil(radius));
     const GridPos center = world_.WorldToGrid(position);
@@ -3174,10 +3610,16 @@ void Game::DetonateAt(Vector3 position, int ownerTeamId, int ownerPlayerId, floa
 
     if (createFireZone)
     {
-        hazardZones_.push_back(HazardZone { position, ownerTeamId, ownerPlayerId, 2.4f, 5.0f, 0.0f });
+        hazardZones_.push_back(HazardZone { position, ownerTeamId, ownerPlayerId, 2.4f, blueFire ? 4.0f : 5.0f, 0.0f, blueFire ? 16 : 8, blueFire });
     }
 
-    AddWorldEffect(position, createFireZone ? Color { 255, 118, 70, 255 } : Color { 255, 224, 122, 255 }, radius * 0.24f, 0.55f);
+    AddWorldEffect(
+        position,
+        Vector3 { 0.0f, 0.0f, 1.0f },
+        createFireZone ? (blueFire ? Color { 92, 164, 255, 255 } : Color { 255, 118, 70, 255 }) : Color { 255, 224, 122, 255 },
+        createFireZone ? radius : radius * 0.24f,
+        0.55f,
+        createFireZone ? WorldEffectKind::FireZone : WorldEffectKind::Burst);
     cameraController_.AddShake(0.18f + radius * 0.04f, 0.24f);
     audio_.PlayCoreDestroyed();
 }
@@ -3655,7 +4097,7 @@ void Game::UpdateProjectiles(float dt)
         {
             if (projectile.explosionRadius > 0.0f)
             {
-                DetonateAt(projectile.position, projectile.ownerTeamId, projectile.ownerId, projectile.explosionRadius, projectile.damage, projectile.fireZone);
+                DetonateAt(projectile.position, projectile.ownerTeamId, projectile.ownerId, projectile.explosionRadius, projectile.damage, projectile.fireZone, projectile.blueFire);
             }
             consumed = true;
         }
@@ -3678,7 +4120,7 @@ void Game::UpdateProjectiles(float dt)
                     player.ApplyKnockback(Vector3 { projectile.velocity.x * 0.12f * knockback, 1.4f * knockback, projectile.velocity.z * 0.12f * knockback });
                     if (projectile.explosionRadius > 0.0f)
                     {
-                        DetonateAt(projectile.position, projectile.ownerTeamId, projectile.ownerId, projectile.explosionRadius, projectile.damage, projectile.fireZone);
+                        DetonateAt(projectile.position, projectile.ownerTeamId, projectile.ownerId, projectile.explosionRadius, projectile.damage, projectile.fireZone, projectile.blueFire);
                     }
                     else
                     {
@@ -3697,7 +4139,13 @@ void Game::UpdateProjectiles(float dt)
         }
         else
         {
-            AddWorldEffect(projectile.position, projectile.fireZone ? Color { 255, 118, 70, 255 } : Color { 112, 232, 255, 255 }, projectile.radius, 0.08f);
+            AddWorldEffect(
+                projectile.position,
+                projectile.velocity,
+                projectile.fireZone ? (projectile.blueFire ? Color { 92, 164, 255, 255 } : Color { 255, 118, 70, 255 }) : Color { 112, 232, 255, 255 },
+                projectile.radius,
+                0.12f,
+                projectile.fireZone ? WorldEffectKind::Trail : WorldEffectKind::Burst);
         }
     }
 
@@ -3718,7 +4166,8 @@ void Game::UpdateHazardZones(float dt)
     {
         zone.lifetime -= dt;
         zone.tickTimer -= dt;
-        AddWorldEffect(zone.position, Color { 255, 88, 42, 255 }, 0.18f, 0.12f);
+        const Color fireColor = zone.blueFire ? Color { 92, 164, 255, 255 } : Color { 255, 88, 42, 255 };
+        AddWorldEffect(zone.position, Vector3 { 0.0f, 0.0f, 1.0f }, fireColor, zone.radius, 0.18f, WorldEffectKind::FireZone);
         if (zone.tickTimer > 0.0f)
         {
             continue;
@@ -3734,8 +4183,8 @@ void Game::UpdateHazardZones(float dt)
             if (DistanceSquared(player.GetPosition(), zone.position) <= zone.radius * zone.radius)
             {
                 NoteDamageCredit(player.GetId(), zone.ownerPlayerId);
-                player.Damage(8);
-                AddWorldEffect(player.GetPosition(), Color { 255, 118, 70, 255 }, 0.22f, 0.18f);
+                player.Damage(zone.damagePerTick);
+                AddWorldEffect(player.GetPosition(), zone.blueFire ? Color { 92, 164, 255, 255 } : Color { 255, 118, 70, 255 }, 0.22f, 0.18f);
             }
         }
     }
@@ -3749,6 +4198,53 @@ void Game::UpdateHazardZones(float dt)
                 return zone.lifetime <= 0.0f;
             }),
         hazardZones_.end());
+}
+
+void Game::UpdateHeroPassives()
+{
+    for (Player& player : players_)
+    {
+        float incomingMultiplier = 1.0f;
+        float outgoingMultiplier = 1.0f;
+        bool radonProtected = false;
+        bool radonOverloaded = false;
+        if (player.GetHeroId() == HeroId::Radon)
+        {
+            EnergyCore* core = FindCoreByTeam(player.GetTeamId());
+            if (core != nullptr && core->IsAlive())
+            {
+                const Vector3 corePosition = world_.GridToWorld(core->GetBlockPosition());
+                if (DistanceSquared(player.GetPosition(), corePosition) <= kRadonBaseRadiusSq)
+                {
+                    incomingMultiplier = 0.8f;
+                    radonProtected = true;
+                }
+            }
+            else
+            {
+                incomingMultiplier = 1.2f;
+                outgoingMultiplier = 1.2f;
+                radonOverloaded = true;
+            }
+        }
+        HeroRuntimeState& heroState = player.MutableHeroState();
+        heroState.radonProtected = radonProtected;
+        heroState.radonOverloaded = radonOverloaded;
+        if (player.GetHeroId() == HeroId::Radon
+            && heroState.animationTimer <= 0.0f
+            && !heroState.ultimatePrimed)
+        {
+            if (radonOverloaded)
+            {
+                heroState.animationState = HeroAnimationState::Overloaded;
+            }
+            else
+            {
+                heroState.animationState = HeroAnimationState::Idle;
+            }
+        }
+        player.SetHeroDamageMultipliers(incomingMultiplier, outgoingMultiplier);
+    }
 }
 
 void Game::UpdatePassiveRegeneration(float dt)
@@ -4104,13 +4600,23 @@ void Game::CompleteBreakProgress(Player& player)
             CombatEvent coreEvent;
             if (combat_.DamageCore(player, *core, coreMessage, &coreEvent, EffectiveToolLevel(player)))
             {
+                bool radonSacrifice = false;
                 if (!core->IsAlive())
                 {
-                    world_.RemoveBlock(core->GetBlockPosition());
-                    Team* team = FindTeam(core->GetTeamId());
-                    if (team != nullptr)
+                    radonSacrifice = TryRadonCoreSacrifice(*core);
+                    if (radonSacrifice)
                     {
-                        team->coreAlive = false;
+                        coreEvent.coreDestroyed = false;
+                        coreMessage = "Радон принял разрушение Кора на себя. Core остался на 20 HP.";
+                    }
+                    else
+                    {
+                        world_.RemoveBlock(core->GetBlockPosition());
+                        Team* team = FindTeam(core->GetTeamId());
+                        if (team != nullptr)
+                        {
+                            team->coreAlive = false;
+                        }
                     }
                 }
                 RegisterCombatEvent(coreEvent, coreMessage);
@@ -5101,13 +5607,35 @@ void Game::ApplyWindowSettings()
     {
         ToggleFullscreen();
     }
-    SetWindowSize(resolution.width, resolution.height);
+    const int monitor = GetCurrentMonitor();
+    const int maxWidth = std::max(640, GetMonitorWidth(monitor) - 80);
+    const int maxHeight = std::max(360, GetMonitorHeight(monitor) - 80);
+    SetWindowSize(std::min(resolution.width, maxWidth), std::min(resolution.height, maxHeight));
+    CenterWindowOnCurrentMonitor();
 }
 
 void Game::ApplyFrameRateLimit()
 {
     const int index = std::clamp(fpsLimitIndex_, 0, static_cast<int>(std::size(kFpsLimits)) - 1);
     SetTargetFPS(kFpsLimits[index].fps);
+}
+
+void Game::CenterWindowOnCurrentMonitor() const
+{
+    if (IsWindowFullscreen())
+    {
+        return;
+    }
+
+    const int monitor = GetCurrentMonitor();
+    const Vector2 monitorPosition = GetMonitorPosition(monitor);
+    const int monitorWidth = GetMonitorWidth(monitor);
+    const int monitorHeight = GetMonitorHeight(monitor);
+    const int windowWidth = GetScreenWidth();
+    const int windowHeight = GetScreenHeight();
+    const int x = static_cast<int>(monitorPosition.x) + std::max(0, (monitorWidth - windowWidth) / 2);
+    const int y = static_cast<int>(monitorPosition.y) + std::max(0, (monitorHeight - windowHeight) / 2);
+    SetWindowPosition(x, y);
 }
 
 void Game::LoadSettings()
@@ -5188,6 +5716,104 @@ void Game::LoadSettings()
             file >> value;
             arenaBiome_ = static_cast<ArenaBiome>(std::clamp(value, 0, 4));
         }
+        else if (key == "selectedHero")
+        {
+            int value = static_cast<int>(selectedHeroId_);
+            file >> value;
+            selectedHeroId_ = HeroSystem::IdFromIndex(value);
+        }
+        else if (key == "keyMoveForward")
+        {
+            file >> input_.MutableBindings().moveForward;
+        }
+        else if (key == "keyMoveBackward")
+        {
+            file >> input_.MutableBindings().moveBackward;
+        }
+        else if (key == "keyMoveLeft")
+        {
+            file >> input_.MutableBindings().moveLeft;
+        }
+        else if (key == "keyMoveRight")
+        {
+            file >> input_.MutableBindings().moveRight;
+        }
+        else if (key == "keyJump")
+        {
+            file >> input_.MutableBindings().jump;
+        }
+        else if (key == "keySneak")
+        {
+            file >> input_.MutableBindings().sneak;
+        }
+        else if (key == "keyBridgeMode")
+        {
+            file >> input_.MutableBindings().bridgeMode;
+        }
+        else if (key == "keySprint")
+        {
+            file >> input_.MutableBindings().sprint;
+        }
+        else if (key == "keyInteract")
+        {
+            file >> input_.MutableBindings().interact;
+        }
+        else if (key == "keyInventory")
+        {
+            file >> input_.MutableBindings().inventory;
+        }
+        else if (key == "keyDrop")
+        {
+            file >> input_.MutableBindings().drop;
+        }
+        else if (key == "keyCameraToggle")
+        {
+            file >> input_.MutableBindings().cameraToggle;
+        }
+        else if (key == "keyDebugRespawn")
+        {
+            file >> input_.MutableBindings().debugRespawn;
+        }
+        else if (key == "keyHeroActive1")
+        {
+            file >> input_.MutableBindings().heroActive1;
+        }
+        else if (key == "keyHeroActive2")
+        {
+            file >> input_.MutableBindings().heroActive2;
+        }
+        else if (key == "keyHeroUltimate")
+        {
+            file >> input_.MutableBindings().heroUltimate;
+        }
+        else if (key == "keyShoot")
+        {
+            file >> input_.MutableBindings().shoot;
+        }
+        else if (key == "keyFireball")
+        {
+            file >> input_.MutableBindings().fireball;
+        }
+        else if (key == "keyHeal")
+        {
+            file >> input_.MutableBindings().heal;
+        }
+        else if (key == "keyTeleport")
+        {
+            file >> input_.MutableBindings().teleport;
+        }
+        else if (key == "keyDash")
+        {
+            file >> input_.MutableBindings().dash;
+        }
+        else if (key == "keyMolotov")
+        {
+            file >> input_.MutableBindings().molotov;
+        }
+        else if (key == "keyAlarm")
+        {
+            file >> input_.MutableBindings().alarm;
+        }
         else if (key == "automatchRunTarget")
         {
             file >> automatchRunTarget_;
@@ -5207,6 +5833,7 @@ void Game::LoadSettings()
     selectedTeamSize_ = std::clamp(selectedTeamSize_, 1, 4);
     selectedTeamId_ = std::clamp(selectedTeamId_, 0, TeamCountForMode() - 1);
     selectedBotCount_ = std::clamp(selectedBotCount_, 0, MaxBotCountForSelection());
+    heroSelectIndex_ = HeroSystem::IndexOf(selectedHeroId_);
     automatchRunTarget_ = std::clamp(automatchRunTarget_, 1, 50);
     automatchTicksPerFrame_ = std::clamp(automatchTicksPerFrame_, 1, 32);
     automatchMaxMinutes_ = std::clamp(automatchMaxMinutes_, 3, 30);
@@ -5234,6 +5861,31 @@ void Game::SaveSettings() const
     file << "botDifficulty " << static_cast<int>(botDifficulty_) << "\n";
     file << "arenaLayout " << static_cast<int>(arenaLayout_) << "\n";
     file << "arenaBiome " << static_cast<int>(arenaBiome_) << "\n";
+    file << "selectedHero " << HeroSystem::IndexOf(selectedHeroId_) << "\n";
+    const KeyBindings& bindings = input_.GetBindings();
+    file << "keyMoveForward " << bindings.moveForward << "\n";
+    file << "keyMoveBackward " << bindings.moveBackward << "\n";
+    file << "keyMoveLeft " << bindings.moveLeft << "\n";
+    file << "keyMoveRight " << bindings.moveRight << "\n";
+    file << "keyJump " << bindings.jump << "\n";
+    file << "keySneak " << bindings.sneak << "\n";
+    file << "keyBridgeMode " << bindings.bridgeMode << "\n";
+    file << "keySprint " << bindings.sprint << "\n";
+    file << "keyInteract " << bindings.interact << "\n";
+    file << "keyInventory " << bindings.inventory << "\n";
+    file << "keyDrop " << bindings.drop << "\n";
+    file << "keyCameraToggle " << bindings.cameraToggle << "\n";
+    file << "keyDebugRespawn " << bindings.debugRespawn << "\n";
+    file << "keyHeroActive1 " << bindings.heroActive1 << "\n";
+    file << "keyHeroActive2 " << bindings.heroActive2 << "\n";
+    file << "keyHeroUltimate " << bindings.heroUltimate << "\n";
+    file << "keyShoot " << bindings.shoot << "\n";
+    file << "keyFireball " << bindings.fireball << "\n";
+    file << "keyHeal " << bindings.heal << "\n";
+    file << "keyTeleport " << bindings.teleport << "\n";
+    file << "keyDash " << bindings.dash << "\n";
+    file << "keyMolotov " << bindings.molotov << "\n";
+    file << "keyAlarm " << bindings.alarm << "\n";
     file << "automatchRunTarget " << automatchRunTarget_ << "\n";
     file << "automatchTicksPerFrame " << automatchTicksPerFrame_ << "\n";
     file << "automatchMaxMinutes " << automatchMaxMinutes_ << "\n";
@@ -5424,7 +6076,14 @@ const char* Game::KeyLabel(int key) const
 
 void Game::AddWorldEffect(Vector3 position, Color color, float radius, float seconds)
 {
-    worldEffects_.push_back(WorldEffect { position, color, radius, seconds, 0.0f });
+    worldEffects_.push_back(WorldEffect { position, Vector3 { 0.0f, 0.0f, 1.0f }, color, radius, seconds, 0.0f, WorldEffectKind::Burst });
+}
+
+void Game::AddWorldEffect(Vector3 position, Vector3 direction, Color color, float radius, float seconds, WorldEffectKind kind)
+{
+    const Vector3 flatDirection = Normalize2D(direction);
+    const Vector3 safeDirection = Length2D(flatDirection) > 0.0001f ? flatDirection : Vector3 { 0.0f, 0.0f, 1.0f };
+    worldEffects_.push_back(WorldEffect { position, safeDirection, color, radius, seconds, 0.0f, kind });
 }
 
 void Game::AddFloatingText(std::string text, Vector3 position, Color color)
