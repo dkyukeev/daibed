@@ -76,6 +76,9 @@ public:
     void Render();
 
 private:
+    struct BotTeamFrameContext;
+    struct BotFrameContext;
+
     void SetupMatch();
     void SetupGenerators();
     void AddClassicArenaLayout();
@@ -152,7 +155,7 @@ private:
     void UpdateSpectator(float dt);
     void UpdateLocalPlayer(float dt);
     void UpdateBots(float dt);
-    void UpdateSingleBot(Player& bot, Team& team, float dt);
+    void UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameContext& frameContext);
     void UpdateMatchSimulation(float dt);
     void StartAutomatch();
     void ConfigureAutomatchMatch();
@@ -205,14 +208,13 @@ private:
     bool TryPlaceBlockForPlayer(Player& player, const GridPos& pos, bool announce);
     std::optional<BlockType> SelectPlacementBlockForPlayer(const Player& player, const GridPos& pos) const;
     Vector3 ChooseBotWaypoint(const Player& bot, Vector3 finalTarget) const;
-    Vector3 ChooseBotPathWaypoint(Player& bot, Vector3 finalTarget, float dt);
+    Vector3 ChooseBotPathWaypoint(Player& bot, Vector3 finalTarget, float dt, const BotFrameContext& frameContext);
     bool TryBotBridgeBlock(Player& bot, Vector3 target);
     bool TryBotBreakCoreDefense(Player& bot, EnergyCore& core, float dt);
     std::optional<GridPos> FindBotBlockingBlock(const Player& bot, Vector3 wish, Vector3 target) const;
     bool TryBotBreakBlockingBlock(Player& bot, Vector3 wish, Vector3 target, float dt);
     void BotTryShop(Player& bot, Team& team);
     EnergyCore* FindNearestEnemyCore(const Player& player);
-    const ResourcePickup* FindBestPickupForBot(const Player& bot) const;
     Player* FindNearbyEnemyPlayer(const Player& player, float maxDistance);
     BotMemory& GetBotMemory(Player& bot);
     std::optional<RaycastHit> RaycastFromAim(const Player& player, float maxDistance) const;
