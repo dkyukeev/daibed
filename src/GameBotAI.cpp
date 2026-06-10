@@ -15,6 +15,7 @@ namespace
 {
 constexpr int kBotPathMinY = -2;
 constexpr int kBotPathMaxY = 64;
+constexpr float kBotPi = 3.1415926535f;
 
 float DistanceSquared(Vector3 a, Vector3 b)
 {
@@ -385,7 +386,7 @@ struct BotDecision
     Vector3 target {};
     Player* fightTarget = nullptr;
     float score = -100000.0f;
-    std::string reason;
+    const char* reason = "";
 };
 
 struct BotTeamSnapshot
@@ -416,8 +417,21 @@ struct BotResourcePlan
     float score = std::numeric_limits<float>::max();
 };
 
-const BotMemory* FindBotMemoryByPlayerId(const std::vector<BotMemory>& memories, int playerId)
+const BotMemory* FindBotMemoryByPlayerId(
+    const std::vector<BotMemory>& memories,
+    const std::unordered_map<int, std::size_t>& memoryIndex,
+    int playerId)
 {
+    const auto foundIndex = memoryIndex.find(playerId);
+    if (foundIndex != memoryIndex.end())
+    {
+        const std::size_t index = foundIndex->second;
+        if (index < memories.size() && memories[index].playerId == playerId)
+        {
+            return &memories[index];
+        }
+    }
+
     for (const BotMemory& memory : memories)
     {
         if (memory.playerId == playerId)
@@ -428,9 +442,12 @@ const BotMemory* FindBotMemoryByPlayerId(const std::vector<BotMemory>& memories,
     return nullptr;
 }
 
-BotRole ResolveRoleForPlayerId(int playerId, const std::vector<BotMemory>& memories)
+BotRole ResolveRoleForPlayerId(
+    int playerId,
+    const std::vector<BotMemory>& memories,
+    const std::unordered_map<int, std::size_t>& memoryIndex)
 {
-    if (const BotMemory* memory = FindBotMemoryByPlayerId(memories, playerId))
+    if (const BotMemory* memory = FindBotMemoryByPlayerId(memories, memoryIndex, playerId))
     {
         return memory->role;
     }
@@ -441,6 +458,7 @@ BotRoleDistribution BuildRoleDistributionForTeam(
     int teamId,
     const std::vector<Player>& players,
     const std::vector<BotMemory>& memories,
+    const std::unordered_map<int, std::size_t>& memoryIndex,
     int ignorePlayerId = -1)
 {
     BotRoleDistribution distribution {};
@@ -456,7 +474,7 @@ BotRoleDistribution BuildRoleDistributionForTeam(
         }
 
         ++distribution.total;
-        switch (ResolveRoleForPlayerId(player.GetId(), memories))
+        switch (ResolveRoleForPlayerId(player.GetId(), memories, memoryIndex))
         {
         case BotRole::Defender:
             ++distribution.defenders;
@@ -593,7 +611,7 @@ struct BotRoleDecision
 {
     BotRole role = BotRole::Rusher;
     bool force = false;
-    std::string reason;
+    const char* reason = "";
 };
 
 BotRoleDecision EvaluateDynamicRoleDecision(
@@ -800,7 +818,8 @@ BotTeamSnapshot BuildBotTeamSnapshot(
     const Player& bot,
     Vector3 coreHome,
     const std::vector<Player>& players,
-    const std::vector<BotMemory>& memories)
+    const std::vector<BotMemory>& memories,
+    const std::unordered_map<int, std::size_t>& memoryIndex)
 {
     BotTeamSnapshot snapshot {};
     for (const Player& ally : players)
@@ -820,7 +839,7 @@ BotTeamSnapshot BuildBotTeamSnapshot(
             ++snapshot.alliesNearCore;
         }
 
-        const BotMemory* allyMemory = FindBotMemoryByPlayerId(memories, ally.GetId());
+        const BotMemory* allyMemory = FindBotMemoryByPlayerId(memories, memoryIndex, ally.GetId());
         if (allyMemory == nullptr)
         {
             continue;
@@ -995,7 +1014,7 @@ struct BotMacroDirective
     BotIntent intent = BotIntent::SecureResources;
     Vector3 target {};
     Player* fightTarget = nullptr;
-    std::string reason;
+    const char* reason = "";
 };
 
 struct BotDecisionContext
@@ -1226,7 +1245,7 @@ BotDecision EvaluateBotDecision(const BotDecisionContext& ctx)
 {
     BotDecision decision {};
     decision.target = Vector3 { 0.0f, 1.5f, 0.0f };
-    const auto consider = [&](BotIntent intent, float score, Vector3 target, Player* fightTarget, const std::string& reason)
+    const auto consider = [&](BotIntent intent, float score, Vector3 target, Player* fightTarget, const char* reason)
     {
         score += RoleIntentBias(ctx.memory.role, intent);
         if (ctx.memory.intent == intent)
@@ -1267,14 +1286,45 @@ BotDecision EvaluateBotDecision(const BotDecisionContext& ctx)
 
     if (ctx.memory.stuckTimer > 1.05f)
     {
-        const Vector3 awayFromCenter = Normalize2D(Vector3 { ctx.botPos.x, 0.0f, ctx.botPos.z });
-        Vector3 recoverTarget = Length2D(awayFromCenter) > 0.0001f
-            ? Vector3 { ctx.botPos.x + awayFromCenter.x * 3.0f, 1.5f, ctx.botPos.z + awayFromCenter.z * 3.0f }
-            : homeTarget;
-        if (DistanceSquared(recoverTarget, homeTarget) > DistanceSquared(ctx.botPos, homeTarget) + 36.0f)
+        Vector3 recoverDirection = Normalize2D(Vector3 { ctx.botPos.x, 0.0f, ctx.botPos.z });
+        if (Length2D(recoverDirection) <= 0.0001f)
+        {
+            recoverDirection = Normalize2D(Vector3 {
+                homeTarget.x - ctx.botPos.x,
+                0.0f,
+                homeTarget.z - ctx.botPos.z
+            });
+        }
+        if (Length2D(recoverDirection) <= 0.0001f)
+        {
+            recoverDirection = Vector3 { 1.0f, 0.0f, 0.0f };
+        }
+
+        const float rotateStep = std::floor(std::max(0.0f, ctx.memory.stuckTimer - 1.05f) / 0.75f);
+        if (rotateStep > 0.0f)
+        {
+            const float directionSign = (static_cast<int>(rotateStep) % 2 == 0) ? -1.0f : 1.0f;
+            const float angle = directionSign * rotateStep * 0.25f * kBotPi;
+            const float cosine = std::cos(angle);
+            const float sine = std::sin(angle);
+            recoverDirection = Normalize2D(Vector3 {
+                recoverDirection.x * cosine - recoverDirection.z * sine,
+                0.0f,
+                recoverDirection.x * sine + recoverDirection.z * cosine
+            });
+        }
+
+        Vector3 recoverTarget {
+            ctx.botPos.x + recoverDirection.x * 3.0f,
+            1.5f,
+            ctx.botPos.z + recoverDirection.z * 3.0f
+        };
+        if (ctx.memory.stuckTimer < 2.25f
+            && DistanceSquared(recoverTarget, homeTarget) > DistanceSquared(ctx.botPos, homeTarget) + 36.0f)
         {
             recoverTarget = homeTarget;
         }
+
         consider(BotIntent::Recover, 980.0f + ctx.memory.stuckTimer * 120.0f, recoverTarget, nullptr, "unstick");
     }
 
@@ -2088,14 +2138,14 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt)
     const Vector3 coreHome = world_.GridToWorld(team.coreBlock);
     const Vector3 botPos = bot.GetPosition();
     const float distanceFromHome = DistanceSquared(bot.GetPosition(), coreHome);
-    const BotTeamSnapshot teamPlan = BuildBotTeamSnapshot(bot, coreHome, players_, botMemories_);
+    const BotTeamSnapshot teamPlan = BuildBotTeamSnapshot(bot, coreHome, players_, botMemories_, botMemoryIndexByPlayerId_);
     float enemyAtCoreDistance = std::numeric_limits<float>::max();
     Player* enemyAtCore = FindEnemyNearCore(bot, players_, coreHome, enemyAtCoreDistance);
     const Inventory& inventory = bot.GetInventory();
     const bool carryingLoot = memory.carriedResourceValue >= BotLootReturnValue(memory.role, botDifficulty_);
     const bool wantsShop = ShouldBotShop(bot, inventory, team, memory, botDifficulty_);
     const bool coreNeedsRepair = team.coreAlive && FindMissingCoreDefenseBlock(team).has_value();
-    const BotRoleDistribution roleDistribution = BuildRoleDistributionForTeam(team.id, players_, botMemories_, bot.GetId());
+    const BotRoleDistribution roleDistribution = BuildRoleDistributionForTeam(team.id, players_, botMemories_, botMemoryIndexByPlayerId_, bot.GetId());
     const BotRoleDecision roleDecision = EvaluateDynamicRoleDecision(
         bot,
         team,
@@ -2263,7 +2313,6 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt)
         && !retreating
         && !cleanupOverEconomy;
 
-    const Vector3 homeTarget { coreHome.x, 1.5f, coreHome.z };
     const Vector3 shopTarget { team.shopPosition.x, 1.5f, team.shopPosition.z };
     const Vector3 spawnTarget { team.spawnPoint.x, 1.5f, team.spawnPoint.z };
     const BotDecisionContext decisionContext {
@@ -2789,14 +2838,38 @@ Vector3 Game::ChooseBotPathWaypoint(Player& bot, Vector3 finalTarget, float dt)
     {
         return a.f > b.f;
     };
-    std::priority_queue<OpenNode, std::vector<OpenNode>, decltype(cmp)> open(cmp);
-    std::unordered_map<long long, float> bestCost;
-    std::unordered_map<long long, GridPos> parent;
+    static thread_local std::vector<OpenNode> open;
+    static thread_local std::unordered_map<long long, float> bestCost;
+    static thread_local std::unordered_map<long long, GridPos> parent;
+    static thread_local std::vector<GridPos> path;
+    static thread_local std::unordered_map<long long, bool> seenPath;
+    open.clear();
+    bestCost.clear();
+    parent.clear();
+    path.clear();
+    seenPath.clear();
+    const std::size_t pathReserve = static_cast<std::size_t>(maxExpansions);
+    const std::size_t mapReserve = pathReserve * 2U;
+    open.reserve(pathReserve);
+    path.reserve(pathReserve);
+    if (bestCost.bucket_count() < mapReserve)
+    {
+        bestCost.reserve(mapReserve);
+    }
+    if (parent.bucket_count() < mapReserve)
+    {
+        parent.reserve(mapReserve);
+    }
+    if (seenPath.bucket_count() < pathReserve)
+    {
+        seenPath.reserve(pathReserve);
+    }
     if (!nodeTravelCost(start).has_value())
     {
         return finalTarget;
     }
-    open.push(OpenNode { start, 0.0f, heuristic(start) });
+    open.push_back(OpenNode { start, 0.0f, heuristic(start) });
+    std::push_heap(open.begin(), open.end(), cmp);
     bestCost[PathKey(start.x, start.y, start.z)] = 0.0f;
 
     std::optional<GridPos> bestGoal;
@@ -2804,8 +2877,9 @@ Vector3 Game::ChooseBotPathWaypoint(Player& bot, Vector3 finalTarget, float dt)
     int expansions = 0;
     while (!open.empty() && expansions++ < maxExpansions)
     {
-        const OpenNode current = open.top();
-        open.pop();
+        std::pop_heap(open.begin(), open.end(), cmp);
+        const OpenNode current = open.back();
+        open.pop_back();
         const long long currentKey = PathKey(current.pos.x, current.pos.y, current.pos.z);
         const auto foundCurrent = bestCost.find(currentKey);
         if (foundCurrent == bestCost.end() || current.g > foundCurrent->second + 0.0001f)
@@ -2853,7 +2927,8 @@ Vector3 Game::ChooseBotPathWaypoint(Player& bot, Vector3 finalTarget, float dt)
 
                 bestCost[key] = nextG;
                 parent[key] = current.pos;
-                open.push(OpenNode { next, nextG, nextG + heuristic(next) });
+                open.push_back(OpenNode { next, nextG, nextG + heuristic(next) });
+                std::push_heap(open.begin(), open.end(), cmp);
             }
         }
     }
@@ -2863,10 +2938,8 @@ Vector3 Game::ChooseBotPathWaypoint(Player& bot, Vector3 finalTarget, float dt)
         return finalTarget;
     }
 
-    std::vector<GridPos> path;
     GridPos step = *bestGoal;
     path.push_back(step);
-    std::unordered_map<long long, bool> seenPath;
     seenPath[PathKey(step.x, step.y, step.z)] = true;
     int reconstructGuard = 0;
     while (step != start)
@@ -3438,7 +3511,7 @@ Player* Game::FindNearbyEnemyPlayer(const Player& player, float maxDistance)
 {
     Player* best = nullptr;
     float bestScore = std::numeric_limits<float>::max();
-    const BotRole role = ResolveRoleForPlayerId(player.GetId(), botMemories_);
+    const BotRole role = ResolveRoleForPlayerId(player.GetId(), botMemories_, botMemoryIndexByPlayerId_);
     const Team* ownTeam = FindTeam(player.GetTeamId());
     const Vector3 ownCore = ownTeam != nullptr ? world_.GridToWorld(ownTeam->coreBlock) : player.GetPosition();
 
@@ -3489,10 +3562,24 @@ Player* Game::FindNearbyEnemyPlayer(const Player& player, float maxDistance)
 
 BotMemory& Game::GetBotMemory(Player& bot)
 {
-    for (BotMemory& memory : botMemories_)
+    const int playerId = bot.GetId();
+    const auto foundIndex = botMemoryIndexByPlayerId_.find(playerId);
+    if (foundIndex != botMemoryIndexByPlayerId_.end())
     {
+        const std::size_t index = foundIndex->second;
+        if (index < botMemories_.size() && botMemories_[index].playerId == playerId)
+        {
+            return botMemories_[index];
+        }
+        botMemoryIndexByPlayerId_.erase(foundIndex);
+    }
+
+    for (std::size_t index = 0; index < botMemories_.size(); ++index)
+    {
+        BotMemory& memory = botMemories_[index];
         if (memory.playerId == bot.GetId())
         {
+            botMemoryIndexByPlayerId_[playerId] = index;
             return memory;
         }
     }
@@ -3505,8 +3592,10 @@ BotMemory& Game::GetBotMemory(Player& bot)
     memory.intent = role == BotRole::Defender ? BotIntent::RepairCoreDefense : BotIntent::SecureResources;
     memory.intentReason = "spawn plan";
     memory.roleReason = "spawn role";
+    const std::size_t index = botMemories_.size();
     botMemories_.push_back(memory);
-    return botMemories_.back();
+    botMemoryIndexByPlayerId_[playerId] = index;
+    return botMemories_[index];
 }
 
 std::optional<RaycastHit> Game::RaycastFromAim(const Player& player, float maxDistance) const
@@ -3777,7 +3866,7 @@ const ResourcePickup* Game::FindBestPickupForBot(const Player& bot) const
     const ResourcePickup* best = nullptr;
     float bestScore = std::numeric_limits<float>::max();
     const Inventory& inventory = bot.GetInventory();
-    const BotRole role = ResolveRoleForPlayerId(bot.GetId(), botMemories_);
+    const BotRole role = ResolveRoleForPlayerId(bot.GetId(), botMemories_, botMemoryIndexByPlayerId_);
 
     for (const ResourcePickup& pickup : pickups_)
     {

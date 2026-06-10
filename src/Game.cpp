@@ -24,6 +24,7 @@ constexpr float kItemPickupRadiusSq = 1.35f;
 constexpr float kItemMagnetRadius = 2.35f;
 constexpr float kItemMagnetRadiusSq = kItemMagnetRadius * kItemMagnetRadius;
 constexpr float kItemMergeRadiusSq = 0.85f * 0.85f;
+constexpr float kItemMergeInterval = 0.5f;
 constexpr float kResourceMagnetSpeed = 5.8f;
 constexpr float kDroppedItemMagnetAccel = 28.0f;
 constexpr float kDroppedItemMagnetMaxSpeed = 7.0f;
@@ -32,6 +33,24 @@ constexpr int kBuildMaxY = 64;
 constexpr int kBuildMapRadius = 72;
 constexpr float kRadonBaseRadiusSq = 105.0f;
 constexpr float kRadonSacrificeRespawnSeconds = 7.0f;
+constexpr float kOrbitaMomentumSpeed = 7.2f;
+constexpr float kOrbitaDashImpulse = 9.4f;
+constexpr float kOrbitaDashLift = 2.55f;
+constexpr float kOrbitaTeleportMaxDistance = 20.0f;
+constexpr float kOrbitaEnemyCoreRestrictionSq = 16.0f;
+constexpr float kOrbitaTeleportDamagePerBlock = 1.65f;
+constexpr int kBromVacuumIronCost = 48;
+constexpr int kBromTurretGoldCost = 12;
+constexpr int kBromVacuumCapacity = 24;
+constexpr float kBromVacuumStepHeight = 1.08f;
+constexpr float kBromVacuumDropHeight = 1.15f;
+constexpr float kBromTurretAttackRange = 16.0f;
+constexpr float kBromUltimateCooldownSeconds = 70.0f;
+constexpr float kBromUltimateDeviceLifetime = 90.0f;
+constexpr int kKonvoyMaxTraps = 2;
+constexpr float kKonvoyHandcuffRadius = 6.0f;
+constexpr float kKonvoyDomeVisualRadius = 6.0f;
+constexpr Vector3 kPlayerCollisionHalfExtents { 0.36f, 0.95f, 0.36f };
 
 struct WindowResolution
 {
@@ -156,6 +175,48 @@ Vector3 PickupTargetFor(const Player& player)
 {
     const Vector3 pos = player.GetPosition();
     return Vector3 { pos.x, pos.y + 0.35f, pos.z };
+}
+
+int ResourceIndex(ResourceType type)
+{
+    return static_cast<int>(type);
+}
+
+int BromCargoWeight(ResourceType type)
+{
+    switch (type)
+    {
+    case ResourceType::Iron:
+        return 1;
+    case ResourceType::Gold:
+        return 2;
+    case ResourceType::Crystal:
+        return 3;
+    }
+    return 1;
+}
+
+int BromCargoUnits(const std::array<int, 3>& cargo)
+{
+    return cargo[ResourceIndex(ResourceType::Iron)] * BromCargoWeight(ResourceType::Iron)
+        + cargo[ResourceIndex(ResourceType::Gold)] * BromCargoWeight(ResourceType::Gold)
+        + cargo[ResourceIndex(ResourceType::Crystal)] * BromCargoWeight(ResourceType::Crystal);
+}
+
+float BromUltimateChargeForResource(ResourceType type, int amount)
+{
+    const float value = type == ResourceType::Iron ? 0.9f : (type == ResourceType::Gold ? 2.2f : 4.0f);
+    return value * static_cast<float>(std::max(0, amount));
+}
+
+Vector3 OffsetAround(Vector3 center, int index, float radius)
+{
+    const float angle = static_cast<float>(index) * 2.3999632f;
+    return Vector3 {
+        center.x + std::cos(angle) * radius,
+        center.y,
+        center.z + std::sin(angle) * radius
+    };
 }
 
 Player* FindMagnetTarget(std::vector<Player>& players, Vector3 itemPosition, int ownerPlayerId, float ownerPickupDelay, float itemAge)
@@ -880,7 +941,7 @@ void Game::UpdateMatchSimulation(float dt)
     {
         player.UpdateTimers(dt);
     }
-    UpdateHeroPassives();
+    UpdateHeroPassives(dt);
 
     if (!winnerTeamId_.has_value())
     {
@@ -906,6 +967,9 @@ void Game::UpdateMatchSimulation(float dt)
         UpdateExplosives(dt);
         UpdateProjectiles(dt);
         UpdateHazardZones(dt);
+        UpdateHeroTemporaryBlocks(dt);
+        UpdateBromDevices(dt);
+        UpdateKonvoyDevices(dt);
         UpdateAlarmTraps();
         UpdatePassiveRegeneration(dt);
         UpdateBaseHealing(dt);
@@ -936,6 +1000,10 @@ void Game::UpdateMatchSimulation(float dt)
         {
             message_.clear();
         }
+    }
+    if (orbitaTeleportPreviewTimer_ > 0.0f)
+    {
+        orbitaTeleportPreviewTimer_ = std::max(0.0f, orbitaTeleportPreviewTimer_ - dt);
     }
 
     UpdatePlacementPreview();
@@ -990,6 +1058,17 @@ void Game::Render()
 
     const Player* localPlayer = GetLocalPlayer();
     const ItemStack localHeldItem = localPlayer != nullptr ? GetSelectedHotbarStack(*localPlayer) : ItemStack {};
+    OrbitaTeleportPreview orbitaTeleportPreview {};
+    if (localPlayer != nullptr
+        && screen_ == GameScreen::Playing
+        && !shopOpen_
+        && !inventoryOpen_
+        && !spectatorMode_
+        && orbitaTeleportPreviewTimer_ > 0.0f)
+    {
+        orbitaTeleportPreview = orbitaTeleportPreview_;
+    }
+    const std::vector<HeroDeviceVisual> heroDevices = BuildHeroDeviceVisuals();
     renderer_.RenderScene(
         world_,
         teams_,
@@ -998,6 +1077,8 @@ void Game::Render()
         generators_,
         pickups_,
         droppedItems_,
+        heroDevices,
+        orbitaTeleportPreview,
         placementPreview_,
         worldEffects_,
         floatingTexts_,
@@ -1025,6 +1106,7 @@ void Game::Render()
             placementPreview_,
             breakProgress_,
             combatPreview_,
+            orbitaTeleportPreview,
             selectedHotbarSlot_,
             inventoryOpen_,
             inventoryCursorSlot_,
@@ -1096,6 +1178,12 @@ void Game::SetupMatch()
     projectiles_.clear();
     hazardZones_.clear();
     alarmTraps_.clear();
+    heroTemporaryBlocks_.clear();
+    bromVacuumBots_.clear();
+    bromTurretDrones_.clear();
+    konvoyTraps_.clear();
+    konvoyTethers_.clear();
+    konvoyDomes_.clear();
     droppedItems_.clear();
     floatingTexts_.clear();
     eventMessages_.clear();
@@ -1103,15 +1191,20 @@ void Game::SetupMatch()
     playerScores_.clear();
     damageCredits_.clear();
     botMemories_.clear();
+    botMemoryIndexByPlayerId_.clear();
     teamChests_ = {};
     personalChest_ = Inventory {};
     placementPreview_ = PlacementPreview {};
     breakProgress_ = BreakProgress {};
     combatPreview_ = CombatPreview {};
+    orbitaTeleportPreview_ = OrbitaTeleportPreview {};
     stats_ = MatchStats {};
     hitMarkerTimer_ = 0.0f;
     damageFlashTimer_ = 0.0f;
+    orbitaTeleportPreviewTimer_ = 0.0f;
     matchTime_ = 0.0f;
+    pickupMergeTimer_ = 0.0f;
+    droppedItemMergeTimer_ = 0.0f;
     passiveRegenTimer_ = 0.0f;
     baseHealTimer_ = 0.0f;
     fastPlaceTimer_ = 0.0f;
@@ -2537,6 +2630,15 @@ void Game::UseHeroAbilityInputs(Player& player)
     }
     if (currentInput_.heroUltimatePressed)
     {
+        if (player.GetHeroId() == HeroId::Orbita)
+        {
+            orbitaTeleportPreview_ = BuildOrbitaTeleportPreview(player);
+            orbitaTeleportPreviewTimer_ = orbitaTeleportPreview_.visible ? 0.28f : 0.0f;
+        }
+        else
+        {
+            orbitaTeleportPreviewTimer_ = 0.0f;
+        }
         UseHeroAbility(player, HeroAbilitySlot::Ultimate);
     }
 }
@@ -2551,6 +2653,18 @@ bool Game::UseHeroAbility(Player& player, HeroAbilitySlot slot)
     if (player.GetHeroId() == HeroId::Radon)
     {
         return UseRadonAbility(player, slot);
+    }
+    if (player.GetHeroId() == HeroId::Orbita)
+    {
+        return UseOrbitaAbility(player, slot);
+    }
+    if (player.GetHeroId() == HeroId::Brom)
+    {
+        return UseBromAbility(player, slot);
+    }
+    if (player.GetHeroId() == HeroId::Konvoy)
+    {
+        return UseKonvoyAbility(player, slot);
     }
 
     const HeroDefinition& hero = HeroSystem::GetDefinition(player.GetHeroId());
@@ -2873,6 +2987,929 @@ void Game::EmitRadonCoreWave(Vector3 position, int ownerTeamId, int ownerPlayerI
 
     AddWorldEffect(position, Vector3 { 0.0f, 0.0f, 1.0f }, HeroAccentColor(HeroId::Radon), radius, 0.70f, WorldEffectKind::Ring);
     cameraController_.AddShake(0.28f, 0.28f);
+}
+
+bool Game::UseOrbitaAbility(Player& player, HeroAbilitySlot slot)
+{
+    const HeroDefinition& hero = HeroSystem::GetDefinition(HeroId::Orbita);
+    const HeroAbilityDefinition* ability = nullptr;
+    const HeroAbilityState* state = nullptr;
+    switch (slot)
+    {
+    case HeroAbilitySlot::Active1:
+        ability = &hero.active1;
+        state = &player.GetHeroState().active1;
+        break;
+    case HeroAbilitySlot::Active2:
+        ability = &hero.active2;
+        state = &player.GetHeroState().active2;
+        break;
+    case HeroAbilitySlot::Ultimate:
+        ability = &hero.ultimate;
+        state = &player.GetHeroState().ultimate;
+        break;
+    }
+
+    if (ability == nullptr || state == nullptr)
+    {
+        return false;
+    }
+    if (state->cooldownRemaining > 0.0f)
+    {
+        SetMessage(hero.name + ": " + ability->name + " на кулдауне еще "
+            + FormatTenths(state->cooldownRemaining) + " с.", 1.7f);
+        audio_.PlayDenied();
+        return false;
+    }
+
+    HeroRuntimeState& heroState = player.MutableHeroState();
+    if (slot == HeroAbilitySlot::Active1)
+    {
+        if (!player.IsOnGround() && heroState.orbitaAirDashLocked)
+        {
+            SetMessage("Орбита: повторный дэш в воздухе недоступен до касания поверхности.", 2.0f);
+            audio_.PlayDenied();
+            return false;
+        }
+
+        player.StartHeroAbilityCooldown(slot, ability->cooldownSeconds, ability->durationSeconds);
+        UseOrbitaDash(player);
+        return true;
+    }
+
+    if (slot == HeroAbilitySlot::Active2)
+    {
+        if (!UseOrbitaPhantomBlocks(player))
+        {
+            audio_.PlayDenied();
+            return false;
+        }
+
+        player.StartHeroAbilityCooldown(slot, ability->cooldownSeconds, ability->durationSeconds);
+        return true;
+    }
+
+    if (!heroState.ultimateReady)
+    {
+        SetMessage("Орбита: ульта не готова, заряд "
+            + std::to_string(static_cast<int>(heroState.ultimateCharge)) + "%.", 1.8f);
+        audio_.PlayDenied();
+        return false;
+    }
+    if (!UseOrbitaTeleport(player))
+    {
+        audio_.PlayDenied();
+        return false;
+    }
+
+    player.StartHeroAbilityCooldown(slot, ability->cooldownSeconds, ability->durationSeconds);
+    return true;
+}
+
+void Game::UseOrbitaDash(Player& player)
+{
+    Vector3 forward = player.IsLocal() ? cameraController_.GetFlatForward() : player.Forward();
+    forward = Normalize2D(forward);
+    if (Length2D(forward) <= 0.0001f)
+    {
+        forward = player.Forward();
+    }
+
+    HeroRuntimeState& heroState = player.MutableHeroState();
+    heroState.orbitaAirDashLocked = true;
+    heroState.orbitaMomentumStrike = true;
+    heroState.orbitaPulseTimer = 1.2f;
+    player.AddHeroUltimateCharge(7.0f);
+    player.ApplyKnockback(Vector3 {
+        forward.x * kOrbitaDashImpulse,
+        kOrbitaDashLift,
+        forward.z * kOrbitaDashImpulse
+    });
+    SetHeroAnimation(player, HeroAnimationState::Cast, 0.28f);
+
+    const Color accent = HeroAccentColor(HeroId::Orbita);
+    AddWorldEffect(player.GetPosition(), forward, accent, 1.15f, 0.34f, WorldEffectKind::Trail);
+    AddWorldEffect(player.GetPosition(), forward, accent, 0.72f, 0.36f, WorldEffectKind::Ring);
+    AddFloatingText("дэш", Vector3 { player.GetPosition().x, player.GetPosition().y + 1.2f, player.GetPosition().z }, accent);
+    SetMessage("Орбита делает дэш вперед. Следующий удар получил разгонный импульс.", 2.2f);
+    AddEventMessage("Орбита: разгонный импульс готов для следующего удара.", accent, 2.4f);
+    audio_.PlayPickup();
+}
+
+bool Game::UseOrbitaPhantomBlocks(Player& player)
+{
+    Vector3 forward = player.IsLocal() ? cameraController_.GetFlatForward() : player.Forward();
+    forward = Normalize2D(forward);
+    if (Length2D(forward) <= 0.0001f)
+    {
+        forward = player.Forward();
+    }
+
+    const HeroDefinition& hero = HeroSystem::GetDefinition(HeroId::Orbita);
+    const Vector3 playerPosition = player.GetPosition();
+    const GridPos underFeet = world_.WorldToGrid(Vector3 { playerPosition.x, playerPosition.y - 1.05f, playerPosition.z });
+    std::vector<GridPos> placedPositions;
+    placedPositions.reserve(8);
+
+    for (int i = 1; i <= 8; ++i)
+    {
+        const Vector3 projected {
+            playerPosition.x + forward.x * static_cast<float>(i),
+            static_cast<float>(underFeet.y),
+            playerPosition.z + forward.z * static_cast<float>(i)
+        };
+        const GridPos pos = world_.WorldToGrid(projected);
+        if (std::find(placedPositions.begin(), placedPositions.end(), pos) != placedPositions.end())
+        {
+            continue;
+        }
+        if (pos.y < kBuildMinY || pos.y > kBuildMaxY
+            || std::abs(pos.x) > kBuildMapRadius
+            || std::abs(pos.z) > kBuildMapRadius
+            || !world_.IsAir(pos)
+            || WouldBlockOverlapPlayer(pos, player.GetId())
+            || IsOrbitaCoreRestrictedPosition(world_.GridToWorld(pos), player.GetTeamId()))
+        {
+            continue;
+        }
+
+        if (world_.PlaceBlock(pos, Block { BlockType::EnergyGlassBlock, player.GetTeamId(), true }))
+        {
+            placedPositions.push_back(pos);
+            heroTemporaryBlocks_.push_back(HeroTemporaryBlock {
+                pos,
+                player.GetTeamId(),
+                std::max(0.1f, hero.active2.durationSeconds)
+            });
+            AddWorldEffect(world_.GridToWorld(pos), HeroAccentColor(HeroId::Orbita), 0.22f, 0.28f);
+        }
+    }
+
+    if (placedPositions.empty())
+    {
+        SetMessage("Орбита: фантомные блоки не нашли свободной безопасной линии.", 2.0f);
+        return false;
+    }
+
+    HeroRuntimeState& heroState = player.MutableHeroState();
+    heroState.orbitaPulseTimer = hero.active2.durationSeconds;
+    SetHeroAnimation(player, HeroAnimationState::Cast, 0.32f);
+    const Color accent = HeroAccentColor(HeroId::Orbita);
+    AddWorldEffect(player.GetPosition(), forward, accent, 1.45f, 0.42f, WorldEffectKind::Cone);
+    AddFloatingText("фантом x" + std::to_string(static_cast<int>(placedPositions.size())),
+        Vector3 { player.GetPosition().x, player.GetPosition().y + 1.25f, player.GetPosition().z },
+        accent);
+    SetMessage("Орбита выставила фантомные блоки на 3 секунды: " + std::to_string(static_cast<int>(placedPositions.size())) + ".", 2.4f);
+    AddEventMessage("Фантомные блоки Орбиты постепенно исчезают и не защищают чужой Кор.", accent, 2.8f);
+    audio_.PlayBuild();
+    return true;
+}
+
+OrbitaTeleportPreview Game::BuildOrbitaTeleportPreview(const Player& player) const
+{
+    OrbitaTeleportPreview preview {};
+    if (player.GetHeroId() != HeroId::Orbita || !player.IsAlive() || player.IsEliminated())
+    {
+        return preview;
+    }
+
+    const HeroRuntimeState& heroState = player.GetHeroState();
+    if (!heroState.ultimateReady || heroState.ultimate.cooldownRemaining > 0.0f)
+    {
+        return preview;
+    }
+
+    preview.visible = true;
+    const Vector3 origin = player.IsLocal()
+        ? cameraController_.GetAimOrigin()
+        : Vector3 { player.GetPosition().x, player.GetPosition().y + 0.78f, player.GetPosition().z };
+    Vector3 direction = player.IsLocal() ? cameraController_.GetAimDirection() : player.Forward();
+    direction = Normalize(direction);
+    if (Length(direction) <= 0.0001f)
+    {
+        direction = player.Forward();
+    }
+    preview.start = origin;
+    preview.direction = direction;
+
+    const auto fail = [&preview](std::string reason, Vector3 destination, float travelDistance)
+    {
+        preview.destination = destination;
+        preview.travelDistance = travelDistance;
+        preview.healthCost = 0;
+        preview.reason = std::move(reason);
+        preview.valid = false;
+        return preview;
+    };
+
+    const std::optional<RaycastHit> hit = world_.Raycast(origin, direction, kOrbitaTeleportMaxDistance);
+    Vector3 destination {};
+    float travelDistance = kOrbitaTeleportMaxDistance;
+    if (hit.has_value())
+    {
+        const Vector3 hitPoint {
+            origin.x + direction.x * hit->distance,
+            origin.y + direction.y * hit->distance,
+            origin.z + direction.z * hit->distance
+        };
+        if (hit->distance < 1.1f)
+        {
+            return fail("точка телепорта слишком близко к препятствию.", hitPoint, hit->distance);
+        }
+        if (hit->normal.y < 0)
+        {
+            return fail("точка над головой закрыта.", hitPoint, hit->distance);
+        }
+
+        const Vector3 hitBlock = world_.GridToWorld(hit->block);
+        if (hit->normal.y > 0)
+        {
+            destination = Vector3 { hitBlock.x, hitBlock.y + 1.5f, hitBlock.z };
+        }
+        else
+        {
+            const Vector3 adjacent = world_.GridToWorld(hit->adjacent);
+            destination = Vector3 { adjacent.x, hitBlock.y + 1.5f, adjacent.z };
+        }
+        travelDistance = hit->distance;
+    }
+    else
+    {
+        const Vector3 flat = Normalize2D(direction);
+        if (Length2D(flat) <= 0.0001f)
+        {
+            return fail("нужна видимая точка впереди.", player.GetPosition(), 0.0f);
+        }
+        destination = Vector3 {
+            player.GetPosition().x + flat.x * kOrbitaTeleportMaxDistance,
+            player.GetPosition().y,
+            player.GetPosition().z + flat.z * kOrbitaTeleportMaxDistance
+        };
+    }
+
+    std::string reason;
+    if (!IsOrbitaTeleportDestinationSafe(destination, player.GetTeamId(), &reason))
+    {
+        return fail(reason, destination, travelDistance);
+    }
+
+    preview.destination = destination;
+    preview.travelDistance = travelDistance;
+    preview.healthCost = std::clamp(static_cast<int>(travelDistance * kOrbitaTeleportDamagePerBlock + 0.5f), 4, 28);
+    preview.valid = true;
+    return preview;
+}
+
+bool Game::UseOrbitaTeleport(Player& player)
+{
+    const OrbitaTeleportPreview preview = BuildOrbitaTeleportPreview(player);
+    if (!preview.visible || !preview.valid)
+    {
+        const std::string reason = preview.reason.empty() ? "точка телепорта недоступна." : preview.reason;
+        SetMessage("Орбита: телепорт отменен. " + reason, 2.0f);
+        return false;
+    }
+
+    const Vector3 start = player.GetPosition();
+    const int selfDamage = preview.healthCost;
+    player.Teleport(preview.destination);
+    player.Damage(selfDamage);
+    player.MutableHeroState().orbitaPulseTimer = 0.8f;
+    SetHeroAnimation(player, HeroAnimationState::Cast, 0.36f);
+
+    const Color accent = HeroAccentColor(HeroId::Orbita);
+    AddWorldEffect(start, preview.direction, accent, 0.85f, 0.36f, WorldEffectKind::Ring);
+    AddWorldEffect(preview.destination, preview.direction, accent, 1.05f, 0.42f, WorldEffectKind::Ring);
+    AddFloatingText("-" + std::to_string(selfDamage), Vector3 { preview.destination.x, preview.destination.y + 1.35f, preview.destination.z }, accent);
+    SetMessage("Орбита телепортировалась в видимую точку и получила " + std::to_string(selfDamage) + " урона.", 2.5f);
+    AddEventMessage("Ульта Орбиты: видимый телепорт завершен.", accent, 2.8f);
+    cameraController_.AddShake(0.18f, 0.18f);
+    audio_.PlayCoreDestroyed();
+    return true;
+}
+
+bool Game::IsOrbitaCoreRestrictedPosition(Vector3 position, int teamId) const
+{
+    for (const EnergyCore& core : cores_)
+    {
+        if (!core.IsAlive() || core.GetTeamId() == teamId)
+        {
+            continue;
+        }
+        if (DistanceSquared(position, world_.GridToWorld(core.GetBlockPosition())) <= kOrbitaEnemyCoreRestrictionSq)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Game::IsOrbitaTeleportDestinationSafe(Vector3 position, int teamId, std::string* reason) const
+{
+    const auto fail = [reason](const std::string& text)
+    {
+        if (reason != nullptr)
+        {
+            *reason = text;
+        }
+        return false;
+    };
+
+    if (position.y < static_cast<float>(kBuildMinY) || position.y > static_cast<float>(kBuildMaxY + 2))
+    {
+        return fail("Высота недоступна.");
+    }
+    if (std::abs(position.x) > static_cast<float>(kBuildMapRadius)
+        || std::abs(position.z) > static_cast<float>(kBuildMapRadius))
+    {
+        return fail("Точка вне карты.");
+    }
+    if (IsOrbitaCoreRestrictedPosition(position, teamId))
+    {
+        return fail("Слишком близко к чужому Кору.");
+    }
+    if (world_.CollidesWithAABB(position, kPlayerCollisionHalfExtents))
+    {
+        return fail("Точка занята блоками.");
+    }
+    return true;
+}
+
+std::vector<HeroDeviceVisual> Game::BuildHeroDeviceVisuals() const
+{
+    std::vector<HeroDeviceVisual> devices;
+    devices.reserve(bromVacuumBots_.size() + bromTurretDrones_.size());
+
+    for (const BromVacuumBot& bot : bromVacuumBots_)
+    {
+        const Team* team = FindTeam(bot.ownerTeamId);
+        const Vector3 basePosition = team != nullptr
+            ? Vector3 { team->shopPosition.x, team->shopPosition.y + 0.35f, team->shopPosition.z }
+            : bot.position;
+        Vector3 direction = Normalize(Vector3 {
+            basePosition.x - bot.position.x,
+            basePosition.y - bot.position.y,
+            basePosition.z - bot.position.z
+        });
+        if (Length(direction) <= 0.0001f)
+        {
+            direction = Vector3 { 0.0f, 0.0f, 1.0f };
+        }
+
+        HeroDeviceVisual visual {};
+        visual.kind = HeroDeviceVisualKind::BromVacuumBot;
+        visual.position = bot.position;
+        visual.target = basePosition;
+        visual.direction = direction;
+        visual.teamId = bot.ownerTeamId;
+        visual.cargoUnits = BromCargoUnits(bot.cargo);
+        visual.cargoCapacity = kBromVacuumCapacity;
+        visual.temporary = bot.temporary;
+        visual.returning = bot.returning;
+        visual.active = bot.returning || visual.cargoUnits > 0;
+        visual.lifetimeFraction = bot.temporary
+            ? std::clamp(bot.lifetime / kBromUltimateDeviceLifetime, 0.0f, 1.0f)
+            : 1.0f;
+        devices.push_back(visual);
+    }
+
+    for (const BromTurretDrone& drone : bromTurretDrones_)
+    {
+        Vector3 target = drone.shotFlashTimer > 0.0f ? drone.lastShotTarget : Vector3 {
+            drone.position.x + 0.0f,
+            drone.position.y,
+            drone.position.z + 1.0f
+        };
+        Vector3 direction = Normalize(Vector3 {
+            target.x - drone.position.x,
+            target.y - drone.position.y,
+            target.z - drone.position.z
+        });
+        if (Length(direction) <= 0.0001f)
+        {
+            direction = Vector3 { 0.0f, 0.0f, 1.0f };
+        }
+
+        HeroDeviceVisual visual {};
+        visual.kind = HeroDeviceVisualKind::BromTurretDrone;
+        visual.position = drone.position;
+        visual.target = target;
+        visual.direction = direction;
+        visual.teamId = drone.ownerTeamId;
+        visual.temporary = drone.temporary;
+        visual.active = drone.shotFlashTimer > 0.0f;
+        visual.lifetimeFraction = drone.temporary
+            ? std::clamp(drone.lifetime / kBromUltimateDeviceLifetime, 0.0f, 1.0f)
+            : 1.0f;
+        devices.push_back(visual);
+    }
+
+    const auto playerById = [this](int playerId) -> const Player*
+    {
+        for (const Player& player : players_)
+        {
+            if (player.GetId() == playerId)
+            {
+                return &player;
+            }
+        }
+        return nullptr;
+    };
+    const HeroDefinition& konvoy = HeroSystem::GetDefinition(HeroId::Konvoy);
+    for (const KonvoyTrap& trap : konvoyTraps_)
+    {
+        HeroDeviceVisual visual {};
+        visual.kind = HeroDeviceVisualKind::KonvoyTrap;
+        visual.position = trap.position;
+        visual.teamId = trap.ownerTeamId;
+        visual.active = trap.flashTimer > 0.0f;
+        visual.radius = 0.72f;
+        visual.lifetimeFraction = std::clamp(trap.lifetime / std::max(0.1f, konvoy.active1.durationSeconds), 0.0f, 1.0f);
+        devices.push_back(visual);
+    }
+
+    for (const KonvoyTether& tether : konvoyTethers_)
+    {
+        const Player* owner = playerById(tether.ownerPlayerId);
+        const Player* target = playerById(tether.targetPlayerId);
+        if (owner == nullptr || target == nullptr)
+        {
+            continue;
+        }
+
+        HeroDeviceVisual visual {};
+        visual.kind = HeroDeviceVisualKind::KonvoyTether;
+        visual.position = Vector3 { owner->GetPosition().x, owner->GetPosition().y + 0.62f, owner->GetPosition().z };
+        visual.target = Vector3 { target->GetPosition().x, target->GetPosition().y + 0.72f, target->GetPosition().z };
+        visual.teamId = tether.ownerTeamId;
+        visual.active = tether.flashTimer > 0.0f;
+        visual.radius = kKonvoyHandcuffRadius;
+        visual.lifetimeFraction = std::clamp(tether.lifetime / std::max(0.1f, konvoy.active2.durationSeconds), 0.0f, 1.0f);
+        devices.push_back(visual);
+    }
+
+    for (const KonvoyDome& dome : konvoyDomes_)
+    {
+        HeroDeviceVisual visual {};
+        visual.kind = HeroDeviceVisualKind::KonvoyDome;
+        visual.position = dome.position;
+        visual.teamId = dome.ownerTeamId;
+        visual.active = dome.flashTimer > 0.0f;
+        visual.radius = kKonvoyDomeVisualRadius;
+        visual.lifetimeFraction = std::clamp(dome.lifetime / std::max(0.1f, konvoy.ultimate.durationSeconds), 0.0f, 1.0f);
+        devices.push_back(visual);
+    }
+
+    return devices;
+}
+
+bool Game::UseBromAbility(Player& player, HeroAbilitySlot slot)
+{
+    const HeroDefinition& hero = HeroSystem::GetDefinition(HeroId::Brom);
+    const HeroAbilityDefinition* ability = nullptr;
+    const HeroAbilityState* state = nullptr;
+    switch (slot)
+    {
+    case HeroAbilitySlot::Active1:
+        ability = &hero.active1;
+        state = &player.GetHeroState().active1;
+        break;
+    case HeroAbilitySlot::Active2:
+        ability = &hero.active2;
+        state = &player.GetHeroState().active2;
+        break;
+    case HeroAbilitySlot::Ultimate:
+        ability = &hero.ultimate;
+        state = &player.GetHeroState().ultimate;
+        break;
+    }
+
+    if (ability == nullptr || state == nullptr)
+    {
+        return false;
+    }
+    if (state->cooldownRemaining > 0.0f)
+    {
+        SetMessage(hero.name + ": " + ability->name + " на кулдауне еще "
+            + FormatTenths(state->cooldownRemaining) + " с.", 1.7f);
+        audio_.PlayDenied();
+        return false;
+    }
+
+    if (slot == HeroAbilitySlot::Active1)
+    {
+        if (!UseBromVacuumBot(player, false, 0.0f))
+        {
+            audio_.PlayDenied();
+            return false;
+        }
+        player.StartHeroAbilityCooldown(slot, ability->cooldownSeconds, ability->durationSeconds);
+        return true;
+    }
+    if (slot == HeroAbilitySlot::Active2)
+    {
+        if (!UseBromTurretDrone(player, false, 0.0f))
+        {
+            audio_.PlayDenied();
+            return false;
+        }
+        player.StartHeroAbilityCooldown(slot, ability->cooldownSeconds, ability->durationSeconds);
+        return true;
+    }
+
+    if (!player.GetHeroState().ultimateReady)
+    {
+        SetMessage("Бром: ульта не готова, заряд "
+            + std::to_string(static_cast<int>(player.GetHeroState().ultimateCharge)) + "%.", 1.8f);
+        audio_.PlayDenied();
+        return false;
+    }
+    if (!UseBromUltimate(player))
+    {
+        audio_.PlayDenied();
+        return false;
+    }
+    player.StartHeroAbilityCooldown(HeroAbilitySlot::Ultimate, kBromUltimateCooldownSeconds, kBromUltimateDeviceLifetime);
+    return true;
+}
+
+bool Game::UseBromVacuumBot(Player& player, bool temporary, float lifetimeSeconds)
+{
+    if (!temporary)
+    {
+        const int activeCount = static_cast<int>(std::count_if(
+            bromVacuumBots_.begin(),
+            bromVacuumBots_.end(),
+            [&player](const BromVacuumBot& bot)
+            {
+                return !bot.temporary && bot.ownerPlayerId == player.GetId();
+            }));
+        if (activeCount >= 2)
+        {
+            SetMessage("Бром: одновременно могут работать только два робота-пылесоса.", 2.0f);
+            return false;
+        }
+        if (!player.GetInventory().SpendResource(ResourceType::Iron, kBromVacuumIronCost))
+        {
+            SetMessage("Бром: для робота-пылесоса нужно 48 железа.", 2.0f);
+            return false;
+        }
+    }
+
+    const int spawnIndex = static_cast<int>(bromVacuumBots_.size() + bromTurretDrones_.size());
+    BromVacuumBot bot {};
+    bot.position = OffsetAround(player.GetPosition(), spawnIndex, 1.35f);
+    bot.ownerPlayerId = player.GetId();
+    bot.ownerTeamId = player.GetTeamId();
+    bot.temporary = temporary;
+    bot.lifetime = temporary ? std::max(0.1f, lifetimeSeconds) : 0.0f;
+    bot.pulseTimer = 0.4f;
+    bromVacuumBots_.push_back(bot);
+
+    player.AddHeroUltimateCharge(temporary ? 0.0f : 8.0f);
+    SetHeroAnimation(player, HeroAnimationState::Cast, 0.34f);
+    const Color accent = HeroAccentColor(HeroId::Brom);
+    AddWorldEffect(bot.position, accent, temporary ? 0.32f : 0.26f, 0.34f);
+    AddFloatingText(temporary ? "временный пылесос" : "робот-пылесос", bot.position, accent);
+    SetMessage(temporary ? "Бром собрал временного робота-пылесоса." : "Бром собрал робота-пылесоса за 48 железа.", 2.2f);
+    AddEventMessage("Робот-пылесос Брома ищет ресурсы и несет их в командный сундук.", accent, 2.8f);
+    audio_.PlayBuild();
+    return true;
+}
+
+bool Game::UseBromTurretDrone(Player& player, bool temporary, float lifetimeSeconds)
+{
+    if (!temporary)
+    {
+        const int activeCount = static_cast<int>(std::count_if(
+            bromTurretDrones_.begin(),
+            bromTurretDrones_.end(),
+            [&player](const BromTurretDrone& drone)
+            {
+                return !drone.temporary && drone.ownerPlayerId == player.GetId();
+            }));
+        if (activeCount >= 1)
+        {
+            SetMessage("Бром: одновременно может работать только один дрон-турель.", 2.0f);
+            return false;
+        }
+        if (!player.GetInventory().SpendResource(ResourceType::Gold, kBromTurretGoldCost))
+        {
+            SetMessage("Бром: для дрона-турели нужно 12 золота.", 2.0f);
+            return false;
+        }
+    }
+
+    const int spawnIndex = static_cast<int>(bromVacuumBots_.size() + bromTurretDrones_.size());
+    BromTurretDrone drone {};
+    drone.position = OffsetAround(Vector3 { player.GetPosition().x, player.GetPosition().y + 1.05f, player.GetPosition().z }, spawnIndex, 1.65f);
+    drone.ownerPlayerId = player.GetId();
+    drone.ownerTeamId = player.GetTeamId();
+    drone.temporary = temporary;
+    drone.lifetime = temporary ? std::max(0.1f, lifetimeSeconds) : 0.0f;
+    drone.fireCooldown = 0.4f;
+    drone.pulseTimer = 0.4f;
+    bromTurretDrones_.push_back(drone);
+
+    player.AddHeroUltimateCharge(temporary ? 0.0f : 10.0f);
+    SetHeroAnimation(player, HeroAnimationState::Cast, 0.34f);
+    const Color accent = HeroAccentColor(HeroId::Brom);
+    AddWorldEffect(drone.position, accent, temporary ? 0.36f : 0.30f, 0.34f);
+    AddFloatingText(temporary ? "временная турель" : "дрон-турель", drone.position, accent);
+    SetMessage(temporary ? "Бром собрал временного дрона-турель." : "Бром собрал дрона-турель за 12 золота.", 2.2f);
+    AddEventMessage("Дрон-турель Брома стреляет только по игрокам и не атакует Кор.", accent, 2.8f);
+    audio_.PlayBuild();
+    return true;
+}
+
+bool Game::UseBromUltimate(Player& player)
+{
+    constexpr float absorbRadiusSq = 7.0f * 7.0f;
+    int absorbed = 0;
+    for (ResourcePickup& pickup : pickups_)
+    {
+        if (pickup.collected || DistanceSquared(pickup.position, player.GetPosition()) > absorbRadiusSq)
+        {
+            continue;
+        }
+
+        player.GetInventory().AddResource(pickup.type, pickup.amount);
+        absorbed += pickup.amount;
+        pickup.collected = true;
+        AddWorldEffect(pickup.position, HeroAccentColor(HeroId::Brom), 0.18f, 0.18f);
+    }
+
+    int vacuumCount = std::min(2, player.GetInventory().GetResource(ResourceType::Iron) / kBromVacuumIronCost);
+    int turretCount = std::min(3, player.GetInventory().GetResource(ResourceType::Gold) / kBromTurretGoldCost);
+    if (vacuumCount == 0 && turretCount == 0)
+    {
+        SetMessage("Бром: для Сборки обороны нужны ресурсы рядом или в инвентаре.", 2.2f);
+        return false;
+    }
+
+    int spawned = 0;
+    for (int i = 0; i < vacuumCount; ++i)
+    {
+        if (player.GetInventory().SpendResource(ResourceType::Iron, kBromVacuumIronCost)
+            && UseBromVacuumBot(player, true, kBromUltimateDeviceLifetime))
+        {
+            ++spawned;
+        }
+    }
+    for (int i = 0; i < turretCount; ++i)
+    {
+        if (player.GetInventory().SpendResource(ResourceType::Gold, kBromTurretGoldCost)
+            && UseBromTurretDrone(player, true, kBromUltimateDeviceLifetime))
+        {
+            ++spawned;
+        }
+    }
+
+    if (spawned <= 0)
+    {
+        SetMessage("Бром: ресурсы не удалось превратить в устройства.", 2.0f);
+        return false;
+    }
+
+    const Color accent = HeroAccentColor(HeroId::Brom);
+    SetHeroAnimation(player, HeroAnimationState::Cast, 0.58f);
+    AddWorldEffect(player.GetPosition(), player.Forward(), accent, 2.2f, 0.65f, WorldEffectKind::Ring);
+    SetMessage("Бром запустил Сборку обороны: устройств " + std::to_string(spawned) + ", время 1.5 минуты.", 3.0f);
+    AddEventMessage("Ульта Брома собрала защиту из ресурсов. Поглощено рядом: " + std::to_string(absorbed) + ".", accent, 3.2f);
+    audio_.PlayPurchase();
+    return true;
+}
+
+bool Game::UseKonvoyAbility(Player& player, HeroAbilitySlot slot)
+{
+    const HeroDefinition& hero = HeroSystem::GetDefinition(HeroId::Konvoy);
+    const HeroAbilityDefinition* ability = nullptr;
+    const HeroAbilityState* state = nullptr;
+    switch (slot)
+    {
+    case HeroAbilitySlot::Active1:
+        ability = &hero.active1;
+        state = &player.GetHeroState().active1;
+        break;
+    case HeroAbilitySlot::Active2:
+        ability = &hero.active2;
+        state = &player.GetHeroState().active2;
+        break;
+    case HeroAbilitySlot::Ultimate:
+        ability = &hero.ultimate;
+        state = &player.GetHeroState().ultimate;
+        break;
+    }
+
+    if (ability == nullptr || state == nullptr)
+    {
+        return false;
+    }
+    if (state->cooldownRemaining > 0.0f)
+    {
+        SetMessage(hero.name + ": " + ability->name + " на кулдауне еще "
+            + FormatTenths(state->cooldownRemaining) + " с.", 1.7f);
+        audio_.PlayDenied();
+        return false;
+    }
+
+    bool used = false;
+    if (slot == HeroAbilitySlot::Active1)
+    {
+        used = UseKonvoyTrap(player, ability->durationSeconds);
+    }
+    else if (slot == HeroAbilitySlot::Active2)
+    {
+        used = UseKonvoyHandcuffs(player, ability->durationSeconds);
+    }
+    else
+    {
+        if (!player.GetHeroState().ultimateReady)
+        {
+            SetMessage("Конвой: ульта не готова, заряд "
+                + std::to_string(static_cast<int>(player.GetHeroState().ultimateCharge)) + "%.", 1.8f);
+            audio_.PlayDenied();
+            return false;
+        }
+        used = UseKonvoyDome(player, ability->durationSeconds);
+    }
+
+    if (!used)
+    {
+        audio_.PlayDenied();
+        return false;
+    }
+
+    player.StartHeroAbilityCooldown(slot, ability->cooldownSeconds, ability->durationSeconds);
+    return true;
+}
+
+bool Game::UseKonvoyTrap(Player& player, float lifetimeSeconds)
+{
+    const int activeCount = static_cast<int>(std::count_if(
+        konvoyTraps_.begin(),
+        konvoyTraps_.end(),
+        [&player](const KonvoyTrap& trap)
+        {
+            return trap.ownerPlayerId == player.GetId();
+        }));
+    if (activeCount >= kKonvoyMaxTraps)
+    {
+        SetMessage("Конвой: одновременно может быть до 2 капканов.", 2.0f);
+        return false;
+    }
+
+    Vector3 forward = player.IsLocal() ? cameraController_.GetFlatForward() : player.Forward();
+    forward = Normalize2D(forward);
+    if (Length2D(forward) <= 0.0001f)
+    {
+        forward = player.Forward();
+    }
+
+    const Vector3 desired {
+        player.GetPosition().x + forward.x * 1.15f,
+        player.GetPosition().y,
+        player.GetPosition().z + forward.z * 1.15f
+    };
+    const GridPos column = world_.WorldToGrid(desired);
+    std::optional<Vector3> trapPosition;
+    const int startY = world_.WorldToGrid(player.GetPosition()).y + 1;
+    for (int y = startY; y >= startY - 3; --y)
+    {
+        const GridPos ground { column.x, y, column.z };
+        const GridPos above { column.x, y + 1, column.z };
+        if (world_.IsSolid(ground) && world_.IsAir(above))
+        {
+            const Vector3 groundCenter = world_.GridToWorld(ground);
+            trapPosition = Vector3 { desired.x, groundCenter.y + 0.57f, desired.z };
+            break;
+        }
+    }
+
+    if (!trapPosition.has_value())
+    {
+        SetMessage("Конвой: капкану нужна свободная поверхность рядом.", 2.0f);
+        return false;
+    }
+
+    KonvoyTrap trap {};
+    trap.position = *trapPosition;
+    trap.ownerPlayerId = player.GetId();
+    trap.ownerTeamId = player.GetTeamId();
+    trap.lifetime = std::max(0.1f, lifetimeSeconds);
+    trap.flashTimer = 0.45f;
+    konvoyTraps_.push_back(trap);
+
+    const Color accent = HeroAccentColor(HeroId::Konvoy);
+    SetHeroAnimation(player, HeroAnimationState::Cast, 0.30f);
+    AddWorldEffect(trap.position, forward, accent, 0.52f, 0.38f, WorldEffectKind::Ring);
+    AddFloatingText("капкан", trap.position, accent);
+    SetMessage("Конвой поставил капкан. Время существования: 45 секунд.", 2.5f);
+    AddEventMessage("Капкан Конвоя заметен, его можно обойти или сломать следующим этапом.", accent, 2.8f);
+    audio_.PlayBuild();
+    return true;
+}
+
+bool Game::UseKonvoyHandcuffs(Player& player, float lifetimeSeconds)
+{
+    Player* target = FindNearbyEnemyPlayer(player, kKonvoyHandcuffRadius);
+    if (target == nullptr)
+    {
+        SetMessage("Конвой: для наручников нужен противник в радиусе 6 блоков.", 2.0f);
+        return false;
+    }
+
+    const Vector3 origin { player.GetPosition().x, player.GetPosition().y + 0.78f, player.GetPosition().z };
+    const Vector3 targetPoint { target->GetPosition().x, target->GetPosition().y + 0.72f, target->GetPosition().z };
+    const Vector3 ray {
+        targetPoint.x - origin.x,
+        targetPoint.y - origin.y,
+        targetPoint.z - origin.z
+    };
+    const float distance = Length(ray);
+    const std::optional<RaycastHit> wall = world_.Raycast(origin, ray, distance);
+    if (wall.has_value() && wall->distance < distance - 0.35f)
+    {
+        SetMessage("Конвой: наручники не проходят через блоки.", 2.0f);
+        return false;
+    }
+
+    KonvoyTether tether {};
+    tether.ownerPlayerId = player.GetId();
+    tether.targetPlayerId = target->GetId();
+    tether.ownerTeamId = player.GetTeamId();
+    tether.lifetime = std::max(0.1f, lifetimeSeconds);
+    tether.flashTimer = 0.42f;
+    konvoyTethers_.push_back(tether);
+
+    const Color accent = HeroAccentColor(HeroId::Konvoy);
+    SetHeroAnimation(player, HeroAnimationState::Cast, 0.34f);
+    const Vector3 tetherDirection = Normalize2D(Vector3 {
+        target->GetPosition().x - player.GetPosition().x,
+        0.0f,
+        target->GetPosition().z - player.GetPosition().z
+    });
+    AddWorldEffect(player.GetPosition(), tetherDirection, accent, kKonvoyHandcuffRadius, 0.42f, WorldEffectKind::Trail);
+    AddFloatingText("наручники", target->GetPosition(), accent);
+    SetMessage("Конвой связал цель наручниками на 12 секунд. Радиус цепи: 6 блоков.", 2.6f);
+    AddEventMessage("Наручники Конвоя: силовая привязь активна, полная механика удержания будет усилена следующим этапом.", accent, 3.0f);
+    audio_.PlayPickup();
+    return true;
+}
+
+bool Game::UseKonvoyDome(Player& player, float lifetimeSeconds)
+{
+    KonvoyDome dome {};
+    dome.position = player.GetPosition();
+    dome.ownerPlayerId = player.GetId();
+    dome.ownerTeamId = player.GetTeamId();
+    dome.lifetime = std::max(0.1f, lifetimeSeconds);
+    dome.flashTimer = 0.60f;
+    konvoyDomes_.push_back(dome);
+
+    const Color accent = HeroAccentColor(HeroId::Konvoy);
+    SetHeroAnimation(player, HeroAnimationState::Cast, 0.52f);
+    AddWorldEffect(player.GetPosition(), Vector3 { 0.0f, 0.0f, 1.0f }, accent, kKonvoyDomeVisualRadius, 0.80f, WorldEffectKind::CorePulse);
+    SetMessage("Конвой развернул Купол содержания на 30 секунд.", 2.8f);
+    AddEventMessage("Купол содержания: каркас зоны активен. Прочность и запирание добавим следующим этапом.", accent, 3.2f);
+    audio_.PlayPurchase();
+    return true;
+}
+
+void Game::ApplyBromBlockBreakPassive(Player& player, const Block& block, Vector3 position)
+{
+    if (player.GetHeroId() != HeroId::Brom || block.teamId < 0 || block.teamId == player.GetTeamId())
+    {
+        return;
+    }
+
+    ResourceType reward = ResourceType::Iron;
+    int chance = 28;
+    int amount = 1;
+    if (block.type == BlockType::StoneBlock || block.type == BlockType::ObsidianBlock)
+    {
+        reward = ResourceType::Gold;
+        chance = block.type == BlockType::ObsidianBlock ? 24 : 18;
+    }
+    else if (block.type == BlockType::EnergyGlassBlock || block.type == BlockType::ExplosiveBlock)
+    {
+        reward = ResourceType::Iron;
+        chance = 36;
+    }
+
+    if (GetRandomValue(1, 100) > chance)
+    {
+        return;
+    }
+
+    player.GetInventory().AddResource(reward, amount);
+    player.AddHeroUltimateCharge(BromUltimateChargeForResource(reward, amount));
+    const Color accent = HeroAccentColor(HeroId::Brom);
+    AddFloatingText("+трофей " + std::to_string(amount) + " " + ToString(reward), position, accent);
+    if (player.IsLocal())
+    {
+        AddEventMessage("Пассивка Брома разобрала вражеский блок на материалы.", accent, 2.2f);
+    }
 }
 
 void Game::UseUtilityInputs(Player& player)
@@ -3490,6 +4527,10 @@ bool Game::TryShopPurchase(Player& player, Team& team, int choice, int repeat, s
     }
 
     message = bought > 1 ? ("Bought x" + std::to_string(bought) + ". " + lastMessage) : lastMessage;
+    if (bought > 0 && player.GetHeroId() == HeroId::Brom)
+    {
+        player.AddHeroUltimateCharge(static_cast<float>(bought) * 4.0f);
+    }
     return bought > 0;
 }
 
@@ -3838,6 +4879,11 @@ void Game::UpdatePickups(float dt)
 {
     for (ResourcePickup& pickup : pickups_)
     {
+        if (pickup.collected)
+        {
+            continue;
+        }
+
         pickup.age += dt;
         pickup.lifetime -= dt;
         if (pickup.lifetime <= 0.0f)
@@ -3876,6 +4922,10 @@ void Game::UpdatePickups(float dt)
             if (DistanceSquared(PickupTargetFor(player), pickup.position) <= kItemPickupRadiusSq)
             {
                 player.GetInventory().AddResource(pickup.type, pickup.amount);
+                if (player.GetHeroId() == HeroId::Brom)
+                {
+                    player.AddHeroUltimateCharge(BromUltimateChargeForResource(pickup.type, pickup.amount));
+                }
                 pickup.collected = true;
                 AddWorldEffect(pickup.position, player.IsLocal() ? Color { 255, 245, 170, 255 } : Color { 180, 210, 255, 255 }, 0.22f, 0.28f);
                 AddFloatingText("+" + std::to_string(pickup.amount) + " " + ToString(pickup.type), pickup.position, player.IsLocal() ? Color { 255, 236, 135, 255 } : Fade(WHITE, 0.85f));
@@ -3890,7 +4940,12 @@ void Game::UpdatePickups(float dt)
         }
     }
 
-    MergeNearbyResourcePickups(pickups_);
+    pickupMergeTimer_ += dt;
+    if (pickupMergeTimer_ >= kItemMergeInterval)
+    {
+        pickupMergeTimer_ = 0.0f;
+        MergeNearbyResourcePickups(pickups_);
+    }
 
     pickups_.erase(
         std::remove_if(
@@ -3975,6 +5030,10 @@ void Game::UpdateDroppedItems(float dt)
                     : player.GetInventory().AddItem(dropped.stack.type, dropped.stack.count);
                 if (added)
                 {
+                    if (resource.has_value() && player.GetHeroId() == HeroId::Brom)
+                    {
+                        player.AddHeroUltimateCharge(BromUltimateChargeForResource(*resource, dropped.stack.count));
+                    }
                     dropped.collected = true;
                     AddWorldEffect(dropped.position, Color { 255, 245, 170, 255 }, 0.18f, 0.22f);
                     if (player.IsLocal())
@@ -3988,7 +5047,12 @@ void Game::UpdateDroppedItems(float dt)
         }
     }
 
-    MergeNearbyDroppedItems(droppedItems_);
+    droppedItemMergeTimer_ += dt;
+    if (droppedItemMergeTimer_ >= kItemMergeInterval)
+    {
+        droppedItemMergeTimer_ = 0.0f;
+        MergeNearbyDroppedItems(droppedItems_);
+    }
 
     droppedItems_.erase(
         std::remove_if(
@@ -4200,7 +5264,7 @@ void Game::UpdateHazardZones(float dt)
         hazardZones_.end());
 }
 
-void Game::UpdateHeroPassives()
+void Game::UpdateHeroPassives(float dt)
 {
     for (Player& player : players_)
     {
@@ -4208,6 +5272,7 @@ void Game::UpdateHeroPassives()
         float outgoingMultiplier = 1.0f;
         bool radonProtected = false;
         bool radonOverloaded = false;
+        HeroRuntimeState& heroState = player.MutableHeroState();
         if (player.GetHeroId() == HeroId::Radon)
         {
             EnergyCore* core = FindCoreByTeam(player.GetTeamId());
@@ -4227,7 +5292,42 @@ void Game::UpdateHeroPassives()
                 radonOverloaded = true;
             }
         }
-        HeroRuntimeState& heroState = player.MutableHeroState();
+        else if (player.GetHeroId() == HeroId::Orbita)
+        {
+            if (player.IsOnGround())
+            {
+                heroState.orbitaAirDashLocked = false;
+            }
+
+            const Vector3 velocity = player.GetVelocity();
+            const float horizontalSpeed = Length2D(velocity);
+            const bool riskyAirMove = !player.IsOnGround()
+                && horizontalSpeed >= kOrbitaMomentumSpeed * 0.70f
+                && std::fabs(velocity.y) > 1.05f;
+            if (horizontalSpeed >= kOrbitaMomentumSpeed || riskyAirMove)
+            {
+                const bool wasCharged = heroState.orbitaMomentumStrike;
+                heroState.orbitaMomentumStrike = true;
+                heroState.orbitaPulseTimer = std::max(heroState.orbitaPulseTimer, 0.85f);
+                if (!wasCharged && player.IsLocal())
+                {
+                    AddFloatingText("разгон", Vector3 { player.GetPosition().x, player.GetPosition().y + 1.25f, player.GetPosition().z }, HeroAccentColor(HeroId::Orbita));
+                }
+            }
+
+            if (heroState.ultimate.cooldownRemaining <= 0.0f && heroState.ultimateCharge < 100.0f)
+            {
+                float chargeGain = horizontalSpeed * dt * 0.18f;
+                if (riskyAirMove)
+                {
+                    chargeGain += dt * 1.25f;
+                }
+                if (chargeGain > 0.0f)
+                {
+                    player.AddHeroUltimateCharge(chargeGain);
+                }
+            }
+        }
         heroState.radonProtected = radonProtected;
         heroState.radonOverloaded = radonOverloaded;
         if (player.GetHeroId() == HeroId::Radon
@@ -4245,6 +5345,535 @@ void Game::UpdateHeroPassives()
         }
         player.SetHeroDamageMultipliers(incomingMultiplier, outgoingMultiplier);
     }
+}
+
+void Game::UpdateHeroTemporaryBlocks(float dt)
+{
+    for (HeroTemporaryBlock& temporary : heroTemporaryBlocks_)
+    {
+        temporary.timer -= dt;
+        const Block* block = world_.GetBlock(temporary.position);
+        const bool stillOwnedPhantom = block != nullptr
+            && block->type == BlockType::EnergyGlassBlock
+            && block->teamId == temporary.ownerTeamId
+            && block->breakable;
+        if (!stillOwnedPhantom)
+        {
+            temporary.timer = -1.0f;
+            continue;
+        }
+
+        if (temporary.timer <= 0.0f)
+        {
+            const Vector3 center = world_.GridToWorld(temporary.position);
+            world_.RemoveBlock(temporary.position);
+            AddWorldEffect(center, HeroAccentColor(HeroId::Orbita), 0.18f, 0.22f);
+        }
+    }
+
+    heroTemporaryBlocks_.erase(
+        std::remove_if(
+            heroTemporaryBlocks_.begin(),
+            heroTemporaryBlocks_.end(),
+            [](const HeroTemporaryBlock& temporary)
+            {
+                return temporary.timer <= 0.0f;
+            }),
+        heroTemporaryBlocks_.end());
+}
+
+void Game::UpdateBromDevices(float dt)
+{
+    const Color bromColor = HeroAccentColor(HeroId::Brom);
+    const auto horizontalDistanceSq = [](Vector3 a, Vector3 b)
+    {
+        const float dx = a.x - b.x;
+        const float dz = a.z - b.z;
+        return dx * dx + dz * dz;
+    };
+    const auto surfaceFor = [this](Vector3 desired, float currentY, float maxClimb) -> std::optional<Vector3>
+    {
+        const GridPos column = world_.WorldToGrid(desired);
+        const int startY = std::clamp(world_.WorldToGrid(Vector3 { desired.x, currentY, desired.z }).y + 2, kBuildMinY, kBuildMaxY);
+        for (int y = startY; y >= kBuildMinY - 4; --y)
+        {
+            const GridPos ground { column.x, y, column.z };
+            if (!world_.IsSolid(ground))
+            {
+                continue;
+            }
+
+            Vector3 snapped {
+                desired.x,
+                world_.GridToWorld(ground).y + 0.68f,
+                desired.z
+            };
+            const float heightDelta = snapped.y - currentY;
+            if (heightDelta > maxClimb || heightDelta < -kBromVacuumDropHeight)
+            {
+                continue;
+            }
+            if (!world_.CollidesWithAABB(Vector3 { snapped.x, snapped.y + 0.24f, snapped.z }, Vector3 { 0.30f, 0.22f, 0.30f }))
+            {
+                return snapped;
+            }
+        }
+
+        return std::nullopt;
+    };
+    const auto moveGroundedTowards = [dt, &surfaceFor](Vector3& position, Vector3 target, float speed)
+    {
+        const Vector3 flatDelta {
+            target.x - position.x,
+            0.0f,
+            target.z - position.z
+        };
+        const float distance = Length2D(flatDelta);
+        if (distance <= 0.001f)
+        {
+            if (const std::optional<Vector3> snapped = surfaceFor(position, position.y, kBromVacuumStepHeight))
+            {
+                position = *snapped;
+            }
+            return distance;
+        }
+
+        if (const std::optional<Vector3> snapped = surfaceFor(position, position.y, kBromVacuumStepHeight))
+        {
+            position = *snapped;
+        }
+
+        const Vector3 direction { flatDelta.x / distance, 0.0f, flatDelta.z / distance };
+        const float step = std::min(distance, speed * dt);
+        const auto tryMove = [&position, &surfaceFor](Vector3 candidate, float maxClimb)
+        {
+            const std::optional<Vector3> snapped = surfaceFor(candidate, position.y, maxClimb);
+            if (!snapped.has_value())
+            {
+                return false;
+            }
+
+            position = *snapped;
+            return true;
+        };
+
+        const Vector3 directCandidate { position.x + direction.x * step, position.y, position.z + direction.z * step };
+        if (tryMove(directCandidate, 0.28f) || tryMove(directCandidate, kBromVacuumStepHeight))
+        {
+            return distance;
+        }
+
+        const bool tryXFirst = std::fabs(direction.x) >= std::fabs(direction.z);
+        const Vector3 xCandidate { position.x + direction.x * step, position.y, position.z };
+        const Vector3 zCandidate { position.x, position.y, position.z + direction.z * step };
+        if (tryXFirst)
+        {
+            if (tryMove(xCandidate, 0.28f) || tryMove(xCandidate, kBromVacuumStepHeight)
+                || tryMove(zCandidate, 0.28f) || tryMove(zCandidate, kBromVacuumStepHeight))
+            {
+                return distance;
+            }
+        }
+        else if (tryMove(zCandidate, 0.28f) || tryMove(zCandidate, kBromVacuumStepHeight)
+            || tryMove(xCandidate, 0.28f) || tryMove(xCandidate, kBromVacuumStepHeight))
+        {
+            return distance;
+        }
+
+        return distance;
+    };
+
+    for (BromVacuumBot& bot : bromVacuumBots_)
+    {
+        if (bot.temporary)
+        {
+            bot.lifetime -= dt;
+            if (bot.lifetime <= 0.0f)
+            {
+                AddWorldEffect(bot.position, bromColor, 0.24f, 0.24f);
+                continue;
+            }
+        }
+
+        bot.pulseTimer -= dt;
+        if (bot.pulseTimer <= 0.0f)
+        {
+            bot.pulseTimer = 0.45f;
+            AddWorldEffect(bot.position, bromColor, 0.12f, 0.16f);
+        }
+
+        const int cargoUnits = BromCargoUnits(bot.cargo);
+        if (cargoUnits >= kBromVacuumCapacity)
+        {
+            bot.returning = true;
+        }
+
+        Team* team = FindTeam(bot.ownerTeamId);
+        const Vector3 basePosition = team != nullptr
+            ? Vector3 { team->shopPosition.x, team->shopPosition.y + 0.35f, team->shopPosition.z }
+            : bot.position;
+
+        if (bot.returning)
+        {
+            moveGroundedTowards(bot.position, basePosition, 3.15f);
+            if (DistanceSquared(bot.position, basePosition) <= 1.25f * 1.25f)
+            {
+                int delivered = 0;
+                if (bot.ownerTeamId >= 0 && bot.ownerTeamId < static_cast<int>(teamChests_.size()))
+                {
+                    for (ResourceType type : { ResourceType::Iron, ResourceType::Gold, ResourceType::Crystal })
+                    {
+                        const int amount = bot.cargo[ResourceIndex(type)];
+                        if (amount <= 0)
+                        {
+                            continue;
+                        }
+                        teamChests_[bot.ownerTeamId].AddResource(type, amount);
+                        delivered += amount;
+                        bot.cargo[ResourceIndex(type)] = 0;
+                    }
+                }
+
+                if (delivered > 0)
+                {
+                    for (Player& player : players_)
+                    {
+                        if (player.GetId() == bot.ownerPlayerId && player.GetHeroId() == HeroId::Brom)
+                        {
+                            player.AddHeroUltimateCharge(static_cast<float>(delivered) * 2.0f);
+                            break;
+                        }
+                    }
+                    AddFloatingText("командный сундук +" + std::to_string(delivered), basePosition, bromColor);
+                    AddWorldEffect(basePosition, Vector3 { 0.0f, 0.0f, 1.0f }, bromColor, 0.82f, 0.42f, WorldEffectKind::CorePulse);
+                    AddEventMessage("Пылесос Брома сложил +" + std::to_string(delivered) + " в командный сундук на базе.", bromColor, 2.6f);
+                    audio_.PlayPickup();
+                }
+                bot.returning = false;
+            }
+            continue;
+        }
+
+        ResourcePickup* bestPickup = nullptr;
+        float bestScore = std::numeric_limits<float>::max();
+        constexpr float searchRadiusSq = 56.0f * 56.0f;
+        for (ResourcePickup& pickup : pickups_)
+        {
+            if (pickup.collected)
+            {
+                continue;
+            }
+            const int remainingCapacity = kBromVacuumCapacity - BromCargoUnits(bot.cargo);
+            if (remainingCapacity < BromCargoWeight(pickup.type) * pickup.amount)
+            {
+                continue;
+            }
+
+            const float distance = DistanceSquared(bot.position, pickup.position);
+            if (distance > searchRadiusSq)
+            {
+                continue;
+            }
+
+            const float centerDistanceSq = pickup.position.x * pickup.position.x + pickup.position.z * pickup.position.z;
+            const bool nearOwnBase = DistanceSquared(pickup.position, basePosition) < 13.0f * 13.0f;
+            float score = distance + centerDistanceSq * 0.18f;
+            if (nearOwnBase)
+            {
+                score += 1800.0f;
+            }
+            switch (pickup.type)
+            {
+            case ResourceType::Crystal:
+                score -= 320.0f;
+                break;
+            case ResourceType::Gold:
+                score -= 180.0f;
+                break;
+            case ResourceType::Iron:
+                score -= 30.0f;
+                break;
+            }
+            score -= static_cast<float>(pickup.amount) * 8.0f;
+
+            if (score < bestScore)
+            {
+                bestScore = score;
+                bestPickup = &pickup;
+            }
+        }
+
+        if (bestPickup == nullptr)
+        {
+            if (cargoUnits > 0)
+            {
+                bot.returning = true;
+            }
+            else
+            {
+                const Vector3 centerPatrol { 0.0f, basePosition.y, 0.0f };
+                moveGroundedTowards(bot.position, centerPatrol, 2.65f);
+            }
+            continue;
+        }
+
+        const Vector3 target { bestPickup->position.x, bestPickup->position.y + 0.12f, bestPickup->position.z };
+        moveGroundedTowards(bot.position, target, 3.35f);
+        if (horizontalDistanceSq(bot.position, target) <= 0.75f * 0.75f
+            && std::fabs(bot.position.y - target.y) <= 1.35f)
+        {
+            bot.cargo[ResourceIndex(bestPickup->type)] += bestPickup->amount;
+            AddFloatingText("пылесос +" + std::to_string(bestPickup->amount), bestPickup->position, bromColor);
+            AddWorldEffect(bestPickup->position, bromColor, 0.18f, 0.18f);
+            bestPickup->collected = true;
+            if (BromCargoUnits(bot.cargo) >= kBromVacuumCapacity)
+            {
+                bot.returning = true;
+            }
+        }
+    }
+
+    bromVacuumBots_.erase(
+        std::remove_if(
+            bromVacuumBots_.begin(),
+            bromVacuumBots_.end(),
+            [](const BromVacuumBot& bot)
+            {
+                return bot.temporary && bot.lifetime <= 0.0f;
+            }),
+        bromVacuumBots_.end());
+
+    for (BromTurretDrone& drone : bromTurretDrones_)
+    {
+        if (drone.temporary)
+        {
+            drone.lifetime -= dt;
+            if (drone.lifetime <= 0.0f)
+            {
+                AddWorldEffect(drone.position, bromColor, 0.28f, 0.24f);
+                continue;
+            }
+        }
+
+        drone.fireCooldown = std::max(0.0f, drone.fireCooldown - dt);
+        drone.shotFlashTimer = std::max(0.0f, drone.shotFlashTimer - dt);
+        drone.pulseTimer -= dt;
+        if (drone.pulseTimer <= 0.0f)
+        {
+            drone.pulseTimer = 0.38f;
+            AddWorldEffect(drone.position, bromColor, 0.16f, 0.14f);
+        }
+        if (drone.fireCooldown > 0.0f)
+        {
+            continue;
+        }
+
+        Player* target = nullptr;
+        float bestDistance = kBromTurretAttackRange * kBromTurretAttackRange;
+        for (Player& player : players_)
+        {
+            if (!player.IsAlive() || player.IsEliminated() || player.GetHealth() <= 0 || player.GetTeamId() == drone.ownerTeamId)
+            {
+                continue;
+            }
+
+            const Vector3 aimPoint { player.GetPosition().x, player.GetPosition().y + 0.65f, player.GetPosition().z };
+            const float distanceSq = DistanceSquared(drone.position, aimPoint);
+            if (distanceSq >= bestDistance)
+            {
+                continue;
+            }
+
+            const Vector3 ray {
+                aimPoint.x - drone.position.x,
+                aimPoint.y - drone.position.y,
+                aimPoint.z - drone.position.z
+            };
+            const float distance = Length(ray);
+            const std::optional<RaycastHit> wall = world_.Raycast(drone.position, ray, distance);
+            if (wall.has_value() && wall->distance < distance - 0.35f)
+            {
+                continue;
+            }
+
+            target = &player;
+            bestDistance = distanceSq;
+        }
+
+        if (target == nullptr)
+        {
+            continue;
+        }
+
+        const Vector3 targetPoint { target->GetPosition().x, target->GetPosition().y + 0.65f, target->GetPosition().z };
+        const Vector3 direction = Normalize(Vector3 {
+            targetPoint.x - drone.position.x,
+            targetPoint.y - drone.position.y,
+            targetPoint.z - drone.position.z
+        });
+        const int targetHealthBefore = target->GetHealth();
+        NoteDamageCredit(target->GetId(), drone.ownerPlayerId);
+        target->Damage(6);
+        if (targetHealthBefore > 0 && target->GetHealth() <= 0 && drone.ownerPlayerId >= 0)
+        {
+            ++GetPlayerScore(drone.ownerPlayerId).kills;
+            if (drone.ownerPlayerId == localPlayerId_)
+            {
+                ++stats_.kills;
+            }
+
+            std::string ownerName = "Бром";
+            for (const Player& player : players_)
+            {
+                if (player.GetId() == drone.ownerPlayerId)
+                {
+                    ownerName = player.GetName();
+                    break;
+                }
+            }
+            AddKillFeed(ownerName + " добил дроном " + target->GetName(), bromColor, 5.2f);
+        }
+        target->ApplyKnockback(Vector3 { direction.x * 3.2f, 0.58f, direction.z * 3.2f });
+        AddWorldEffect(drone.position, direction, bromColor, 0.28f, 0.24f, WorldEffectKind::Trail);
+        AddWorldEffect(target->GetPosition(), bromColor, 0.18f, 0.18f);
+        AddFloatingText("дрон -6", target->GetPosition(), bromColor);
+        drone.lastShotTarget = targetPoint;
+        drone.shotFlashTimer = 0.28f;
+        drone.fireCooldown = 1.15f;
+        audio_.PlayHit();
+    }
+
+    bromTurretDrones_.erase(
+        std::remove_if(
+            bromTurretDrones_.begin(),
+            bromTurretDrones_.end(),
+            [](const BromTurretDrone& drone)
+            {
+                return drone.temporary && drone.lifetime <= 0.0f;
+            }),
+        bromTurretDrones_.end());
+}
+
+void Game::UpdateKonvoyDevices(float dt)
+{
+    const Color konvoyColor = HeroAccentColor(HeroId::Konvoy);
+    const auto playerById = [this](int playerId) -> Player*
+    {
+        for (Player& player : players_)
+        {
+            if (player.GetId() == playerId)
+            {
+                return &player;
+            }
+        }
+        return nullptr;
+    };
+
+    for (KonvoyTrap& trap : konvoyTraps_)
+    {
+        trap.lifetime -= dt;
+        trap.flashTimer = std::max(0.0f, trap.flashTimer - dt);
+        if (trap.lifetime <= 0.0f)
+        {
+            AddWorldEffect(trap.position, konvoyColor, 0.20f, 0.22f);
+            continue;
+        }
+
+        for (Player& target : players_)
+        {
+            if (!target.IsAlive()
+                || target.IsEliminated()
+                || target.GetHealth() <= 0
+                || target.GetTeamId() == trap.ownerTeamId)
+            {
+                continue;
+            }
+
+            const float horizontalSq = (target.GetPosition().x - trap.position.x) * (target.GetPosition().x - trap.position.x)
+                + (target.GetPosition().z - trap.position.z) * (target.GetPosition().z - trap.position.z);
+            if (horizontalSq > 0.72f * 0.72f || std::fabs(target.GetPosition().y - trap.position.y) > 1.35f)
+            {
+                continue;
+            }
+
+            trap.flashTimer = 0.60f;
+            trap.lifetime = 0.0f;
+            AddWorldEffect(trap.position, Vector3 { 0.0f, 0.0f, 1.0f }, konvoyColor, 1.15f, 0.48f, WorldEffectKind::Ring);
+            AddFloatingText("капкан", target.GetPosition(), konvoyColor);
+            AddEventMessage("Капкан Конвоя сработал на цели " + target.GetName() + ".", konvoyColor, 2.4f);
+            if (Player* owner = playerById(trap.ownerPlayerId))
+            {
+                SetHeroAnimation(*owner, HeroAnimationState::Cast, 0.20f);
+            }
+            audio_.PlayHit();
+            break;
+        }
+    }
+
+    konvoyTraps_.erase(
+        std::remove_if(
+            konvoyTraps_.begin(),
+            konvoyTraps_.end(),
+            [](const KonvoyTrap& trap)
+            {
+                return trap.lifetime <= 0.0f;
+            }),
+        konvoyTraps_.end());
+
+    for (KonvoyTether& tether : konvoyTethers_)
+    {
+        tether.lifetime -= dt;
+        tether.flashTimer = std::max(0.0f, tether.flashTimer - dt);
+        Player* owner = playerById(tether.ownerPlayerId);
+        Player* target = playerById(tether.targetPlayerId);
+        if (owner == nullptr
+            || target == nullptr
+            || !owner->IsAlive()
+            || !target->IsAlive()
+            || owner->IsEliminated()
+            || target->IsEliminated())
+        {
+            tether.lifetime = 0.0f;
+            continue;
+        }
+
+        if (DistanceSquared(owner->GetPosition(), target->GetPosition()) > kKonvoyHandcuffRadius * kKonvoyHandcuffRadius)
+        {
+            tether.flashTimer = std::max(tether.flashTimer, 0.18f);
+            AddWorldEffect(target->GetPosition(), konvoyColor, 0.14f, 0.14f);
+        }
+    }
+
+    konvoyTethers_.erase(
+        std::remove_if(
+            konvoyTethers_.begin(),
+            konvoyTethers_.end(),
+            [](const KonvoyTether& tether)
+            {
+                return tether.lifetime <= 0.0f;
+            }),
+        konvoyTethers_.end());
+
+    for (KonvoyDome& dome : konvoyDomes_)
+    {
+        dome.lifetime -= dt;
+        dome.flashTimer = std::max(0.0f, dome.flashTimer - dt);
+        if (dome.lifetime > 0.0f && dome.flashTimer <= 0.0f)
+        {
+            dome.flashTimer = 1.0f;
+            AddWorldEffect(dome.position, Vector3 { 0.0f, 0.0f, 1.0f }, konvoyColor, kKonvoyDomeVisualRadius, 0.16f, WorldEffectKind::Ring);
+        }
+    }
+
+    konvoyDomes_.erase(
+        std::remove_if(
+            konvoyDomes_.begin(),
+            konvoyDomes_.end(),
+            [](const KonvoyDome& dome)
+            {
+                return dome.lifetime <= 0.0f;
+            }),
+        konvoyDomes_.end());
 }
 
 void Game::UpdatePassiveRegeneration(float dt)
@@ -4627,6 +6256,10 @@ void Game::CompleteBreakProgress(Player& player)
         return;
     }
 
+    const Block* blockBeforeBreak = world_.GetBlock(target);
+    const std::optional<Block> brokenBlock = blockBeforeBreak != nullptr
+        ? std::optional<Block>(*blockBeforeBreak)
+        : std::nullopt;
     if (world_.BreakBlock(target, player.GetTeamId()))
     {
         const Vector3 center = world_.GridToWorld(target);
@@ -4637,6 +6270,10 @@ void Game::CompleteBreakProgress(Player& player)
         if (player.IsLocal())
         {
             ++stats_.blocksBroken;
+        }
+        if (brokenBlock.has_value())
+        {
+            ApplyBromBlockBreakPassive(player, *brokenBlock, center);
         }
         player.GetInventory().DamageTool(1);
     }

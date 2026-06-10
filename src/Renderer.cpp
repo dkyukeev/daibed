@@ -16,13 +16,9 @@
 namespace
 {
 constexpr int kTextureSize = 32;
-
-struct TransparentBlockDraw
-{
-    GridPos pos {};
-    Block block {};
-    float distance = 0.0f;
-};
+constexpr float kPi = 3.1415926535f;
+constexpr float kWorldBlockDrawDistance = 150.0f;
+constexpr float kWorldBlockDrawDistanceSq = kWorldBlockDrawDistance * kWorldBlockDrawDistance;
 
 unsigned char BlendChannel(unsigned char a, unsigned char b, float t)
 {
@@ -744,7 +740,6 @@ void DrawRadonPresentationEffect(const WorldEffect& effect)
 {
     const float progress = std::clamp(effect.age / std::max(0.001f, effect.lifetime), 0.0f, 1.0f);
     const float t = 1.0f - progress;
-    const Color color = Fade(effect.color, t);
     const Vector3 base { effect.position.x, effect.position.y + 0.05f, effect.position.z };
 
     switch (effect.kind)
@@ -821,6 +816,146 @@ void DrawRadonPresentationEffect(const WorldEffect& effect)
         DrawSphere(effect.position, effect.radius + effect.age * 1.4f, Fade(effect.color, t * 0.65f));
         DrawSphereWires(effect.position, (effect.radius + effect.age * 1.4f) * 1.08f, 8, 10, Fade(WHITE, t));
         break;
+    }
+}
+
+void DrawOrbitaTeleportPreview(const OrbitaTeleportPreview& preview)
+{
+    if (!preview.visible)
+    {
+        return;
+    }
+
+    const float pulse = 0.5f + 0.5f * std::sin(static_cast<float>(GetTime()) * 9.0f);
+    const Color beamColor = preview.valid ? WHITE : Color { 255, 118, 118, 255 };
+    Vector3 right { -preview.direction.z, 0.0f, preview.direction.x };
+    right = Normalize(right);
+    const Vector3 up { 0.0f, 1.0f, 0.0f };
+    const Vector3 sideA = Add(Scale(right, 0.045f), Scale(up, 0.012f));
+    const Vector3 sideB = Add(Scale(right, -0.045f), Scale(up, -0.012f));
+
+    DrawLine3D(preview.start, preview.destination, Fade(beamColor, preview.valid ? 0.88f : 0.55f));
+    DrawLine3D(Add(preview.start, sideA), Add(preview.destination, sideA), Fade(beamColor, 0.48f));
+    DrawLine3D(Add(preview.start, sideB), Add(preview.destination, sideB), Fade(beamColor, 0.34f));
+
+    const Vector3 markerBase { preview.destination.x, preview.destination.y - 0.86f, preview.destination.z };
+    const Vector3 markerTop { preview.destination.x, preview.destination.y + 3.0f + pulse * 0.55f, preview.destination.z };
+    DrawLine3D(markerBase, markerTop, Fade(beamColor, preview.valid ? 0.86f : 0.62f));
+    DrawLine3D(Add(markerBase, Scale(right, 0.08f)), Add(markerTop, Scale(right, 0.08f)), Fade(beamColor, 0.40f));
+    DrawLine3D(Add(markerBase, Scale(right, -0.08f)), Add(markerTop, Scale(right, -0.08f)), Fade(beamColor, 0.40f));
+
+    const float ringRadius = 0.42f + pulse * 0.16f;
+    DrawCylinder(markerBase, ringRadius, ringRadius, 0.055f, 40, Fade(beamColor, preview.valid ? 0.24f : 0.18f));
+    DrawCylinderWires(markerBase, ringRadius, ringRadius, 0.07f, 40, Fade(beamColor, preview.valid ? 0.92f : 0.72f));
+    DrawSphere(Vector3 { preview.destination.x, preview.destination.y + 0.16f, preview.destination.z }, 0.12f + pulse * 0.05f, Fade(beamColor, 0.74f));
+}
+
+void DrawHeroDeviceVisual(const HeroDeviceVisual& device)
+{
+    const Color bromColor = HeroUiColor(HeroId::Brom);
+    const Color konvoyColor = HeroUiColor(HeroId::Konvoy);
+    const float time = static_cast<float>(GetTime());
+    const float pulse = 0.5f + 0.5f * std::sin(time * 8.0f + device.position.x * 0.7f + device.position.z * 0.4f);
+    Vector3 forward = Normalize(device.direction);
+    Vector3 right { -forward.z, 0.0f, forward.x };
+    right = Normalize(right);
+    if (std::abs(right.x) + std::abs(right.z) <= 0.001f)
+    {
+        right = Vector3 { 1.0f, 0.0f, 0.0f };
+    }
+
+    if (device.kind == HeroDeviceVisualKind::KonvoyTrap)
+    {
+        const Vector3 base { device.position.x, device.position.y + 0.02f, device.position.z };
+        const float radius = std::max(0.20f, device.radius);
+        const Color trapColor = device.active ? MixColor(konvoyColor, WHITE, 0.35f) : konvoyColor;
+        DrawCylinder(base, radius, radius, 0.035f, 28, Fade(trapColor, 0.26f + pulse * 0.10f));
+        DrawCylinderWires(base, radius, radius, 0.05f, 28, Fade(trapColor, 0.76f));
+        DrawLine3D(
+            Vector3 { base.x - radius * 0.65f, base.y + 0.04f, base.z },
+            Vector3 { base.x + radius * 0.65f, base.y + 0.04f, base.z },
+            Fade(WHITE, 0.54f));
+        DrawLine3D(
+            Vector3 { base.x, base.y + 0.04f, base.z - radius * 0.65f },
+            Vector3 { base.x, base.y + 0.04f, base.z + radius * 0.65f },
+            Fade(WHITE, 0.54f));
+        return;
+    }
+    if (device.kind == HeroDeviceVisualKind::KonvoyTether)
+    {
+        const float glow = device.active ? 0.92f : 0.62f;
+        DrawLine3D(device.position, device.target, Fade(konvoyColor, glow));
+        DrawLine3D(Add(device.position, Scale(right, 0.035f)), Add(device.target, Scale(right, 0.035f)), Fade(WHITE, 0.42f));
+        DrawSphere(device.position, 0.13f + pulse * 0.03f, Fade(konvoyColor, 0.70f));
+        DrawSphere(device.target, 0.13f + pulse * 0.03f, Fade(konvoyColor, 0.70f));
+        DrawSphereWires(device.target, std::max(0.55f, device.radius) * 0.18f, 8, 10, Fade(konvoyColor, 0.46f));
+        return;
+    }
+    if (device.kind == HeroDeviceVisualKind::KonvoyDome)
+    {
+        const float radius = std::max(1.0f, device.radius);
+        const Vector3 center { device.position.x, device.position.y + 0.18f, device.position.z };
+        DrawCylinder(center, radius, radius, 0.055f, 48, Fade(konvoyColor, 0.13f + pulse * 0.04f));
+        DrawCylinderWires(center, radius, radius, 0.075f, 48, Fade(konvoyColor, 0.72f));
+        DrawSphereWires(Vector3 { center.x, center.y + 1.25f, center.z }, radius, 12, 20, Fade(konvoyColor, device.active ? 0.66f : 0.38f));
+        DrawSphere(Vector3 { center.x, center.y + 1.25f, center.z }, 0.18f + pulse * 0.05f, Fade(WHITE, 0.54f));
+        return;
+    }
+
+    if (device.kind == HeroDeviceVisualKind::BromVacuumBot)
+    {
+        const Vector3 base { device.position.x, device.position.y + 0.08f, device.position.z };
+        const Color body = device.temporary ? MixColor(bromColor, WHITE, 0.22f) : bromColor;
+        DrawCube(base, 0.72f, 0.28f, 0.86f, Fade(body, 0.92f));
+        DrawCubeWires(base, 0.75f, 0.31f, 0.89f, Fade(WHITE, 0.58f));
+        DrawSphere(Vector3 { base.x, base.y + 0.24f + pulse * 0.035f, base.z }, 0.16f, Fade(Color { 178, 245, 255, 255 }, 0.86f));
+
+        const Vector3 wheelA = Add(Add(base, Scale(right, 0.43f)), Vector3 { 0.0f, -0.17f, 0.0f });
+        const Vector3 wheelB = Add(Add(base, Scale(right, -0.43f)), Vector3 { 0.0f, -0.17f, 0.0f });
+        DrawSphere(wheelA, 0.12f, Color { 26, 32, 34, 255 });
+        DrawSphere(wheelB, 0.12f, Color { 26, 32, 34, 255 });
+
+        if (device.cargoUnits > 0 && device.cargoCapacity > 0)
+        {
+            const float cargoFraction = std::clamp(static_cast<float>(device.cargoUnits) / static_cast<float>(device.cargoCapacity), 0.0f, 1.0f);
+            DrawCylinderWires(Vector3 { base.x, base.y + 0.32f, base.z }, 0.28f + cargoFraction * 0.18f, 0.28f + cargoFraction * 0.18f, 0.055f, 28, Fade(Color { 255, 224, 122, 255 }, 0.82f));
+            DrawSphere(Vector3 { base.x, base.y + 0.42f, base.z }, 0.08f + cargoFraction * 0.07f, Fade(Color { 255, 224, 122, 255 }, 0.82f));
+        }
+        if (device.returning)
+        {
+            DrawLine3D(Vector3 { base.x, base.y + 0.30f, base.z }, Vector3 { device.target.x, device.target.y + 0.25f, device.target.z }, Fade(Color { 255, 224, 122, 255 }, 0.52f));
+        }
+    }
+    else
+    {
+        const Vector3 center { device.position.x, device.position.y + 0.10f + pulse * 0.05f, device.position.z };
+        const Color core = device.temporary ? MixColor(bromColor, WHITE, 0.26f) : bromColor;
+        DrawSphere(center, 0.26f, Fade(core, 0.92f));
+        DrawSphereWires(center, 0.42f + pulse * 0.05f, 8, 12, Fade(core, 0.56f));
+        for (int i = 0; i < 4; ++i)
+        {
+            const Vector3 arm = RotateFlat(forward, kPi * 0.5f * static_cast<float>(i));
+            const Vector3 end = Add(center, Scale(arm, 0.48f));
+            DrawLine3D(center, end, Fade(WHITE, 0.46f));
+            DrawSphere(end, 0.09f, Fade(Color { 178, 245, 255, 255 }, 0.80f));
+        }
+
+        if (device.active)
+        {
+            DrawLine3D(center, device.target, Fade(Color { 178, 245, 255, 255 }, 0.92f));
+            DrawLine3D(Add(center, Scale(right, 0.035f)), Add(device.target, Scale(right, 0.035f)), Fade(bromColor, 0.82f));
+            DrawSphere(device.target, 0.15f + pulse * 0.04f, Fade(Color { 178, 245, 255, 255 }, 0.72f));
+        }
+        else
+        {
+            DrawLine3D(center, Add(center, Scale(forward, 0.62f)), Fade(core, 0.42f));
+        }
+    }
+
+    if (device.temporary)
+    {
+        const float radius = 0.72f + (1.0f - device.lifetimeFraction) * 0.12f;
+        DrawSphereWires(Vector3 { device.position.x, device.position.y + 0.20f, device.position.z }, radius, 8, 10, Fade(Color { 178, 245, 255, 255 }, 0.28f + device.lifetimeFraction * 0.32f));
     }
 }
 
@@ -1110,6 +1245,8 @@ void Renderer::RenderScene(
         const std::vector<Generator>& generators,
         const std::vector<ResourcePickup>& pickups,
         const std::vector<DroppedItem>& droppedItems,
+        const std::vector<HeroDeviceVisual>& heroDevices,
+        const OrbitaTeleportPreview& orbitaTeleportPreview,
         const PlacementPreview& placementPreview,
     const std::vector<WorldEffect>& worldEffects,
     const std::vector<FloatingText>& floatingTexts,
@@ -1143,9 +1280,28 @@ void Renderer::RenderScene(
         DrawCube(Vector3 { x + width * 0.35f, 28.0f + static_cast<float>(i % 2) * 2.4f, z + depth * 0.65f }, width * 0.55f, 0.10f, depth * 0.85f, Fade(WHITE, 0.16f));
     }
 
-    const auto drawWorldBlock = [this, &world, &teams](const GridPos& pos, const Block& block)
+    const Vector3 cameraForward = Normalize(Vector3 {
+        camera.target.x - camera.position.x,
+        camera.target.y - camera.position.y,
+        camera.target.z - camera.position.z
+    });
+    const auto shouldDrawWorldBlock = [&camera, cameraForward](Vector3 center)
     {
-        const Vector3 center = world.GridToWorld(pos);
+        const Vector3 toBlock {
+            center.x - camera.position.x,
+            center.y - camera.position.y,
+            center.z - camera.position.z
+        };
+        const float distanceSq = toBlock.x * toBlock.x + toBlock.y * toBlock.y + toBlock.z * toBlock.z;
+        if (distanceSq > kWorldBlockDrawDistanceSq)
+        {
+            return false;
+        }
+        return Dot(cameraForward, toBlock) > -2.0f;
+    };
+
+    const auto drawWorldBlock = [this, &teams](Vector3 center, const Block& block)
+    {
         const Color color = GetBlockColor(block, teams);
         if (const Texture2D* texture = GetBlockTexture(block.type))
         {
@@ -1158,7 +1314,8 @@ void Renderer::RenderScene(
         DrawCubeWires(center, 1.01f, 1.01f, 1.01f, Color { 24, 28, 36, 180 });
     };
 
-    std::vector<TransparentBlockDraw> transparentBlocks;
+    transparentBlocks_.clear();
+    std::vector<TransparentBlockDraw>& transparentBlocks = transparentBlocks_;
     for (const auto& entry : world.GetBlocks())
     {
         const GridPos& pos = entry.first;
@@ -1168,17 +1325,24 @@ void Renderer::RenderScene(
             continue;
         }
 
+        const Vector3 center = world.GridToWorld(pos);
+        if (!shouldDrawWorldBlock(center))
+        {
+            continue;
+        }
+
         const Color color = GetBlockColor(block, teams);
         if (IsTransparentBlock(block.type, color))
         {
             transparentBlocks.push_back(TransparentBlockDraw {
                 pos,
+                center,
                 block,
-                DistanceSquared(world.GridToWorld(pos), camera.position)
+                DistanceSquared(center, camera.position)
             });
             continue;
         }
-        drawWorldBlock(pos, block);
+        drawWorldBlock(center, block);
     }
 
     for (const Team& team : teams)
@@ -1257,6 +1421,7 @@ void Renderer::RenderScene(
         const bool enemy = localTeamId >= 0 && player.GetTeamId() != localTeamId;
         const Vector3 pos = player.GetPosition();
         const bool radon = player.GetHeroId() == HeroId::Radon;
+        const bool orbita = player.GetHeroId() == HeroId::Orbita;
         const HeroRuntimeState& heroState = player.GetHeroState();
         const float anim = HeroAnimationFraction(heroState);
         float bodyPulse = 1.0f;
@@ -1295,9 +1460,33 @@ void Renderer::RenderScene(
                 bodyPulse -= 0.03f * (1.0f - anim);
             }
         }
+        if (orbita)
+        {
+            const float pulseFraction = std::clamp(heroState.orbitaPulseTimer / 3.0f, 0.0f, 1.0f);
+            if (pulseFraction > 0.0f || heroState.animationState == HeroAnimationState::Cast)
+            {
+                color = MixColor(color, Color { 255, 170, 150, 255 }, 0.18f + pulseFraction * 0.18f);
+                bodyPulse += 0.04f * std::sin(static_cast<float>(GetTime()) * 12.0f) + pulseFraction * 0.06f;
+                bodyLift += 0.05f * std::sin(anim * kPi);
+            }
+            if (heroState.animationState == HeroAnimationState::Cast)
+            {
+                shoulderLean = 0.24f * std::sin(anim * kPi);
+                bodyPulse += 0.08f * (1.0f - anim * 0.5f);
+            }
+        }
         const Vector3 drawPos { pos.x, pos.y + bodyLift, pos.z };
         DrawCube(drawPos, 0.68f * bodyPulse, 1.7f * (0.98f + (bodyPulse - 1.0f) * 0.45f), 0.68f * bodyPulse, color);
-        DrawSphere(Vector3 { pos.x, pos.y + 1.08f + bodyLift, pos.z }, 0.36f * (radon ? bodyPulse : 1.0f), radon ? MixColor(Color { 238, 230, 210, 255 }, Color { 178, 245, 255, 255 }, heroState.ultimatePrimed ? 0.32f : 0.0f) : Color { 238, 230, 210, 255 });
+        Color headColor = Color { 238, 230, 210, 255 };
+        if (radon)
+        {
+            headColor = MixColor(headColor, Color { 178, 245, 255, 255 }, heroState.ultimatePrimed ? 0.32f : 0.0f);
+        }
+        else if (orbita)
+        {
+            headColor = MixColor(headColor, Color { 255, 210, 202, 255 }, std::clamp(heroState.orbitaPulseTimer / 3.0f, 0.0f, 0.45f));
+        }
+        DrawSphere(Vector3 { pos.x, pos.y + 1.08f + bodyLift, pos.z }, 0.36f * ((radon || orbita) ? bodyPulse : 1.0f), headColor);
         if (enemy)
         {
             DrawCylinderWires(Vector3 { pos.x, pos.y - 0.84f, pos.z }, 0.62f, 0.62f, 0.04f, 24, Color { 255, 118, 118, 220 });
@@ -1330,6 +1519,27 @@ void Renderer::RenderScene(
                 DrawSphere(rightHand, 0.13f + glow * 0.08f, Fade(radonColor, 0.70f));
                 DrawLine3D(leftHand, Vector3 { leftHand.x + forward.x * (0.6f + glow), leftHand.y, leftHand.z + forward.z * (0.6f + glow) }, Fade(radonColor, 0.70f));
                 DrawLine3D(rightHand, Vector3 { rightHand.x + forward.x * (0.6f + glow), rightHand.y, rightHand.z + forward.z * (0.6f + glow) }, Fade(radonColor, 0.70f));
+            }
+        }
+        if (orbita)
+        {
+            const Color orbitaColor = HeroUiColor(HeroId::Orbita);
+            const float pulseFraction = std::clamp(heroState.orbitaPulseTimer / 3.0f, 0.0f, 1.0f);
+            if (pulseFraction > 0.0f || heroState.animationState == HeroAnimationState::Cast)
+            {
+                const float ringRadius = 0.78f + pulseFraction * 0.34f + 0.06f * std::sin(static_cast<float>(GetTime()) * 11.0f);
+                DrawCylinderWires(Vector3 { pos.x, pos.y - 0.70f, pos.z }, ringRadius, ringRadius, 0.055f, 36, Fade(WHITE, 0.58f + pulseFraction * 0.20f));
+                DrawSphereWires(Vector3 { pos.x, pos.y + 0.28f + bodyLift, pos.z }, 0.72f + pulseFraction * 0.20f, 8, 12, Fade(orbitaColor, 0.34f + pulseFraction * 0.34f));
+            }
+            if (heroState.animationState == HeroAnimationState::Cast)
+            {
+                const float glow = 1.0f - anim * 0.45f;
+                const Vector3 leftHand { pos.x - right.x * 0.46f + forward.x * (0.12f + shoulderLean), pos.y + 0.28f + bodyLift, pos.z - right.z * 0.46f + forward.z * (0.12f + shoulderLean) };
+                const Vector3 rightHand { pos.x + right.x * 0.46f + forward.x * (0.12f + shoulderLean), pos.y + 0.28f + bodyLift, pos.z + right.z * 0.46f + forward.z * (0.12f + shoulderLean) };
+                DrawSphere(leftHand, 0.12f + glow * 0.07f, Fade(WHITE, 0.80f));
+                DrawSphere(rightHand, 0.12f + glow * 0.07f, Fade(orbitaColor, 0.76f));
+                DrawLine3D(leftHand, Vector3 { leftHand.x + forward.x * (0.7f + glow * 0.35f), leftHand.y + 0.05f, leftHand.z + forward.z * (0.7f + glow * 0.35f) }, Fade(WHITE, 0.72f));
+                DrawLine3D(rightHand, Vector3 { rightHand.x + forward.x * (0.7f + glow * 0.35f), rightHand.y - 0.04f, rightHand.z + forward.z * (0.7f + glow * 0.35f) }, Fade(orbitaColor, 0.66f));
             }
         }
         const ItemStack heldItem = VisibleHeldItemForPlayer(player, localHeldItem);
@@ -1419,6 +1629,37 @@ void Renderer::RenderScene(
             DrawLine3D(rightHand, Add(rightHand, Scale(cameraForward, 0.55f + anim * 0.35f)), Fade(radonColor, 0.74f));
         }
     }
+    if (hideLocalPlayer
+        && localPlayer != nullptr
+        && localPlayer->GetHeroId() == HeroId::Orbita)
+    {
+        const HeroRuntimeState& heroState = localPlayer->GetHeroState();
+        if (heroState.animationState == HeroAnimationState::Cast || heroState.orbitaPulseTimer > 0.0f)
+        {
+            const Vector3 cameraForward = Normalize(Vector3 {
+                camera.target.x - camera.position.x,
+                camera.target.y - camera.position.y,
+                camera.target.z - camera.position.z
+            });
+            const Vector3 cameraRight = Normalize(Cross(cameraForward, camera.up));
+            const Vector3 cameraUp = Normalize(Cross(cameraRight, cameraForward));
+            const float anim = HeroAnimationFraction(heroState);
+            const float pulse = std::clamp(heroState.orbitaPulseTimer / 3.0f, 0.0f, 1.0f);
+            const Color orbitaColor = HeroUiColor(HeroId::Orbita);
+            const Vector3 leftHand = Add(Add(camera.position, Scale(cameraForward, 0.62f + anim * 0.10f)), Add(Scale(cameraRight, -0.34f), Scale(cameraUp, -0.30f)));
+            const Vector3 rightHand = Add(Add(camera.position, Scale(cameraForward, 0.62f + anim * 0.10f)), Add(Scale(cameraRight, 0.34f), Scale(cameraUp, -0.30f)));
+            DrawSphere(leftHand, 0.08f + pulse * 0.06f, Fade(WHITE, 0.72f));
+            DrawSphere(rightHand, 0.08f + pulse * 0.06f, Fade(orbitaColor, 0.70f));
+            DrawLine3D(leftHand, Add(leftHand, Scale(cameraForward, 0.72f + pulse * 0.36f)), Fade(WHITE, 0.74f));
+            DrawLine3D(rightHand, Add(rightHand, Scale(cameraForward, 0.72f + pulse * 0.36f)), Fade(orbitaColor, 0.64f));
+        }
+    }
+
+    for (const HeroDeviceVisual& device : heroDevices)
+    {
+        DrawHeroDeviceVisual(device);
+    }
+    DrawOrbitaTeleportPreview(orbitaTeleportPreview);
 
     for (const ResourcePickup& pickup : pickups)
     {
@@ -1492,7 +1733,7 @@ void Renderer::RenderScene(
     rlDisableDepthMask();
     for (const TransparentBlockDraw& entry : transparentBlocks)
     {
-        drawWorldBlock(entry.pos, entry.block);
+        drawWorldBlock(entry.center, entry.block);
     }
     rlDrawRenderBatchActive();
     rlEnableDepthMask();
@@ -1613,6 +1854,7 @@ void Renderer::RenderUI(
     const PlacementPreview& placementPreview,
     const BreakProgress& breakProgress,
     const CombatPreview& combatPreview,
+    const OrbitaTeleportPreview& orbitaTeleportPreview,
     int selectedHotbarSlot,
     bool inventoryOpen,
     int inventoryCursorSlot,
@@ -1813,12 +2055,39 @@ void Renderer::RenderUI(
     const int hpWidth = hotbarWidth;
     const int hpHeight = 19;
     const int hpY = hotbarY - 31;
+    const Rectangle hpBar {
+        static_cast<float>(centerX - hpWidth / 2),
+        static_cast<float>(hpY),
+        static_cast<float>(hpWidth),
+        static_cast<float>(hpHeight)
+    };
     DrawBar(
-        Rectangle { static_cast<float>(centerX - hpWidth / 2), static_cast<float>(hpY), static_cast<float>(hpWidth), static_cast<float>(hpHeight) },
+        hpBar,
         healthFraction,
         Color { 224, 42, 58, 255 },
         Fade(Color { 92, 8, 18, 255 }, 0.72f),
         Fade(WHITE, 0.34f));
+    if (orbitaTeleportPreview.visible && orbitaTeleportPreview.valid && orbitaTeleportPreview.healthCost > 0)
+    {
+        const float maxHealth = static_cast<float>(std::max(1, localPlayer.GetMaxHealth()));
+        const float currentFraction = std::clamp(static_cast<float>(localPlayer.GetHealth()) / maxHealth, 0.0f, 1.0f);
+        const float afterFraction = std::clamp(static_cast<float>(localPlayer.GetHealth() - orbitaTeleportPreview.healthCost) / maxHealth, 0.0f, currentFraction);
+        const float costFraction = std::max(0.0f, currentFraction - afterFraction);
+        if (costFraction > 0.001f)
+        {
+            const float blink = 0.5f + 0.5f * std::sin(static_cast<float>(GetTime()) * 11.5f);
+            const Rectangle costSegment {
+                hpBar.x + hpBar.width * afterFraction,
+                hpBar.y,
+                hpBar.width * costFraction,
+                hpBar.height
+            };
+            DrawRectangleRec(costSegment, Fade(WHITE, 0.18f + blink * 0.42f));
+            DrawRectangleLinesEx(costSegment, 1.0f, Fade(Color { 255, 224, 224, 255 }, 0.58f + blink * 0.30f));
+            const std::string costText = "-" + std::to_string(orbitaTeleportPreview.healthCost) + " хп";
+            DrawText(costText.c_str(), static_cast<int>(hpBar.x + hpBar.width + 8.0f), hpY + 2, 15, Fade(WHITE, 0.72f + blink * 0.24f));
+        }
+    }
     const std::string hpText = std::to_string(localPlayer.GetHealth()) + "/" + std::to_string(localPlayer.GetMaxHealth());
     DrawText(hpText.c_str(), centerX - MeasureText(hpText.c_str(), 16) / 2, hpY + 2, 16, WHITE);
     const auto& hotbar = inventory.GetHotbarSlots();

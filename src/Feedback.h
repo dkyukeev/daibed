@@ -49,6 +49,43 @@ struct CombatPreview
     std::string label;
 };
 
+struct OrbitaTeleportPreview
+{
+    bool visible = false;
+    bool valid = false;
+    Vector3 start {};
+    Vector3 destination {};
+    Vector3 direction { 0.0f, 0.0f, 1.0f };
+    float travelDistance = 0.0f;
+    int healthCost = 0;
+    std::string reason;
+};
+
+enum class HeroDeviceVisualKind
+{
+    BromVacuumBot,
+    BromTurretDrone,
+    KonvoyTrap,
+    KonvoyTether,
+    KonvoyDome
+};
+
+struct HeroDeviceVisual
+{
+    HeroDeviceVisualKind kind = HeroDeviceVisualKind::BromVacuumBot;
+    Vector3 position {};
+    Vector3 target {};
+    Vector3 direction { 0.0f, 0.0f, 1.0f };
+    int teamId = -1;
+    int cargoUnits = 0;
+    int cargoCapacity = 0;
+    float radius = 0.0f;
+    bool temporary = false;
+    bool returning = false;
+    bool active = false;
+    float lifetimeFraction = 0.0f;
+};
+
 enum class WorldEffectKind
 {
     Burst,

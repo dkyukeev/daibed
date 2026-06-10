@@ -71,6 +71,9 @@ struct HeroRuntimeState
     bool ultimatePrimed = false;
     bool radonProtected = false;
     bool radonOverloaded = false;
+    bool orbitaMomentumStrike = false;
+    bool orbitaAirDashLocked = false;
+    float orbitaPulseTimer = 0.0f;
 };
 
 const char* HeroIdKey(HeroId id);

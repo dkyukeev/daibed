@@ -19,6 +19,7 @@
 #include <array>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 enum class GameScreen
@@ -98,11 +99,26 @@ private:
     void UseHeroAbilityInputs(Player& player);
     bool UseHeroAbility(Player& player, HeroAbilitySlot slot);
     bool UseRadonAbility(Player& player, HeroAbilitySlot slot);
+    bool UseOrbitaAbility(Player& player, HeroAbilitySlot slot);
+    bool UseBromAbility(Player& player, HeroAbilitySlot slot);
+    bool UseKonvoyAbility(Player& player, HeroAbilitySlot slot);
     void UseRadonForcePulse(Player& player, bool pull);
     void UseRadonMolotov(Player& player);
     void UseRadonDestroyedCoreUltimate(Player& player);
     bool TryRadonCoreSacrifice(EnergyCore& core);
     void EmitRadonCoreWave(Vector3 position, int ownerTeamId, int ownerPlayerId, float radius, float damage, float force);
+    void UseOrbitaDash(Player& player);
+    bool UseOrbitaPhantomBlocks(Player& player);
+    bool UseOrbitaTeleport(Player& player);
+    bool IsOrbitaCoreRestrictedPosition(Vector3 position, int teamId) const;
+    bool IsOrbitaTeleportDestinationSafe(Vector3 position, int teamId, std::string* reason) const;
+    bool UseBromVacuumBot(Player& player, bool temporary, float lifetimeSeconds);
+    bool UseBromTurretDrone(Player& player, bool temporary, float lifetimeSeconds);
+    bool UseBromUltimate(Player& player);
+    bool UseKonvoyTrap(Player& player, float lifetimeSeconds);
+    bool UseKonvoyHandcuffs(Player& player, float lifetimeSeconds);
+    bool UseKonvoyDome(Player& player, float lifetimeSeconds);
+    void ApplyBromBlockBreakPassive(Player& player, const Block& block, Vector3 position);
     void SetHeroAnimation(Player& player, HeroAnimationState state, float seconds);
     void UseUtilityInputs(Player& player);
     bool UseUtility(Player& player, UtilityType type);
@@ -151,12 +167,17 @@ private:
     void UpdateExplosives(float dt);
     void UpdateProjectiles(float dt);
     void UpdateHazardZones(float dt);
-    void UpdateHeroPassives();
+    void UpdateHeroPassives(float dt);
+    void UpdateHeroTemporaryBlocks(float dt);
+    void UpdateBromDevices(float dt);
+    void UpdateKonvoyDevices(float dt);
     void UpdatePassiveRegeneration(float dt);
     void UpdateBaseHealing(float dt);
     void UpdateFeedback(float dt);
     void UpdatePlacementPreview();
     void UpdateCombatPreview();
+    OrbitaTeleportPreview BuildOrbitaTeleportPreview(const Player& player) const;
+    std::vector<HeroDeviceVisual> BuildHeroDeviceVisuals() const;
     void UpdateFastPlacement(float dt);
     void UpdateAttackOrBreak(float dt);
     void ResetBreakProgress();
@@ -250,6 +271,59 @@ private:
         int targetId = -1;
         int attackerId = -1;
         float timer = 0.0f;
+    };
+    struct HeroTemporaryBlock
+    {
+        GridPos position {};
+        int ownerTeamId = -1;
+        float timer = 0.0f;
+    };
+    struct BromVacuumBot
+    {
+        Vector3 position {};
+        int ownerPlayerId = -1;
+        int ownerTeamId = -1;
+        std::array<int, 3> cargo {};
+        bool returning = false;
+        bool temporary = false;
+        float lifetime = 0.0f;
+        float pulseTimer = 0.0f;
+    };
+    struct BromTurretDrone
+    {
+        Vector3 position {};
+        int ownerPlayerId = -1;
+        int ownerTeamId = -1;
+        bool temporary = false;
+        float lifetime = 0.0f;
+        float fireCooldown = 0.0f;
+        float pulseTimer = 0.0f;
+        float shotFlashTimer = 0.0f;
+        Vector3 lastShotTarget {};
+    };
+    struct KonvoyTrap
+    {
+        Vector3 position {};
+        int ownerPlayerId = -1;
+        int ownerTeamId = -1;
+        float lifetime = 0.0f;
+        float flashTimer = 0.0f;
+    };
+    struct KonvoyTether
+    {
+        int ownerPlayerId = -1;
+        int targetPlayerId = -1;
+        int ownerTeamId = -1;
+        float lifetime = 0.0f;
+        float flashTimer = 0.0f;
+    };
+    struct KonvoyDome
+    {
+        Vector3 position {};
+        int ownerPlayerId = -1;
+        int ownerTeamId = -1;
+        float lifetime = 0.0f;
+        float flashTimer = 0.0f;
     };
     struct AutomatchBotStats
     {
@@ -380,11 +454,18 @@ private:
     PlacementPreview placementPreview_;
     BreakProgress breakProgress_;
     CombatPreview combatPreview_;
+    OrbitaTeleportPreview orbitaTeleportPreview_;
     std::vector<WorldEffect> worldEffects_;
     std::vector<TimedExplosion> timedExplosions_;
     std::vector<EnergyProjectile> projectiles_;
     std::vector<HazardZone> hazardZones_;
     std::vector<AlarmTrap> alarmTraps_;
+    std::vector<HeroTemporaryBlock> heroTemporaryBlocks_;
+    std::vector<BromVacuumBot> bromVacuumBots_;
+    std::vector<BromTurretDrone> bromTurretDrones_;
+    std::vector<KonvoyTrap> konvoyTraps_;
+    std::vector<KonvoyTether> konvoyTethers_;
+    std::vector<KonvoyDome> konvoyDomes_;
     std::vector<DroppedItem> droppedItems_;
     std::vector<FloatingText> floatingTexts_;
     std::vector<EventMessage> eventMessages_;
@@ -392,6 +473,7 @@ private:
     std::vector<PlayerMatchScore> playerScores_;
     std::vector<DamageCredit> damageCredits_;
     std::vector<BotMemory> botMemories_;
+    std::unordered_map<int, std::size_t> botMemoryIndexByPlayerId_;
     AutomatchState automatch_;
     std::array<Inventory, 4> teamChests_;
     Inventory personalChest_;
@@ -438,7 +520,10 @@ private:
     float gameplayFov_ = 62.0f;
     float hitMarkerTimer_ = 0.0f;
     float damageFlashTimer_ = 0.0f;
+    float orbitaTeleportPreviewTimer_ = 0.0f;
     float matchTime_ = 0.0f;
+    float pickupMergeTimer_ = 0.0f;
+    float droppedItemMergeTimer_ = 0.0f;
     float passiveRegenTimer_ = 0.0f;
     float baseHealTimer_ = 0.0f;
     float blockHazardTimer_ = 0.0f;

@@ -525,7 +525,13 @@ std::optional<CombatTargetInfo> CombatSystem::FindMeleeTarget(const Player& atta
         const int damageBeforeShield = DamageBeforeShieldAtDistance(attacker, target, weapon, hit->hitZone, chargeMultiplier, hit->rayDistance, predictedHeavyAxe);
         const int damage = FinalDamageFromPreShield(damageBeforeShield, target, weapon);
         const bool predictedSprintReset = attacker.HasSprintReset();
-        const KnockbackResult knockback = CalculateKnockback(attacker, target, aimDirection, weapon, chargeMultiplier, nullptr, predictedSprintReset, hit->rayDistance);
+        KnockbackResult knockback = CalculateKnockback(attacker, target, aimDirection, weapon, chargeMultiplier, nullptr, predictedSprintReset, hit->rayDistance);
+        if (attacker.GetHeroId() == HeroId::Orbita && attacker.GetHeroState().orbitaMomentumStrike)
+        {
+            knockback.impulse.x *= 1.38f;
+            knockback.impulse.y = std::min(1.35f, knockback.impulse.y + 0.14f);
+            knockback.impulse.z *= 1.38f;
+        }
         bestTarget = CombatTargetInfo {
             target.GetId(),
             target.GetTeamId(),
@@ -602,7 +608,19 @@ bool CombatSystem::Attack(Player& attacker, std::vector<Player>& players, Vector
     const int finalDamage = FinalDamageFromPreShield(damageBeforeShield, *bestTarget, weapon);
     const bool sprintReset = context.sprintReset || attacker.ConsumeSprintReset();
     context.sprintReset = sprintReset;
-    const KnockbackResult knockback = CalculateKnockback(attacker, *bestTarget, aimDirection, weapon, chargeMultiplier, &context, sprintReset, bestHit.rayDistance);
+    const bool orbitaMomentumStrike = attacker.GetHeroId() == HeroId::Orbita
+        && attacker.GetHeroState().orbitaMomentumStrike;
+    KnockbackResult knockback = CalculateKnockback(attacker, *bestTarget, aimDirection, weapon, chargeMultiplier, &context, sprintReset, bestHit.rayDistance);
+    if (orbitaMomentumStrike)
+    {
+        knockback.impulse.x *= 1.38f;
+        knockback.impulse.y = std::min(1.35f, knockback.impulse.y + 0.14f);
+        knockback.impulse.z *= 1.38f;
+        HeroRuntimeState& heroState = attacker.MutableHeroState();
+        heroState.orbitaMomentumStrike = false;
+        heroState.orbitaPulseTimer = 0.45f;
+        attacker.AddHeroUltimateCharge(11.0f);
+    }
     bestTarget->Damage(DamageInputForPlayerDamage(damageBeforeShield, *bestTarget, weapon));
     bestTarget->ActivateHitInvulnerability(kHitInvulnerabilitySeconds);
     bestTarget->ApplyKnockback(knockback.impulse);
@@ -663,6 +681,10 @@ bool CombatSystem::Attack(Player& attacker, std::vector<Player>& players, Vector
     else if (knockback.sprintReset)
     {
         stream << " Sprint reset.";
+    }
+    if (orbitaMomentumStrike)
+    {
+        stream << " Разгон Орбиты.";
     }
     message = stream.str();
     if (event != nullptr)

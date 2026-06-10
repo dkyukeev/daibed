@@ -1,7 +1,7 @@
 #include "Block.h"
 
 #include <algorithm>
-#include <functional>
+#include <cstdint>
 
 bool GridPos::operator==(const GridPos& other) const
 {
@@ -15,10 +15,16 @@ bool GridPos::operator!=(const GridPos& other) const
 
 std::size_t GridPosHash::operator()(const GridPos& pos) const noexcept
 {
-    const std::size_t hx = std::hash<int>{}(pos.x);
-    const std::size_t hy = std::hash<int>{}(pos.y);
-    const std::size_t hz = std::hash<int>{}(pos.z);
-    return hx ^ (hy << 1U) ^ (hz << 2U);
+    std::uint64_t hash = 1469598103934665603ull;
+    const auto mix = [&hash](int value)
+    {
+        hash ^= static_cast<std::uint32_t>(value) ^ 0x80000000u;
+        hash *= 1099511628211ull;
+    };
+    mix(pos.x);
+    mix(pos.y);
+    mix(pos.z);
+    return static_cast<std::size_t>(hash);
 }
 
 const char* ToString(BlockType type)

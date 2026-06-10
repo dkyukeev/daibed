@@ -327,6 +327,7 @@ void Player::UpdateTimers(float dt)
     updateHeroAbility(heroState_.active2);
     updateHeroAbility(heroState_.ultimate);
     heroState_.animationTimer = std::max(0.0f, heroState_.animationTimer - dt);
+    heroState_.orbitaPulseTimer = std::max(0.0f, heroState_.orbitaPulseTimer - dt);
     if (heroState_.animationTimer <= 0.0f
         && heroState_.animationState != HeroAnimationState::UltPrimed
         && heroState_.animationState != HeroAnimationState::Overloaded)
@@ -409,6 +410,21 @@ void Player::ActivateJumpBoost(float seconds)
 void Player::ActivateShield(float seconds)
 {
     shieldTimer_ = std::max(shieldTimer_, seconds);
+}
+
+void Player::Teleport(Vector3 position, bool clearVelocity)
+{
+    if (!alive_ || eliminated_)
+    {
+        return;
+    }
+
+    position_ = position;
+    if (clearVelocity)
+    {
+        velocity_ = Vector3 { 0.0f, 0.0f, 0.0f };
+    }
+    onGround_ = false;
 }
 
 HeroId Player::GetHeroId() const

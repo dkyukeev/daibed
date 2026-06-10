@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace
 {
@@ -150,47 +151,117 @@ bool World::CollidesWithAABB(Vector3 center, Vector3 halfExtents) const
 
 std::optional<RaycastHit> World::Raycast(Vector3 origin, Vector3 direction, float maxDistance) const
 {
-    const Vector3 dir = Normalize(direction);
-    GridPos previous = WorldToGrid(origin);
-
-    for (float distance = 0.0f; distance <= maxDistance; distance += 0.08f)
+    if (maxDistance < 0.0f)
     {
-        const Vector3 point {
-            origin.x + dir.x * distance,
-            origin.y + dir.y * distance,
-            origin.z + dir.z * distance
-        };
+        return std::nullopt;
+    }
 
-        const GridPos current = WorldToGrid(point);
-        const Block* block = GetBlock(current);
-        if (block != nullptr && block->type != BlockType::Air)
+    const Vector3 dir = Normalize(direction);
+    GridPos cell = WorldToGrid(origin);
+    GridPos previous = cell;
+    GridPos normal {};
+    float distance = 0.0f;
+
+    const auto fallbackNormal = [&dir]()
+    {
+        GridPos fallback {};
+        if (std::fabs(dir.x) >= std::fabs(dir.y) && std::fabs(dir.x) >= std::fabs(dir.z))
         {
-            GridPos normal {
-                previous.x - current.x,
-                previous.y - current.y,
-                previous.z - current.z
-            };
-            const int normalAxes = std::abs(normal.x) + std::abs(normal.y) + std::abs(normal.z);
-            if (normalAxes != 1)
-            {
-                normal = GridPos {};
-                if (std::fabs(dir.x) >= std::fabs(dir.y) && std::fabs(dir.x) >= std::fabs(dir.z))
-                {
-                    normal.x = dir.x > 0.0f ? -1 : 1;
-                }
-                else if (std::fabs(dir.y) >= std::fabs(dir.z))
-                {
-                    normal.y = dir.y > 0.0f ? -1 : 1;
-                }
-                else
-                {
-                    normal.z = dir.z > 0.0f ? -1 : 1;
-                }
-            }
-            return RaycastHit { current, previous, normal, *block, distance };
+            fallback.x = dir.x > 0.0f ? -1 : 1;
+        }
+        else if (std::fabs(dir.y) >= std::fabs(dir.z))
+        {
+            fallback.y = dir.y > 0.0f ? -1 : 1;
+        }
+        else
+        {
+            fallback.z = dir.z > 0.0f ? -1 : 1;
+        }
+        return fallback;
+    };
+
+    const auto checkCell = [&]() -> std::optional<RaycastHit>
+    {
+        const Block* block = GetBlock(cell);
+        if (block == nullptr || block->type == BlockType::Air)
+        {
+            return std::nullopt;
         }
 
-        previous = current;
+        GridPos hitNormal = normal;
+        const int normalAxes = std::abs(hitNormal.x) + std::abs(hitNormal.y) + std::abs(hitNormal.z);
+        if (normalAxes != 1)
+        {
+            hitNormal = fallbackNormal();
+        }
+        return RaycastHit { cell, previous, hitNormal, *block, distance };
+    };
+
+    if (const std::optional<RaycastHit> hit = checkCell())
+    {
+        return hit;
+    }
+
+    const float infinity = std::numeric_limits<float>::infinity();
+    const int stepX = dir.x > 0.0f ? 1 : (dir.x < 0.0f ? -1 : 0);
+    const int stepY = dir.y > 0.0f ? 1 : (dir.y < 0.0f ? -1 : 0);
+    const int stepZ = dir.z > 0.0f ? 1 : (dir.z < 0.0f ? -1 : 0);
+
+    const auto initialTMax = [infinity](float originCoord, int cellCoord, float dirCoord, int step)
+    {
+        if (step == 0)
+        {
+            return infinity;
+        }
+        const float boundary = static_cast<float>(cellCoord) + (step > 0 ? 0.5f : -0.5f);
+        return std::max(0.0f, (boundary - originCoord) / dirCoord);
+    };
+
+    const auto tDelta = [infinity](float dirCoord, int step)
+    {
+        return step == 0 ? infinity : 1.0f / std::fabs(dirCoord);
+    };
+
+    float tMaxX = initialTMax(origin.x, cell.x, dir.x, stepX);
+    float tMaxY = initialTMax(origin.y, cell.y, dir.y, stepY);
+    float tMaxZ = initialTMax(origin.z, cell.z, dir.z, stepZ);
+    const float tDeltaX = tDelta(dir.x, stepX);
+    const float tDeltaY = tDelta(dir.y, stepY);
+    const float tDeltaZ = tDelta(dir.z, stepZ);
+
+    while (distance <= maxDistance)
+    {
+        previous = cell;
+        if (tMaxX <= tMaxY && tMaxX <= tMaxZ)
+        {
+            cell.x += stepX;
+            distance = tMaxX;
+            tMaxX += tDeltaX;
+            normal = GridPos { -stepX, 0, 0 };
+        }
+        else if (tMaxY <= tMaxZ)
+        {
+            cell.y += stepY;
+            distance = tMaxY;
+            tMaxY += tDeltaY;
+            normal = GridPos { 0, -stepY, 0 };
+        }
+        else
+        {
+            cell.z += stepZ;
+            distance = tMaxZ;
+            tMaxZ += tDeltaZ;
+            normal = GridPos { 0, 0, -stepZ };
+        }
+
+        if (distance > maxDistance)
+        {
+            break;
+        }
+        if (const std::optional<RaycastHit> hit = checkCell())
+        {
+            return hit;
+        }
     }
 
     return std::nullopt;

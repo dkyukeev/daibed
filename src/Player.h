@@ -72,6 +72,7 @@ public:
     void ActivateSpeedBoost(float seconds);
     void ActivateJumpBoost(float seconds);
     void ActivateShield(float seconds);
+    void Teleport(Vector3 position, bool clearVelocity = true);
     void SetHeroId(HeroId heroId);
     void SetHeroDamageMultipliers(float incomingMultiplier, float outgoingMultiplier);
     void AddHeroUltimateCharge(float amount);

@@ -995,7 +995,7 @@ void Game::RenderMinimap(const Player& localPlayer) const
     DrawRectangleLines(x, y, mapSize, mapSize, Fade(WHITE, 0.25f));
     DrawText("Map", x + 10, y + 8, 16, Fade(WHITE, 0.70f));
 
-    const auto project = [x, y](Vector3 position)
+    const auto project = [x, y, mapSize, arenaExtent](Vector3 position)
     {
         const float nx = std::clamp((position.x + arenaExtent) / (arenaExtent * 2.0f), 0.0f, 1.0f);
         const float nz = std::clamp((position.z + arenaExtent) / (arenaExtent * 2.0f), 0.0f, 1.0f);

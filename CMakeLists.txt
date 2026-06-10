@@ -22,11 +22,13 @@ if(NOT raylib_FOUND)
         set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "Minimum policy version for third-party CMake projects" FORCE)
     endif()
 
-    FetchContent_Declare(
-        raylib
+    set(DAIBED_RAYLIB_FETCH_ARGS
         URL https://github.com/raysan5/raylib/archive/refs/tags/5.0.tar.gz
-        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
+        list(APPEND DAIBED_RAYLIB_FETCH_ARGS DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    endif()
+    FetchContent_Declare(raylib ${DAIBED_RAYLIB_FETCH_ARGS})
     set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(raylib)
 endif()

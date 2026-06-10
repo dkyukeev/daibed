@@ -26,6 +26,8 @@ public:
         const std::vector<Generator>& generators,
         const std::vector<ResourcePickup>& pickups,
         const std::vector<DroppedItem>& droppedItems,
+        const std::vector<HeroDeviceVisual>& heroDevices,
+        const OrbitaTeleportPreview& orbitaTeleportPreview,
         const PlacementPreview& placementPreview,
         const std::vector<WorldEffect>& worldEffects,
         const std::vector<FloatingText>& floatingTexts,
@@ -45,6 +47,7 @@ public:
         const PlacementPreview& placementPreview,
         const BreakProgress& breakProgress,
         const CombatPreview& combatPreview,
+        const OrbitaTeleportPreview& orbitaTeleportPreview,
         int selectedHotbarSlot,
         bool inventoryOpen,
         int inventoryCursorSlot,
@@ -61,6 +64,14 @@ public:
         std::optional<int> winnerTeamId) const;
 
 private:
+    struct TransparentBlockDraw
+    {
+        GridPos pos {};
+        Vector3 center {};
+        Block block {};
+        float distance = 0.0f;
+    };
+
     Color GetBlockColor(const Block& block, const std::vector<Team>& teams) const;
     const Texture2D* GetBlockTexture(BlockType type) const;
     const Texture2D* GetItemTexture(ItemType type) const;
@@ -97,4 +108,5 @@ private:
     Texture2D ironIcon_ {};
     Texture2D goldIcon_ {};
     Texture2D crystalIcon_ {};
+    mutable std::vector<TransparentBlockDraw> transparentBlocks_;
 };
