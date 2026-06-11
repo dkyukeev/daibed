@@ -17,6 +17,7 @@ namespace
 constexpr int kBotPathMinY = -2;
 constexpr int kBotPathMaxY = 64;
 constexpr float kBotPi = 3.1415926535f;
+constexpr float kCoordinationSignalTtl = 2.25f;
 
 float DistanceSquared(Vector3 a, Vector3 b)
 {
@@ -174,6 +175,37 @@ std::vector<GridPos> CoreDefensePositions(GridPos corePos)
     return positions;
 }
 
+struct CoreDefenseStatus
+{
+    int missingBlocks = 0;
+    int weakBlocks = 0;
+    bool critical = false;
+};
+
+CoreDefenseStatus InspectCoreDefense(const World& world, const Team& team)
+{
+    CoreDefenseStatus status {};
+    for (const GridPos& candidate : CoreDefensePositions(team.coreBlock))
+    {
+        const Block* block = world.GetBlock(candidate);
+        if (block == nullptr || world.IsAir(candidate) || block->teamId != team.id)
+        {
+            ++status.missingBlocks;
+            continue;
+        }
+
+        if (DefenseBlockRank(block->type) <= 1)
+        {
+            ++status.weakBlocks;
+        }
+    }
+
+    status.critical = status.missingBlocks >= 3
+        || (status.missingBlocks >= 1 && status.weakBlocks >= 4)
+        || status.weakBlocks >= 8;
+    return status;
+}
+
 int CarriedResourceValue(const Inventory& inventory)
 {
     return inventory.GetResource(ResourceType::Iron)
@@ -244,79 +276,85 @@ BotRole RoleForBotId(int id)
         : (id % 4 == 1 ? BotRole::Fighter : (id % 4 == 2 ? BotRole::Rusher : BotRole::Collector));
 }
 
-int BotRetreatHealth(BotRole role, BotDifficulty difficulty, bool coreAlive)
+const BotRoleTuning& RoleTuning(const BotTuningGenome& tuning, BotRole role)
 {
+    return tuning.roles[std::clamp(static_cast<int>(role), 0, 3)];
+}
+
+float DifficultyCautionOffset(BotDifficulty difficulty, float easyOffset, float hardOffset)
+{
+    switch (difficulty)
+    {
+    case BotDifficulty::Easy:
+        return easyOffset;
+    case BotDifficulty::Hard:
+        return hardOffset;
+    case BotDifficulty::Normal:
+        break;
+    }
+    return 0.0f;
+}
+
+float FightRequiredMarginForDifficulty(const BotTuningGenome& tuning, BotDifficulty difficulty)
+{
+    switch (difficulty)
+    {
+    case BotDifficulty::Easy:
+        return tuning.fightRequiredMarginEasy;
+    case BotDifficulty::Hard:
+        return tuning.fightRequiredMarginHard;
+    case BotDifficulty::Normal:
+        break;
+    }
+    return tuning.fightRequiredMarginNormal;
+}
+
+float RetreatPowerMarginForDifficulty(const BotTuningGenome& tuning, BotDifficulty difficulty)
+{
+    switch (difficulty)
+    {
+    case BotDifficulty::Easy:
+        return tuning.retreatPowerMarginEasy;
+    case BotDifficulty::Hard:
+        return tuning.retreatPowerMarginHard;
+    case BotDifficulty::Normal:
+        break;
+    }
+    return tuning.retreatPowerMarginNormal;
+}
+
+int BotRetreatHealth(BotRole role, BotDifficulty difficulty, bool coreAlive, const BotTuningGenome& tuning)
+{
+    const BotRoleTuning& roleTuning = RoleTuning(tuning, role);
     if (!coreAlive)
     {
-        return difficulty == BotDifficulty::Hard ? 12 : (difficulty == BotDifficulty::Easy ? 30 : 20);
+        return static_cast<int>(std::round(roleTuning.retreatHealthFinalLife + DifficultyCautionOffset(difficulty, 10.0f, -8.0f)));
     }
 
-    switch (role)
-    {
-    case BotRole::Collector:
-        return difficulty == BotDifficulty::Hard ? 32 : (difficulty == BotDifficulty::Easy ? 58 : 44);
-    case BotRole::Defender:
-        return difficulty == BotDifficulty::Hard ? 22 : (difficulty == BotDifficulty::Easy ? 48 : 34);
-    case BotRole::Fighter:
-        return difficulty == BotDifficulty::Hard ? 20 : (difficulty == BotDifficulty::Easy ? 46 : 30);
-    case BotRole::Rusher:
-        return difficulty == BotDifficulty::Hard ? 18 : (difficulty == BotDifficulty::Easy ? 42 : 28);
-    }
-    return 35;
+    return static_cast<int>(std::round(roleTuning.retreatHealthCoreAlive + DifficultyCautionOffset(difficulty, 14.0f, -12.0f)));
 }
 
-int BotFightHealth(BotRole role, BotDifficulty difficulty)
+int BotFightHealth(BotRole role, BotDifficulty difficulty, const BotTuningGenome& tuning)
 {
-    switch (role)
-    {
-    case BotRole::Collector:
-        return difficulty == BotDifficulty::Hard ? 38 : (difficulty == BotDifficulty::Easy ? 72 : 54);
-    case BotRole::Defender:
-        return difficulty == BotDifficulty::Hard ? 18 : (difficulty == BotDifficulty::Easy ? 40 : 26);
-    case BotRole::Fighter:
-        return difficulty == BotDifficulty::Hard ? 14 : (difficulty == BotDifficulty::Easy ? 38 : 22);
-    case BotRole::Rusher:
-        return difficulty == BotDifficulty::Hard ? 20 : (difficulty == BotDifficulty::Easy ? 44 : 28);
-    }
-    return 28;
+    const BotRoleTuning& roleTuning = RoleTuning(tuning, role);
+    return static_cast<int>(std::round(roleTuning.fightHealth + DifficultyCautionOffset(difficulty, 18.0f, -10.0f)));
 }
 
-float BotEngageRange(BotRole role, BotDifficulty difficulty)
+float BotEngageRange(BotRole role, BotDifficulty difficulty, const BotTuningGenome& tuning)
 {
     const float difficultyBonus = difficulty == BotDifficulty::Hard ? 1.15f : (difficulty == BotDifficulty::Easy ? -0.85f : 0.0f);
-    switch (role)
-    {
-    case BotRole::Defender:
-        return 7.4f + difficultyBonus;
-    case BotRole::Fighter:
-        return 8.6f + difficultyBonus;
-    case BotRole::Rusher:
-        return 4.6f + difficultyBonus * 0.6f;
-    case BotRole::Collector:
-        return 3.1f + difficultyBonus * 0.45f;
-    }
-    return 5.0f;
+    const float roleScale = role == BotRole::Rusher ? 0.6f : (role == BotRole::Collector ? 0.45f : 1.0f);
+    return RoleTuning(tuning, role).engageRange + difficultyBonus * roleScale;
 }
 
-int BotDesiredBlocks(BotRole role)
+int BotDesiredBlocks(BotRole role, const BotTuningGenome& tuning)
 {
-    switch (role)
-    {
-    case BotRole::Rusher:
-        return 36;
-    case BotRole::Defender:
-        return 24;
-    case BotRole::Collector:
-        return 20;
-    case BotRole::Fighter:
-        return 28;
-    }
-    return 24;
+    return static_cast<int>(std::round(RoleTuning(tuning, role).desiredBlocks));
 }
 
-int BotLootReturnValue(BotRole role, BotDifficulty difficulty)
+int BotLootReturnValue(BotRole role, BotDifficulty difficulty, const BotTuningGenome& tuning)
 {
-    int value = role == BotRole::Collector ? 14 : 30;
+    int value = static_cast<int>(std::round(RoleTuning(tuning, role).lootReturnValue));
     if (difficulty == BotDifficulty::Easy)
     {
         value -= 4;
@@ -328,31 +366,32 @@ int BotLootReturnValue(BotRole role, BotDifficulty difficulty)
     return value;
 }
 
-float IntentLockSeconds(BotIntent intent, BotDifficulty difficulty)
+float IntentLockSeconds(BotIntent intent, BotDifficulty difficulty, const BotTuningGenome& tuning)
 {
     const float difficultyScale = difficulty == BotDifficulty::Hard ? 0.78f : (difficulty == BotDifficulty::Easy ? 1.22f : 1.0f);
+    const float tuningScale = tuning.intentLockScale;
     switch (intent)
     {
     case BotIntent::DefendCore:
-        return 0.35f;
+        return 0.35f * tuningScale;
     case BotIntent::FightEnemy:
     case BotIntent::ChaseWeakEnemy:
-        return 0.55f * difficultyScale;
+        return 0.55f * difficultyScale * tuningScale;
     case BotIntent::RetreatHome:
-        return 1.10f * difficultyScale;
+        return 1.10f * difficultyScale * tuningScale;
     case BotIntent::GearUp:
-        return 1.45f * difficultyScale;
+        return 1.45f * difficultyScale * tuningScale;
     case BotIntent::PressureCore:
     case BotIntent::BreakCoreDefense:
-        return 1.05f * difficultyScale;
+        return 1.05f * difficultyScale * tuningScale;
     case BotIntent::SecureResources:
-        return 1.20f * difficultyScale;
+        return 1.20f * difficultyScale * tuningScale;
     case BotIntent::RepairCoreDefense:
-        return 0.90f * difficultyScale;
+        return 0.90f * difficultyScale * tuningScale;
     case BotIntent::Recover:
         return 0.32f;
     }
-    return 0.8f;
+    return 0.8f * tuningScale;
 }
 
 BotState StateForIntent(BotIntent intent)
@@ -416,6 +455,25 @@ struct BotResourcePlan
     ResourceType type = ResourceType::Iron;
     bool hasTarget = false;
     float score = std::numeric_limits<float>::max();
+};
+
+enum class BotStrategicFocus
+{
+    Economy,
+    Defense,
+    Pressure,
+    Cleanup
+};
+
+struct BotStrategicPlan
+{
+    BotStrategicFocus focus = BotStrategicFocus::Economy;
+    int attackCoreTeamId = -1;
+    int desiredAttackers = 1;
+    int desiredDefenders = 1;
+    float attackUrgency = 0.0f;
+    float defenseUrgency = 0.0f;
+    bool allIn = false;
 };
 
 const BotMemory* FindBotMemoryByPlayerId(
@@ -540,41 +598,36 @@ void RemoveIntentFromSnapshot(BotTeamSnapshot& snapshot, BotIntent intent)
     }
 }
 
-float RoleLockSeconds(BotRole role, BotDifficulty difficulty)
+float RoleLockSeconds(BotRole role, BotDifficulty difficulty, const BotTuningGenome& tuning)
 {
     const float scale = difficulty == BotDifficulty::Hard ? 0.82f : (difficulty == BotDifficulty::Easy ? 1.22f : 1.0f);
-    switch (role)
-    {
-    case BotRole::Defender:
-        return 7.0f * scale;
-    case BotRole::Collector:
-        return 6.0f * scale;
-    case BotRole::Rusher:
-        return 5.0f * scale;
-    case BotRole::Fighter:
-        return 4.6f * scale;
-    }
-    return 5.0f * scale;
+    return RoleTuning(tuning, role).roleLockSeconds * scale * tuning.roleLockScale;
 }
 
-float RoleIntentBias(BotRole role, BotIntent intent)
+float RoleIntentBias(BotRole role, BotIntent intent, const BotTuningGenome& tuning)
 {
+    float bias = 0.0f;
     switch (role)
     {
     case BotRole::Defender:
         switch (intent)
         {
         case BotIntent::DefendCore:
-            return 210.0f;
+            bias = 210.0f;
+            break;
         case BotIntent::RepairCoreDefense:
-            return 260.0f;
+            bias = 260.0f;
+            break;
         case BotIntent::FightEnemy:
-            return 70.0f;
+            bias = 70.0f;
+            break;
         case BotIntent::PressureCore:
         case BotIntent::BreakCoreDefense:
-            return -180.0f;
+            bias = -180.0f;
+            break;
         case BotIntent::SecureResources:
-            return -35.0f;
+            bias = -35.0f;
+            break;
         case BotIntent::GearUp:
         case BotIntent::ChaseWeakEnemy:
         case BotIntent::RetreatHome:
@@ -586,17 +639,23 @@ float RoleIntentBias(BotRole role, BotIntent intent)
         switch (intent)
         {
         case BotIntent::PressureCore:
-            return 230.0f;
+            bias = 230.0f;
+            break;
         case BotIntent::BreakCoreDefense:
-            return 210.0f;
+            bias = 210.0f;
+            break;
         case BotIntent::FightEnemy:
-            return 80.0f;
+            bias = 80.0f;
+            break;
         case BotIntent::DefendCore:
-            return -95.0f;
+            bias = -95.0f;
+            break;
         case BotIntent::RepairCoreDefense:
-            return -170.0f;
+            bias = -170.0f;
+            break;
         case BotIntent::SecureResources:
-            return -135.0f;
+            bias = -135.0f;
+            break;
         case BotIntent::GearUp:
         case BotIntent::ChaseWeakEnemy:
         case BotIntent::RetreatHome:
@@ -608,20 +667,27 @@ float RoleIntentBias(BotRole role, BotIntent intent)
         switch (intent)
         {
         case BotIntent::SecureResources:
-            return 260.0f;
+            bias = 260.0f;
+            break;
         case BotIntent::GearUp:
-            return 150.0f;
+            bias = 150.0f;
+            break;
         case BotIntent::RetreatHome:
-            return 90.0f;
+            bias = 90.0f;
+            break;
         case BotIntent::PressureCore:
         case BotIntent::BreakCoreDefense:
-            return -210.0f;
+            bias = -210.0f;
+            break;
         case BotIntent::ChaseWeakEnemy:
-            return -70.0f;
+            bias = -70.0f;
+            break;
         case BotIntent::DefendCore:
-            return -60.0f;
+            bias = -60.0f;
+            break;
         case BotIntent::RepairCoreDefense:
-            return -45.0f;
+            bias = -45.0f;
+            break;
         case BotIntent::FightEnemy:
         case BotIntent::Recover:
             break;
@@ -631,19 +697,26 @@ float RoleIntentBias(BotRole role, BotIntent intent)
         switch (intent)
         {
         case BotIntent::FightEnemy:
-            return 230.0f;
+            bias = 230.0f;
+            break;
         case BotIntent::ChaseWeakEnemy:
-            return 210.0f;
+            bias = 210.0f;
+            break;
         case BotIntent::PressureCore:
-            return 95.0f;
+            bias = 95.0f;
+            break;
         case BotIntent::BreakCoreDefense:
-            return 75.0f;
+            bias = 75.0f;
+            break;
         case BotIntent::SecureResources:
-            return -110.0f;
+            bias = -110.0f;
+            break;
         case BotIntent::DefendCore:
-            return -35.0f;
+            bias = -35.0f;
+            break;
         case BotIntent::RepairCoreDefense:
-            return -130.0f;
+            bias = -130.0f;
+            break;
         case BotIntent::GearUp:
         case BotIntent::RetreatHome:
         case BotIntent::Recover:
@@ -651,7 +724,27 @@ float RoleIntentBias(BotRole role, BotIntent intent)
         }
         break;
     }
-    return 0.0f;
+
+    const BotRoleTuning& roleTuning = RoleTuning(tuning, role);
+    switch (intent)
+    {
+    case BotIntent::PressureCore:
+    case BotIntent::BreakCoreDefense:
+        return bias * roleTuning.pressureBiasScale;
+    case BotIntent::DefendCore:
+    case BotIntent::RepairCoreDefense:
+        return bias * roleTuning.defenseBiasScale;
+    case BotIntent::SecureResources:
+    case BotIntent::GearUp:
+    case BotIntent::RetreatHome:
+        return bias * roleTuning.resourceBiasScale;
+    case BotIntent::FightEnemy:
+    case BotIntent::ChaseWeakEnemy:
+        return bias * roleTuning.combatBiasScale;
+    case BotIntent::Recover:
+        break;
+    }
+    return bias;
 }
 
 struct BotRoleDecision
@@ -666,7 +759,6 @@ BotRoleDecision EvaluateDynamicRoleDecision(
     const Team& team,
     const BotMemory& memory,
     const BotRoleDistribution& distribution,
-    bool coreNeedsRepair,
     bool carryingLoot,
     bool wantsShop,
     Player* enemyAtCore,
@@ -678,7 +770,7 @@ BotRoleDecision EvaluateDynamicRoleDecision(
     decision.role = memory.role;
     decision.reason = "keep role";
 
-    const bool emergencyDefense = team.coreAlive && (enemyAtCore != nullptr || coreNeedsRepair);
+    const bool emergencyDefense = team.coreAlive && enemyAtCore != nullptr;
     const bool lowHealth = bot.GetHealth() < 44;
     const bool lowBlocks = inventory.GetBlocks() < 8;
     const bool lowCombat = inventory.GetSwordLevel() <= 0 && inventory.GetToolLevel() <= 0;
@@ -816,7 +908,8 @@ BotRoleDecision EvaluateDynamicRoleDecision(
 bool TryApplyDynamicRoleDecision(
     BotMemory& memory,
     const BotRoleDecision& decision,
-    BotDifficulty difficulty)
+    BotDifficulty difficulty,
+    const BotTuningGenome& tuning)
 {
     if (decision.role == memory.role)
     {
@@ -836,7 +929,7 @@ bool TryApplyDynamicRoleDecision(
 
     memory.role = decision.role;
     memory.roleTimer = 0.0f;
-    memory.roleLockTimer = RoleLockSeconds(decision.role, difficulty);
+    memory.roleLockTimer = RoleLockSeconds(decision.role, difficulty, tuning);
     memory.roleReason = decision.reason;
     memory.intentLockTimer = 0.0f;
     memory.hasNavWaypoint = false;
@@ -857,6 +950,9 @@ void TickBotMemory(BotMemory& memory, float dt)
     memory.bridgePlaceCooldown = std::max(0.0f, memory.bridgePlaceCooldown - dt);
     memory.utilityTimer = std::max(0.0f, memory.utilityTimer - dt);
     memory.jumpTimer = std::max(0.0f, memory.jumpTimer - dt);
+    memory.defenseCheckTimer = std::max(0.0f, memory.defenseCheckTimer - dt);
+    memory.strategicUpdateTimer = std::max(0.0f, memory.strategicUpdateTimer - dt);
+    memory.currentPlan.elapsedTime += dt;
     memory.roleTimer += dt;
     memory.roleLockTimer = std::max(0.0f, memory.roleLockTimer - dt);
 }
@@ -950,10 +1046,11 @@ bool ShouldBotShop(
     const Inventory& inventory,
     const Team& team,
     const BotMemory& memory,
-    BotDifficulty difficulty)
+    BotDifficulty difficulty,
+    const BotTuningGenome& tuning)
 {
-    const bool carryingLoot = memory.carriedResourceValue >= BotLootReturnValue(memory.role, difficulty);
-    const int desiredBlocks = BotDesiredBlocks(memory.role);
+    const bool carryingLoot = memory.carriedResourceValue >= BotLootReturnValue(memory.role, difficulty, tuning);
+    const int desiredBlocks = BotDesiredBlocks(memory.role, tuning);
     const bool canBuyBlocks = inventory.GetResource(ResourceType::Iron) >= 8;
     const bool hasObsidianMoney = inventory.GetResource(ResourceType::Gold) >= 8
         && inventory.GetResource(ResourceType::Crystal) >= 3;
@@ -979,7 +1076,7 @@ bool ShouldBotShop(
         || (memory.role == BotRole::Collector
             && (inventory.GetResource(ResourceType::Crystal) >= 3
                 || inventory.GetResource(ResourceType::Gold) >= 8
-                || memory.carriedResourceValue >= BotLootReturnValue(memory.role, difficulty)))
+                || memory.carriedResourceValue >= BotLootReturnValue(memory.role, difficulty, tuning)))
         || (bot.GetHealth() < 70 && inventory.GetResource(ResourceType::Crystal) >= 3)
         || carryingLoot;
 }
@@ -1123,6 +1220,7 @@ struct BotCombatPowerWeights
     float health = 1.05f;
     float sword = 17.0f;
     float armor = 14.0f;
+    float shield = 13.0f;
     float tool = 8.0f;
     float fireball = 8.0f;
     float dash = 7.0f;
@@ -1135,6 +1233,7 @@ constexpr BotCombatPowerWeights kPathCombatPowerWeights {
     1.1f,
     18.0f,
     14.0f,
+    13.0f,
     8.0f,
     7.0f,
     6.0f,
@@ -1142,12 +1241,20 @@ constexpr BotCombatPowerWeights kPathCombatPowerWeights {
     9.0f
 };
 
+BotCombatPowerWeights ApplyCombatTuning(BotCombatPowerWeights weights, const BotTuningGenome& tuning)
+{
+    weights.shield = tuning.shieldPower;
+    weights.speedBoost = tuning.speedBoostPower;
+    return weights;
+}
+
 float BotCombatPowerScore(const Player& player, const BotCombatPowerWeights& weights)
 {
     const Inventory& inventory = player.GetInventory();
     float score = static_cast<float>(player.GetHealth()) * weights.health;
     score += static_cast<float>(inventory.GetSwordLevel()) * weights.sword;
     score += static_cast<float>(inventory.GetArmorLevel()) * weights.armor;
+    score += player.HasShield() ? weights.shield : 0.0f;
     score += static_cast<float>(inventory.GetToolLevel()) * weights.tool;
     score += static_cast<float>(inventory.GetUtility(UtilityType::Fireball)) * weights.fireball;
     score += static_cast<float>(inventory.GetUtility(UtilityType::Dash)) * weights.dash;
@@ -1156,9 +1263,135 @@ float BotCombatPowerScore(const Player& player, const BotCombatPowerWeights& wei
     return score;
 }
 
-float BotCombatPowerScore(const Player& player)
+float BotCombatPowerScore(const Player& player, const BotTuningGenome& tuning)
 {
-    return BotCombatPowerScore(player, kDecisionCombatPowerWeights);
+    return BotCombatPowerScore(player, ApplyCombatTuning(kDecisionCombatPowerWeights, tuning));
+}
+
+struct FightAssessment
+{
+    float selfPower = 0.0f;
+    float targetPower = 0.0f;
+    float allyPower = 0.0f;
+    float enemyPower = 0.0f;
+    float powerMargin = 0.0f;
+    float distance = 999.0f;
+    int nearbyAllies = 0;
+    int nearbyEnemies = 0;
+    bool canWin = false;
+    bool shouldFight = false;
+    bool shouldRetreat = false;
+};
+
+FightAssessment AssessFight(
+    const Player& bot,
+    const Player& target,
+    const std::vector<Player*>* aliveAllies,
+    const std::vector<Player*>* aliveEnemies,
+    BotRole role,
+    BotDifficulty difficulty,
+    const BotTuningGenome& tuning,
+    bool defendingCore,
+    bool finalLifeTarget,
+    bool objectiveBlocker)
+{
+    FightAssessment result {};
+    result.selfPower = BotCombatPowerScore(bot, tuning);
+    result.targetPower = BotCombatPowerScore(target, tuning);
+    result.distance = std::sqrt(DistanceSquared(bot.GetPosition(), target.GetPosition()));
+
+    constexpr float allyAssistRangeSq = 9.5f * 9.5f;
+    constexpr float enemyAssistRangeSq = 8.5f * 8.5f;
+    if (aliveAllies != nullptr)
+    {
+        for (const Player* ally : *aliveAllies)
+        {
+            if (ally == nullptr
+                || ally->GetId() == bot.GetId()
+                || ally->GetTeamId() != bot.GetTeamId()
+                || !ally->IsAlive()
+                || ally->IsEliminated())
+            {
+                continue;
+            }
+
+            const bool closeToFight = DistanceSquared(ally->GetPosition(), target.GetPosition()) < allyAssistRangeSq
+                || DistanceSquared(ally->GetPosition(), bot.GetPosition()) < allyAssistRangeSq;
+            if (!closeToFight)
+            {
+                continue;
+            }
+
+            ++result.nearbyAllies;
+            result.allyPower += BotCombatPowerScore(*ally, tuning) * tuning.allyAssistWeight;
+        }
+    }
+    if (aliveEnemies != nullptr)
+    {
+        for (const Player* enemy : *aliveEnemies)
+        {
+            if (enemy == nullptr
+                || enemy->GetId() == target.GetId()
+                || enemy->GetTeamId() == bot.GetTeamId()
+                || !enemy->IsAlive()
+                || enemy->IsEliminated())
+            {
+                continue;
+            }
+
+            const bool closeToFight = DistanceSquared(enemy->GetPosition(), target.GetPosition()) < enemyAssistRangeSq
+                || DistanceSquared(enemy->GetPosition(), bot.GetPosition()) < enemyAssistRangeSq;
+            if (!closeToFight)
+            {
+                continue;
+            }
+
+            ++result.nearbyEnemies;
+            result.enemyPower += BotCombatPowerScore(*enemy, tuning) * tuning.enemyAssistWeight;
+        }
+    }
+
+    result.powerMargin = result.selfPower + result.allyPower - result.targetPower - result.enemyPower;
+
+    float requiredMargin = FightRequiredMarginForDifficulty(tuning, difficulty);
+    if (role == BotRole::Fighter)
+    {
+        requiredMargin -= 12.0f;
+    }
+    else if (role == BotRole::Collector)
+    {
+        requiredMargin += 14.0f;
+    }
+    else if (role == BotRole::Defender && defendingCore)
+    {
+        requiredMargin -= 18.0f;
+    }
+    if (finalLifeTarget)
+    {
+        requiredMargin -= 22.0f;
+    }
+    if (objectiveBlocker)
+    {
+        requiredMargin -= 10.0f;
+    }
+    if (bot.GetHealth() < 48)
+    {
+        requiredMargin += 18.0f;
+    }
+
+    const bool targetWeak = target.GetHealth() <= bot.GetHealth() - (difficulty == BotDifficulty::Easy ? 34 : 18);
+    result.canWin = result.powerMargin >= requiredMargin;
+    result.shouldFight = defendingCore
+        || finalLifeTarget
+        || objectiveBlocker
+        || targetWeak
+        || result.canWin;
+    result.shouldRetreat = !defendingCore
+        && !finalLifeTarget
+        && bot.GetHealth() < (role == BotRole::Collector ? 72 : 58)
+        && result.powerMargin < RetreatPowerMarginForDifficulty(tuning, difficulty);
+
+    return result;
 }
 
 struct BotMacroDirective
@@ -1176,6 +1409,7 @@ struct BotDecisionContext
     const Team& team;
     const Inventory& inventory;
     const BotMemory& memory;
+    const BotTuningGenome& tuning;
     BotDifficulty difficulty = BotDifficulty::Normal;
     float matchTime = 0.0f;
     Player* nearbyEnemy = nullptr;
@@ -1190,6 +1424,7 @@ struct BotDecisionContext
     float enemyAtCoreDistance = std::numeric_limits<float>::max();
     float distanceFromHome = 0.0f;
     float nearbyEnemyDistance = 999.0f;
+    FightAssessment nearbyFight {};
     int retreatHealth = 0;
     int fightHealth = 0;
     int desiredBlocks = 0;
@@ -1201,14 +1436,153 @@ struct BotDecisionContext
     bool canBreakDefense = false;
     bool readyToRush = false;
     bool coreNeedsRepair = false;
+    bool coreDefenseCritical = false;
     bool coreCanUpgrade = false;
+    BotStrategicPlan strategicPlan {};
     bool finalDuelPhase = false;
     bool huntEnemyOnFinalLife = false;
     bool finalLifeTargetClose = false;
     bool shouldFightNearby = false;
     bool shouldPressureCore = false;
     bool hasResourceTarget = false;
+    int coordinatedAttackersOnTarget = 0;
+    int coordinatedDefenders = 0;
+    int coordinatedHelpCalls = 0;
+    int missingDefenseBlocks = 0;
 };
+
+float StrategicPlanUpdateCadence(BotDifficulty difficulty, const BotTuningGenome& tuning)
+{
+    switch (difficulty)
+    {
+    case BotDifficulty::Easy:
+        return tuning.easyPlanCadence;
+    case BotDifficulty::Hard:
+        return tuning.hardPlanCadence;
+    case BotDifficulty::Normal:
+        break;
+    }
+    return tuning.normalPlanCadence;
+}
+
+bool StrategicPlanExpired(const StrategicPlan& plan)
+{
+    return plan.plannedDuration > 0.0f && plan.elapsedTime >= plan.plannedDuration;
+}
+
+bool ShouldInterruptStrategicPlan(const StrategicPlan& plan, const BotDecisionContext& ctx)
+{
+    if (plan.goal == StrategicGoal::Idle || StrategicPlanExpired(plan))
+    {
+        return true;
+    }
+
+    const bool emergencyDefense = ctx.team.coreAlive
+        && (ctx.enemyAtCore != nullptr || (ctx.coreDefenseCritical && ctx.matchTime > 55.0f));
+    if (emergencyDefense && plan.goal != StrategicGoal::BaseDefense)
+    {
+        return true;
+    }
+    if (ctx.huntEnemyOnFinalLife && ctx.huntEnemy != nullptr && ctx.matchTime > 135.0f && plan.goal != StrategicGoal::HuntPlayers)
+    {
+        return true;
+    }
+
+    if ((plan.goal == StrategicGoal::BridgePush || plan.goal == StrategicGoal::CoreAssault)
+        && (ctx.enemyCore == nullptr
+            || !ctx.enemyCore->IsAlive()
+            || (plan.targetTeamId >= 0 && ctx.enemyCore->GetTeamId() != plan.targetTeamId)))
+    {
+        return true;
+    }
+    if (plan.committed)
+    {
+        return false;
+    }
+    if (plan.goal == StrategicGoal::EconomicPhase && ctx.readyToRush && ctx.strategicPlan.focus == BotStrategicFocus::Pressure)
+    {
+        return true;
+    }
+
+    return false;
+}
+
+StrategicPlan EvaluateStrategicPlan(const BotDecisionContext& ctx)
+{
+    StrategicPlan plan {};
+    const bool emergencyDefense = ctx.team.coreAlive && (ctx.enemyAtCore != nullptr || ctx.coreDefenseCritical);
+    if (emergencyDefense)
+    {
+        plan.goal = StrategicGoal::BaseDefense;
+        plan.plannedDuration = ctx.coreDefenseCritical ? 16.0f : 11.0f;
+        plan.committed = true;
+        plan.reason = ctx.enemyAtCore != nullptr ? "core under attack" : "core defense critical";
+        return plan;
+    }
+
+    if (ctx.huntEnemyOnFinalLife && ctx.huntEnemy != nullptr && ctx.matchTime > 135.0f)
+    {
+        plan.goal = StrategicGoal::HuntPlayers;
+        plan.plannedDuration = 24.0f;
+        plan.targetTeamId = ctx.huntEnemy->GetTeamId();
+        plan.committed = ctx.matchTime > 155.0f || ctx.finalLifeTargetClose;
+        plan.reason = "enemy final life";
+        return plan;
+    }
+
+    const bool earlyEconomy = ctx.matchTime < ctx.tuning.earlyEconomySeconds
+        && !ctx.carryingLoot
+        && !ctx.readyToRush
+        && ctx.hasResourceTarget;
+    if (earlyEconomy)
+    {
+        plan.goal = StrategicGoal::EconomicPhase;
+        plan.plannedDuration = 12.0f;
+        plan.reason = "early economy";
+        return plan;
+    }
+
+    if (ctx.strategicPlan.focus == BotStrategicFocus::Defense
+        || (ctx.coreDefenseCritical && ctx.matchTime > 55.0f))
+    {
+        plan.goal = StrategicGoal::BaseDefense;
+        plan.plannedDuration = 12.0f;
+        plan.reason = ctx.coreDefenseCritical ? "repair base" : "hold defense";
+        return plan;
+    }
+
+    if (ctx.enemyCore != nullptr && ctx.enemyCore->IsAlive() && (ctx.readyToRush || ctx.strategicPlan.allIn))
+    {
+        const GridPos enemyCoreBlock = ctx.enemyCore->GetBlockPosition();
+        const Vector3 enemyCoreTarget {
+            static_cast<float>(enemyCoreBlock.x),
+            1.5f,
+            static_cast<float>(enemyCoreBlock.z)
+        };
+        const bool assaultNow = ctx.canBreakDefense
+            || ctx.strategicPlan.allIn
+            || DistanceSquared(ctx.botPos, enemyCoreTarget) < 90.0f;
+        plan.goal = assaultNow ? StrategicGoal::CoreAssault : StrategicGoal::BridgePush;
+        plan.plannedDuration = assaultNow ? 18.0f : 24.0f;
+        plan.targetTeamId = ctx.enemyCore->GetTeamId();
+        plan.committed = ctx.strategicPlan.allIn || ctx.matchTime > 150.0f;
+        plan.reason = assaultNow ? "assault core" : "bridge and pressure";
+        return plan;
+    }
+
+    if (ctx.hasResourceTarget && ctx.resourceTargetType == ResourceType::Crystal && ctx.matchTime > 32.0f)
+    {
+        plan.goal = StrategicGoal::MidControl;
+        plan.plannedDuration = 14.0f;
+        plan.reason = "mid control";
+        return plan;
+    }
+
+    plan.goal = StrategicGoal::EconomicPhase;
+    plan.plannedDuration = ctx.carryingLoot ? 6.0f : 10.0f;
+    plan.reason = ctx.carryingLoot ? "bank resources" : "default economy";
+    return plan;
+}
 
 BotMacroDirective EvaluateAutonomousMacroDirective(const BotDecisionContext& ctx)
 {
@@ -1230,6 +1604,8 @@ BotMacroDirective EvaluateAutonomousMacroDirective(const BotDecisionContext& ctx
         && ctx.memory.intentTimer > 8.5f
         && ctx.enemyAtCore == nullptr
         && ctx.nearbyEnemy == nullptr;
+    const bool teamWantsPressure = ctx.strategicPlan.focus == BotStrategicFocus::Pressure;
+    const bool attackSlotOpen = ctx.coordinatedAttackersOnTarget < std::max(1, ctx.strategicPlan.desiredAttackers);
 
     if (ctx.enemyAtCore != nullptr)
     {
@@ -1258,9 +1634,7 @@ BotMacroDirective EvaluateAutonomousMacroDirective(const BotDecisionContext& ctx
 
     if (ctx.nearbyEnemy != nullptr && !isDefender)
     {
-        const float selfPower = BotCombatPowerScore(ctx.bot);
-        const float enemyPower = BotCombatPowerScore(*ctx.nearbyEnemy);
-        const bool canWinFight = selfPower + 8.0f >= enemyPower;
+        const bool canWinFight = ctx.nearbyFight.canWin || ctx.nearbyFight.powerMargin >= -4.0f;
         if (canWinFight && (isAssaultRole || ctx.matchTime > 55.0f))
         {
             directive.active = true;
@@ -1272,7 +1646,11 @@ BotMacroDirective EvaluateAutonomousMacroDirective(const BotDecisionContext& ctx
         }
     }
 
-    if (isDefender && ctx.team.coreAlive && ctx.coreNeedsRepair)
+    const bool routineRepairWindow = (isDefender && ctx.inventory.GetBlocks() > 0)
+        || (ctx.coreDefenseCritical && ctx.matchTime > 55.0f)
+        || (ctx.missingDefenseBlocks >= 7 && ctx.matchTime > 80.0f);
+
+    if (isDefender && ctx.team.coreAlive && ctx.coreNeedsRepair && routineRepairWindow)
     {
         directive.active = true;
         if (ctx.inventory.GetBlocks() > 0)
@@ -1296,8 +1674,63 @@ BotMacroDirective EvaluateAutonomousMacroDirective(const BotDecisionContext& ctx
         return directive;
     }
 
-    const bool openingPhase = ctx.matchTime < 42.0f;
-    const bool midPhase = ctx.matchTime >= 42.0f && ctx.matchTime < 120.0f;
+    if (ctx.memory.currentPlan.goal == StrategicGoal::BaseDefense
+        && ctx.team.coreAlive
+        && ctx.coreNeedsRepair
+        && routineRepairWindow
+        && (isDefender || ctx.coordinatedDefenders < std::max(1, ctx.strategicPlan.desiredDefenders)))
+    {
+        directive.active = true;
+        if (ctx.inventory.GetBlocks() > 0)
+        {
+            directive.intent = BotIntent::RepairCoreDefense;
+            directive.target = homeTarget;
+            directive.reason = "plan repair base";
+        }
+        else if (ctx.hasResourceTarget)
+        {
+            directive.intent = BotIntent::SecureResources;
+            directive.target = ctx.resourceTarget;
+            directive.reason = "plan gather blocks";
+        }
+        else
+        {
+            directive.intent = BotIntent::GearUp;
+            directive.target = shopTarget;
+            directive.reason = "plan buy blocks";
+        }
+        return directive;
+    }
+
+    if ((ctx.memory.currentPlan.goal == StrategicGoal::BridgePush || ctx.memory.currentPlan.goal == StrategicGoal::CoreAssault)
+        && ctx.enemyCore != nullptr
+        && ctx.enemyCore->IsAlive()
+        && ctx.memory.currentPlan.targetTeamId == ctx.enemyCore->GetTeamId()
+        && (attackSlotOpen || ctx.strategicPlan.allIn)
+        && (ctx.readyToRush || ctx.memory.currentPlan.goal == StrategicGoal::BridgePush || ctx.matchTime > 90.0f))
+    {
+        directive.active = true;
+        directive.intent = ctx.canBreakDefense ? BotIntent::BreakCoreDefense : BotIntent::PressureCore;
+        directive.target = enemyCoreTarget;
+        directive.reason = ctx.memory.currentPlan.goal == StrategicGoal::CoreAssault ? "plan core assault" : "plan bridge push";
+        return directive;
+    }
+
+    if ((ctx.memory.currentPlan.goal == StrategicGoal::EconomicPhase || ctx.memory.currentPlan.goal == StrategicGoal::MidControl)
+        && ctx.hasResourceTarget
+        && !ctx.carryingLoot
+        && (!ctx.wantsShop || !hasBuyMoney)
+        && ctx.enemyAtCore == nullptr)
+    {
+        directive.active = true;
+        directive.intent = BotIntent::SecureResources;
+        directive.target = ctx.resourceTarget;
+        directive.reason = ctx.memory.currentPlan.goal == StrategicGoal::MidControl ? "plan mid control" : "plan economy";
+        return directive;
+    }
+
+    const bool openingPhase = ctx.matchTime < ctx.tuning.pressurePhaseSeconds;
+    const bool midPhase = ctx.matchTime >= ctx.tuning.pressurePhaseSeconds && ctx.matchTime < ctx.tuning.latePressureSeconds;
 
     if (openingPhase)
     {
@@ -1323,7 +1756,8 @@ BotMacroDirective EvaluateAutonomousMacroDirective(const BotDecisionContext& ctx
     {
         if (isAssaultRole
             && ctx.enemyCore != nullptr
-            && (ctx.readyToRush || ctx.teamPlan.activePressure <= 1 || idleNearBase))
+            && (attackSlotOpen || ctx.strategicPlan.allIn)
+            && (ctx.readyToRush || teamWantsPressure || ctx.teamPlan.activePressure <= 1 || idleNearBase))
         {
             directive.active = true;
             directive.intent = ctx.canBreakDefense ? BotIntent::BreakCoreDefense : BotIntent::PressureCore;
@@ -1349,7 +1783,7 @@ BotMacroDirective EvaluateAutonomousMacroDirective(const BotDecisionContext& ctx
         }
     }
 
-    if (ctx.matchTime >= 120.0f)
+    if (ctx.matchTime >= ctx.tuning.latePressureSeconds)
     {
         if (ctx.huntEnemyOnFinalLife && ctx.huntEnemy != nullptr && (ctx.finalLifeTargetClose || ctx.matchTime > 210.0f))
         {
@@ -1362,7 +1796,8 @@ BotMacroDirective EvaluateAutonomousMacroDirective(const BotDecisionContext& ctx
         }
         if (ctx.enemyCore != nullptr && ctx.enemyCore->IsAlive())
         {
-            if (ctx.canBreakDefense || isAssaultRole || ctx.readyToRush || idleNearBase)
+            if ((ctx.canBreakDefense || isAssaultRole || ctx.readyToRush || teamWantsPressure || idleNearBase)
+                && (attackSlotOpen || ctx.strategicPlan.allIn))
             {
                 directive.active = true;
                 directive.intent = ctx.canBreakDefense ? BotIntent::BreakCoreDefense : BotIntent::PressureCore;
@@ -1431,7 +1866,7 @@ void ConsiderBotDecision(
     Player* fightTarget,
     const char* reason)
 {
-    score += RoleIntentBias(ctx.memory.role, intent);
+    score += RoleIntentBias(ctx.memory.role, intent, ctx.tuning);
     if (ctx.memory.intent == intent)
     {
         score += 105.0f + std::min(45.0f, ctx.memory.intentTimer * 12.0f);
@@ -1513,11 +1948,15 @@ void ConsiderBaseDefenseIntent(BotDecision& decision, const BotDecisionContext& 
 
     const float defenderBonus = ctx.memory.role == BotRole::Defender ? 220.0f : 80.0f;
     const float lonelyBaseBonus = ctx.teamPlan.alliesNearCore == 0 ? 130.0f : 0.0f;
+    const float coordinationBonus = ctx.coordinatedHelpCalls > 0 ? 110.0f : (ctx.coordinatedDefenders == 0 ? 70.0f : 0.0f);
+    const float defenseCriticalBonus = ctx.coreDefenseCritical ? 120.0f : 0.0f;
+    const float personalPlanBonus = ctx.memory.currentPlan.goal == StrategicGoal::BaseDefense ? 115.0f : 0.0f;
+    const float strategicDefenseBonus = ctx.strategicPlan.defenseUrgency * ctx.tuning.strategicDefenseUrgencyScale;
     ConsiderBotDecision(
         decision,
         ctx,
         BotIntent::DefendCore,
-        1180.0f + defenderBonus + lonelyBaseBonus - std::sqrt(ctx.enemyAtCoreDistance) * 10.0f,
+        1180.0f + defenderBonus + lonelyBaseBonus + coordinationBonus + defenseCriticalBonus + personalPlanBonus + strategicDefenseBonus - std::sqrt(ctx.enemyAtCoreDistance) * 10.0f,
         ctx.enemyAtCore->GetPosition(),
         ctx.enemyAtCore,
         "enemy at core");
@@ -1550,8 +1989,21 @@ void ConsiderRepairIntent(BotDecision& decision, const BotDecisionContext& ctx, 
         return;
     }
 
+    const bool routineRepair = ctx.coreNeedsRepair && !ctx.coreDefenseCritical;
+    if (routineRepair && ctx.memory.role != BotRole::Defender)
+    {
+        return;
+    }
+    if (!derived.canRepairNow && !ctx.coreCanUpgrade)
+    {
+        return;
+    }
+
     const bool assignedBuilder = ctx.memory.role == BotRole::Defender
-        || (ctx.teamPlan.defendersNearCore == 0 && ctx.teamPlan.activeRepair == 0 && ctx.distanceFromHome < 120.0f);
+        || ctx.coreDefenseCritical
+        || ((ctx.teamPlan.defendersNearCore == 0 || ctx.coordinatedDefenders == 0)
+            && ctx.teamPlan.activeRepair == 0
+            && ctx.distanceFromHome < 120.0f);
     if (!assignedBuilder || !derived.canRepairSoon)
     {
         return;
@@ -1559,12 +2011,17 @@ void ConsiderRepairIntent(BotDecision& decision, const BotDecisionContext& ctx, 
 
     const float defenderBonus = ctx.memory.role == BotRole::Defender ? 280.0f : 0.0f;
     const float repairCrowdPenalty = static_cast<float>(ctx.teamPlan.activeRepair) * 115.0f;
+    const float defenseUrgency = (ctx.coreDefenseCritical ? 210.0f : 0.0f)
+        + static_cast<float>(ctx.missingDefenseBlocks) * 34.0f
+        + ctx.strategicPlan.defenseUrgency * ctx.tuning.repairUrgencyScale
+        + (ctx.memory.currentPlan.goal == StrategicGoal::BaseDefense ? 125.0f : 0.0f);
     ConsiderBotDecision(
         decision,
         ctx,
         BotIntent::RepairCoreDefense,
         500.0f
             + defenderBonus
+            + defenseUrgency
             + (ctx.coreCanUpgrade ? 90.0f : 0.0f)
             + (derived.canRepairNow ? 70.0f : -90.0f)
             - repairCrowdPenalty
@@ -1606,11 +2063,12 @@ void ConsiderCombatIntent(BotDecision& decision, const BotDecisionContext& ctx)
     {
         const float roleBonus = ctx.memory.role == BotRole::Fighter ? 150.0f : (ctx.memory.role == BotRole::Defender ? 85.0f : 0.0f);
         const float healthEdge = static_cast<float>(ctx.bot.GetHealth() - ctx.nearbyEnemy->GetHealth()) * 2.8f;
+        const float powerEdge = std::clamp(ctx.nearbyFight.powerMargin, -70.0f, 70.0f) * 1.15f;
         ConsiderBotDecision(
             decision,
             ctx,
             BotIntent::FightEnemy,
-            520.0f + roleBonus + healthEdge - ctx.nearbyEnemyDistance * 18.0f,
+            520.0f + roleBonus + healthEdge + powerEdge - ctx.nearbyEnemyDistance * 18.0f,
             ctx.nearbyEnemy->GetPosition(),
             ctx.nearbyEnemy,
             "take fight");
@@ -1641,13 +2099,27 @@ Vector3 CoreTargetPosition(const EnergyCore& core)
 
 void ConsiderCorePressureIntent(BotDecision& decision, const BotDecisionContext& ctx)
 {
+    const bool strategicTarget = ctx.enemyCore != nullptr
+        && ctx.strategicPlan.attackCoreTeamId == ctx.enemyCore->GetTeamId();
+    const bool personalPlanTarget = ctx.enemyCore != nullptr
+        && (ctx.memory.currentPlan.goal == StrategicGoal::BridgePush
+            || ctx.memory.currentPlan.goal == StrategicGoal::CoreAssault)
+        && ctx.memory.currentPlan.targetTeamId == ctx.enemyCore->GetTeamId();
+    const bool attackSlotOpen = ctx.coordinatedAttackersOnTarget < std::max(1, ctx.strategicPlan.desiredAttackers);
+    const float strategicAttackBonus = strategicTarget ? ctx.strategicPlan.attackUrgency * ctx.tuning.strategicAttackUrgencyScale : 0.0f;
+    const float personalPlanAttackBonus = personalPlanTarget
+        ? (ctx.memory.currentPlan.goal == StrategicGoal::CoreAssault ? 155.0f : 105.0f)
+        : 0.0f;
+    const float attackSlotBonus = attackSlotOpen || ctx.strategicPlan.allIn ? ctx.tuning.attackSlotBonus : ctx.tuning.attackSlotPenalty;
+
     if (ctx.canBreakDefense && ctx.enemyCore != nullptr)
     {
+        const float coordinationPenalty = static_cast<float>(ctx.coordinatedAttackersOnTarget) * ctx.tuning.breakCoordinationPenalty;
         ConsiderBotDecision(
             decision,
             ctx,
             BotIntent::BreakCoreDefense,
-            650.0f + (ctx.memory.role == BotRole::Rusher ? 120.0f : 0.0f),
+            650.0f + (ctx.memory.role == BotRole::Rusher ? 120.0f : 0.0f) + strategicAttackBonus + personalPlanAttackBonus + attackSlotBonus - coordinationPenalty,
             CoreTargetPosition(*ctx.enemyCore),
             nullptr,
             "crack defense");
@@ -1658,11 +2130,12 @@ void ConsiderCorePressureIntent(BotDecision& decision, const BotDecisionContext&
         const float teamPushBonus = ctx.teamPlan.activePressure > 0 ? 70.0f : 0.0f;
         const float baseCoveredBonus = ctx.teamPlan.alliesNearCore > 0 || !ctx.team.coreAlive ? 60.0f : -85.0f;
         const float timePressureBonus = std::max(0.0f, ctx.matchTime - 80.0f) * 1.6f;
+        const float coordinationPenalty = static_cast<float>(ctx.coordinatedAttackersOnTarget) * ctx.tuning.pressureCoordinationPenalty;
         ConsiderBotDecision(
             decision,
             ctx,
             BotIntent::PressureCore,
-            570.0f + teamPushBonus + baseCoveredBonus + timePressureBonus + (ctx.memory.role == BotRole::Rusher ? 150.0f : 60.0f),
+            570.0f + teamPushBonus + baseCoveredBonus + timePressureBonus + strategicAttackBonus + personalPlanAttackBonus + attackSlotBonus + (ctx.memory.role == BotRole::Rusher ? 150.0f : 60.0f) - coordinationPenalty,
             CoreTargetPosition(*ctx.enemyCore),
             nullptr,
             "rush core");
@@ -1685,11 +2158,20 @@ void ConsiderResourceIntent(BotDecision& decision, const BotDecisionContext& ctx
     const float resourceCrowdPenalty = static_cast<float>(ctx.teamPlan.activeResource) * (ctx.memory.role == BotRole::Collector ? 12.0f : 58.0f);
     const float blockShortageBoost = ctx.inventory.GetBlocks() < 6 ? 220.0f : 0.0f;
     const float idleExpeditionBoost = derived.idleNearBase ? 240.0f : 0.0f;
+    const float strategicEconomyBonus = ctx.strategicPlan.focus == BotStrategicFocus::Economy ? ctx.tuning.strategicEconomyBonus : 0.0f;
+    const float personalPlanEconomyBonus = ctx.memory.currentPlan.goal == StrategicGoal::EconomicPhase
+        || ctx.memory.currentPlan.goal == StrategicGoal::MidControl
+        ? ctx.tuning.personalEconomyBonus
+        : 0.0f;
+    const float strategicPressurePenalty = ctx.strategicPlan.focus == BotStrategicFocus::Pressure
+        && ctx.memory.role != BotRole::Collector
+        ? ctx.tuning.strategicPressureEconomyPenalty
+        : 0.0f;
     ConsiderBotDecision(
         decision,
         ctx,
         BotIntent::SecureResources,
-        390.0f + resourceBonus + collectorBonus + blockShortageBoost + idleExpeditionBoost - resourceCrowdPenalty,
+        390.0f + resourceBonus + collectorBonus + blockShortageBoost + idleExpeditionBoost + strategicEconomyBonus + personalPlanEconomyBonus - strategicPressurePenalty - resourceCrowdPenalty,
         ctx.resourceTarget,
         nullptr,
         ctx.resourceTargetType == ResourceType::Crystal ? "center crystals" : "secure resources");
@@ -1706,6 +2188,7 @@ void ConsiderFinalDuelIntent(BotDecision& decision, const BotDecisionContext& ct
 
     const float finalLifeBonus = ctx.huntEnemyOnFinalLife ? (ctx.finalLifeTargetClose && ctx.matchTime > 145.0f ? 420.0f : 120.0f) : 0.0f;
     const float cleanupUrgency = ctx.huntEnemyOnFinalLife ? std::max(0.0f, ctx.matchTime - 145.0f) * 5.0f : 0.0f;
+    const float personalHuntBonus = ctx.memory.currentPlan.goal == StrategicGoal::HuntPlayers ? 170.0f : 0.0f;
     const float distance = std::sqrt(DistanceSquared(ctx.bot.GetPosition(), ctx.huntEnemy->GetPosition()));
     ConsiderBotDecision(
         decision,
@@ -1714,6 +2197,7 @@ void ConsiderFinalDuelIntent(BotDecision& decision, const BotDecisionContext& ct
         520.0f
             + finalLifeBonus
             + cleanupUrgency
+            + personalHuntBonus
             + (ctx.team.coreAlive ? 0.0f : 120.0f)
             + static_cast<float>(ctx.bot.GetHealth() - ctx.huntEnemy->GetHealth()) * 1.8f
             - distance * 4.5f,
@@ -1733,12 +2217,16 @@ void ConsiderLateMapPressureIntent(BotDecision& decision, const BotDecisionConte
     }
 
     const float pressureCrowdPenalty = static_cast<float>(std::max(0, ctx.teamPlan.activePressure - 2)) * 46.0f;
+    const float coordinationCrowdPenalty = static_cast<float>(ctx.coordinatedAttackersOnTarget) * ctx.tuning.lateCoordinationPenalty;
     const float lateMatchBoost = std::max(0.0f, ctx.matchTime - 120.0f) * 2.2f;
+    const float strategicAttackBonus = ctx.strategicPlan.attackCoreTeamId == ctx.enemyCore->GetTeamId()
+        ? ctx.strategicPlan.attackUrgency * ctx.tuning.lateAttackUrgencyScale
+        : 0.0f;
     ConsiderBotDecision(
         decision,
         ctx,
         BotIntent::PressureCore,
-        360.0f + lateMatchBoost + (ctx.memory.role == BotRole::Rusher ? 170.0f : 0.0f) - pressureCrowdPenalty,
+        360.0f + lateMatchBoost + strategicAttackBonus + (ctx.memory.role == BotRole::Rusher ? 170.0f : 0.0f) - pressureCrowdPenalty - coordinationCrowdPenalty,
         CoreTargetPosition(*ctx.enemyCore),
         nullptr,
         "map pressure");
@@ -1782,13 +2270,17 @@ BotDecision EvaluateBotDecision(const BotDecisionContext& ctx)
     return decision;
 }
 
-void ApplyBotDecision(BotMemory& memory, const BotDecision& decision, BotDifficulty difficulty)
+void ApplyBotDecision(
+    BotMemory& memory,
+    const BotDecision& decision,
+    BotDifficulty difficulty,
+    const BotTuningGenome& tuning)
 {
     if (decision.intent != memory.intent)
     {
         memory.intent = decision.intent;
         memory.intentTimer = 0.0f;
-        memory.intentLockTimer = IntentLockSeconds(decision.intent, difficulty);
+        memory.intentLockTimer = IntentLockSeconds(decision.intent, difficulty, tuning);
         memory.hasNavWaypoint = false;
         if (decision.intent == BotIntent::Recover)
         {
@@ -2210,9 +2702,13 @@ struct Game::BotTeamFrameContext
     std::vector<Player*> aliveEnemies;
     BotTeamSnapshot teamPlan {};
     BotRoleDistribution roleDistribution {};
+    BotStrategicPlan strategicPlan {};
     Player* enemyAtCore = nullptr;
     float enemyAtCoreDistance = std::numeric_limits<float>::max();
     bool coreNeedsRepair = false;
+    bool coreDefenseCritical = false;
+    int missingDefenseBlocks = 0;
+    int weakDefenseBlocks = 0;
 };
 
 struct Game::BotFrameContext
@@ -2224,6 +2720,7 @@ struct Game::BotFrameContext
 bool Game::BotUseUtility(Player& bot, Team& team, Player* enemy, EnergyCore* enemyCore)
 {
     BotMemory& memory = GetBotMemory(bot);
+    const BotTuningGenome& botTuning = BotTuningForTeam(team.id);
     if (memory.utilityTimer > 0.0f || botDifficulty_ == BotDifficulty::Easy)
     {
         return false;
@@ -2245,7 +2742,7 @@ bool Game::BotUseUtility(Player& bot, Team& team, Player* enemy, EnergyCore* ene
     if (team.coreAlive
         && bot.GetInventory().GetUtility(UtilityType::HomeTeleport) > 0
         && memory.intent == BotIntent::RetreatHome
-        && (bot.GetHealth() < 42 || memory.carriedResourceValue >= BotLootReturnValue(memory.role, botDifficulty_) + 10)
+        && (bot.GetHealth() < 42 || memory.carriedResourceValue >= BotLootReturnValue(memory.role, botDifficulty_, botTuning) + 10)
         && DistanceSquared(bot.GetPosition(), team.spawnPoint) > 260.0f
         && SpendUtilityItem(bot, UtilityType::HomeTeleport))
     {
@@ -2391,6 +2888,15 @@ bool Game::BotUseUtility(Player& bot, Team& team, Player* enemy, EnergyCore* ene
 
 void Game::UpdateBots(float dt)
 {
+    for (TeamCoordinationBus& bus : teamCoordBuses_)
+    {
+        bus.Prune(matchTime_, kCoordinationSignalTtl);
+    }
+    for (CoreDefenseMonitor& monitor : coreDefenseMonitors_)
+    {
+        monitor.checkTimer = std::max(0.0f, monitor.checkTimer - dt);
+    }
+
     for (Player& bot : players_)
     {
         if (!bot.IsLocal() && bot.IsAlive() && !bot.IsEliminated())
@@ -2416,7 +2922,32 @@ void Game::UpdateBots(float dt)
         teamContext.teamId = team.id;
         teamContext.team = &team;
         teamContext.coreHome = world_.GridToWorld(team.coreBlock);
-        teamContext.coreNeedsRepair = team.coreAlive && FindMissingCoreDefenseBlock(team).has_value();
+        if (team.id >= 0 && team.id < static_cast<int>(coreDefenseMonitors_.size()))
+        {
+            CoreDefenseMonitor& defenseMonitor = coreDefenseMonitors_[team.id];
+            if (!team.coreAlive)
+            {
+                defenseMonitor = CoreDefenseMonitor {};
+            }
+            else if (defenseMonitor.checkTimer <= 0.0f)
+            {
+                const CoreDefenseStatus status = InspectCoreDefense(world_, team);
+                defenseMonitor.missingBlocks = status.missingBlocks;
+                defenseMonitor.weakBlocks = status.weakBlocks;
+                defenseMonitor.critical = status.critical;
+                defenseMonitor.checkTimer = botDifficulty_ == BotDifficulty::Hard
+                    ? 0.85f
+                    : (botDifficulty_ == BotDifficulty::Easy ? 1.75f : 1.20f);
+            }
+            teamContext.coreNeedsRepair = team.coreAlive && defenseMonitor.missingBlocks > 0;
+            teamContext.coreDefenseCritical = team.coreAlive && defenseMonitor.critical;
+            teamContext.missingDefenseBlocks = defenseMonitor.missingBlocks;
+            teamContext.weakDefenseBlocks = defenseMonitor.weakBlocks;
+        }
+        else
+        {
+            teamContext.coreNeedsRepair = team.coreAlive && FindMissingCoreDefenseBlock(team).has_value();
+        }
         teamContext.aliveAllies.reserve(frameContext.alivePlayers.size());
         teamContext.aliveEnemies.reserve(frameContext.alivePlayers.size());
 
@@ -2499,6 +3030,120 @@ void Game::UpdateBots(float dt)
         frameContext.teamContexts.emplace(team.id, std::move(teamContext));
     }
 
+    for (auto& entry : frameContext.teamContexts)
+    {
+        BotTeamFrameContext& teamContext = entry.second;
+        if (teamContext.team == nullptr)
+        {
+            continue;
+        }
+
+        BotStrategicPlan plan {};
+        const Team& team = *teamContext.team;
+        const BotTuningGenome& teamTuning = BotTuningForTeam(team.id);
+        plan.desiredDefenders = teamContext.coreDefenseCritical ? 2 : 1;
+        if (team.coreAlive)
+        {
+            if (teamContext.enemyAtCore != nullptr)
+            {
+                plan.defenseUrgency += 520.0f;
+                plan.desiredDefenders = 2;
+            }
+            const bool defenseCriticalNow = teamContext.coreDefenseCritical && matchTime_ > 55.0f;
+            if (defenseCriticalNow)
+            {
+                plan.defenseUrgency += 360.0f;
+            }
+            if (matchTime_ > 40.0f || teamContext.enemyAtCore != nullptr)
+            {
+                plan.defenseUrgency += static_cast<float>(teamContext.missingDefenseBlocks) * 24.0f;
+            }
+            if (teamContext.teamPlan.defendersNearCore == 0 && (teamContext.coreNeedsRepair || teamContext.enemyAtCore != nullptr))
+            {
+                plan.defenseUrgency += matchTime_ > 55.0f || teamContext.enemyAtCore != nullptr ? 140.0f : 0.0f;
+            }
+        }
+
+        EnergyCore* bestCore = nullptr;
+        float bestCoreScore = std::numeric_limits<float>::max();
+        int aliveEnemyCores = 0;
+        const TeamCoordinationBus* coordBus = team.id >= 0 && team.id < static_cast<int>(teamCoordBuses_.size())
+            ? &teamCoordBuses_[team.id]
+            : nullptr;
+        for (EnergyCore& core : cores_)
+        {
+            if (core.GetTeamId() == team.id || !core.IsAlive())
+            {
+                continue;
+            }
+
+            ++aliveEnemyCores;
+            const Vector3 corePos = world_.GridToWorld(core.GetBlockPosition());
+            const float distanceFromBase = DistanceSquared(teamContext.coreHome, corePos);
+            const float weaknessBonus = static_cast<float>(core.GetMaxHealth() - core.GetHealth()) * 2.4f;
+            float defenderPenalty = 0.0f;
+            const auto foundTargetContext = frameContext.teamContexts.find(core.GetTeamId());
+            if (foundTargetContext != frameContext.teamContexts.end())
+            {
+                const BotTeamFrameContext& targetContext = foundTargetContext->second;
+                defenderPenalty += static_cast<float>(targetContext.teamPlan.defendersNearCore) * 95.0f;
+                defenderPenalty += targetContext.coreDefenseCritical ? 120.0f : 0.0f;
+            }
+
+            const int coordinatedAttackers = coordBus != nullptr
+                ? coordBus->CountSignal(
+                    CoordinationSignal::AttackingCore,
+                    matchTime_,
+                    kCoordinationSignalTtl,
+                    core.GetTeamId())
+                : 0;
+            const float score = distanceFromBase * 0.38f
+                - weaknessBonus
+                + defenderPenalty
+                + static_cast<float>(coordinatedAttackers) * 88.0f;
+            if (score < bestCoreScore)
+            {
+                bestCoreScore = score;
+                bestCore = &core;
+            }
+        }
+
+        if (bestCore != nullptr)
+        {
+            plan.attackCoreTeamId = bestCore->GetTeamId();
+            plan.allIn = !team.coreAlive || matchTime_ > teamTuning.allInSeconds || aliveEnemyCores <= 1;
+            plan.desiredAttackers = plan.allIn
+                ? 4
+                : (matchTime_ > teamTuning.latePressureSeconds ? 3 : (matchTime_ > teamTuning.pressurePhaseSeconds ? 2 : 1));
+            plan.attackUrgency = 220.0f
+                + std::max(0.0f, matchTime_ - 70.0f) * 1.8f
+                + static_cast<float>(bestCore->GetMaxHealth() - bestCore->GetHealth()) * 2.0f
+                + (plan.allIn ? 220.0f : 0.0f);
+        }
+
+        if (!team.coreAlive && bestCore == nullptr)
+        {
+            plan.focus = BotStrategicFocus::Cleanup;
+            plan.desiredAttackers = 4;
+            plan.attackUrgency = 520.0f;
+            plan.allIn = true;
+        }
+        else if (teamContext.enemyAtCore != nullptr || plan.defenseUrgency >= 420.0f)
+        {
+            plan.focus = BotStrategicFocus::Defense;
+        }
+        else if (bestCore != nullptr && (matchTime_ > teamTuning.pressurePhaseSeconds || plan.allIn || teamContext.teamPlan.activeResource >= 2))
+        {
+            plan.focus = BotStrategicFocus::Pressure;
+        }
+        else
+        {
+            plan.focus = BotStrategicFocus::Economy;
+        }
+
+        teamContext.strategicPlan = plan;
+    }
+
     for (Player& bot : players_)
     {
         if (bot.IsLocal() || !bot.IsAlive() || bot.IsEliminated())
@@ -2521,6 +3166,7 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
     BotMemory& memory = GetBotMemory(bot);
     TickBotMemory(memory, dt);
     memory.carriedResourceValue = CarriedResourceValue(bot.GetInventory());
+    const BotTuningGenome& botTuning = BotTuningForTeam(team.id);
 
     const auto foundTeamContext = frameContext.teamContexts.find(team.id);
     const BotTeamFrameContext* teamContext = foundTeamContext != frameContext.teamContexts.end()
@@ -2529,7 +3175,34 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
     const std::vector<Player*>& aliveEnemies = teamContext != nullptr
         ? teamContext->aliveEnemies
         : frameContext.alivePlayers;
-    EnergyCore* enemyCore = FindNearestEnemyCore(bot);
+    const int coordinationBusIndex = team.id >= 0 && team.id < static_cast<int>(teamCoordBuses_.size())
+        ? team.id
+        : -1;
+    TeamCoordinationBus* coordBus = coordinationBusIndex >= 0 ? &teamCoordBuses_[coordinationBusIndex] : nullptr;
+    EnergyCore* enemyCore = SelectBestAttackTarget(bot, frameContext, coordBus);
+    const BotStrategicPlan strategicPlan = teamContext != nullptr ? teamContext->strategicPlan : BotStrategicPlan {};
+    if (strategicPlan.attackCoreTeamId >= 0)
+    {
+        EnergyCore* plannedCore = FindCoreByTeam(strategicPlan.attackCoreTeamId);
+        if (plannedCore != nullptr
+            && plannedCore->IsAlive()
+            && (enemyCore == nullptr
+                || strategicPlan.focus == BotStrategicFocus::Pressure
+                || strategicPlan.allIn))
+        {
+            enemyCore = plannedCore;
+        }
+    }
+    if ((memory.currentPlan.goal == StrategicGoal::BridgePush || memory.currentPlan.goal == StrategicGoal::CoreAssault)
+        && memory.currentPlan.targetTeamId >= 0
+        && !StrategicPlanExpired(memory.currentPlan))
+    {
+        EnergyCore* plannedCore = FindCoreByTeam(memory.currentPlan.targetTeamId);
+        if (plannedCore != nullptr && plannedCore->IsAlive())
+        {
+            enemyCore = plannedCore;
+        }
+    }
     const Vector3 coreHome = teamContext != nullptr ? teamContext->coreHome : world_.GridToWorld(team.coreBlock);
     const Vector3 botPos = bot.GetPosition();
     const float distanceFromHome = DistanceSquared(bot.GetPosition(), coreHome);
@@ -2553,11 +3226,33 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
     float enemyAtCoreDistance = teamContext != nullptr ? teamContext->enemyAtCoreDistance : std::numeric_limits<float>::max();
     Player* enemyAtCore = teamContext != nullptr ? teamContext->enemyAtCore : FindEnemyNearCore(bot, players_, coreHome, enemyAtCoreDistance);
     const Inventory& inventory = bot.GetInventory();
-    const bool carryingLoot = memory.carriedResourceValue >= BotLootReturnValue(memory.role, botDifficulty_);
-    const bool wantsShop = ShouldBotShop(bot, inventory, team, memory, botDifficulty_);
-    const bool coreNeedsRepair = teamContext != nullptr
-        ? teamContext->coreNeedsRepair
-        : (team.coreAlive && FindMissingCoreDefenseBlock(team).has_value());
+    const bool carryingLoot = memory.carriedResourceValue >= BotLootReturnValue(memory.role, botDifficulty_, botTuning);
+    const bool wantsShop = ShouldBotShop(bot, inventory, team, memory, botDifficulty_, botTuning);
+    if (teamContext != nullptr)
+    {
+        memory.coreDefenseCritical = teamContext->coreDefenseCritical;
+        memory.missingDefenseBlocks = teamContext->missingDefenseBlocks;
+    }
+    else if (!team.coreAlive)
+    {
+        memory.coreDefenseCritical = false;
+        memory.missingDefenseBlocks = 0;
+        memory.defenseCheckTimer = 0.0f;
+    }
+    else if (memory.defenseCheckTimer <= 0.0f)
+    {
+        const CoreDefenseStatus status = InspectCoreDefense(world_, team);
+        memory.coreDefenseCritical = status.critical;
+        memory.missingDefenseBlocks = status.missingBlocks;
+        memory.defenseCheckTimer = botDifficulty_ == BotDifficulty::Hard
+            ? 0.85f
+            : (botDifficulty_ == BotDifficulty::Easy ? 1.75f : 1.20f);
+    }
+    const bool coreDefenseCritical = team.coreAlive && memory.coreDefenseCritical;
+    const int missingDefenseBlocks = team.coreAlive ? memory.missingDefenseBlocks : 0;
+    const bool coreNeedsRepair = team.coreAlive
+        && ((teamContext != nullptr ? teamContext->coreNeedsRepair : missingDefenseBlocks > 0)
+            || coreDefenseCritical);
     BotRoleDistribution roleDistribution = teamContext != nullptr
         ? teamContext->roleDistribution
         : BuildRoleDistributionForTeam(team.id, players_, botMemories_, botMemoryIndexByPlayerId_, bot.GetId());
@@ -2570,14 +3265,13 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
         team,
         memory,
         roleDistribution,
-        coreNeedsRepair,
         carryingLoot,
         wantsShop,
         enemyAtCore,
         enemyCore,
         matchTime_,
         inventory);
-    if (TryApplyDynamicRoleDecision(memory, roleDecision, botDifficulty_))
+    if (TryApplyDynamicRoleDecision(memory, roleDecision, botDifficulty_, botTuning))
     {
         AddEventMessage(bot.GetName() + " role -> " + ToString(memory.role), GetTeamColor(team.color), 1.2f);
     }
@@ -2634,7 +3328,7 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
         return best;
     };
 
-    Player* nearbyEnemy = findNearbyEnemyFromSnapshot(BotEngageRange(memory.role, botDifficulty_));
+    Player* nearbyEnemy = findNearbyEnemyFromSnapshot(BotEngageRange(memory.role, botDifficulty_, botTuning));
     const float huntRange = matchTime_ > 120.0f
         ? (botDifficulty_ == BotDifficulty::Hard ? 168.0f : 142.0f)
         : (botDifficulty_ == BotDifficulty::Hard ? 128.0f : 108.0f);
@@ -2677,13 +3371,13 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
     {
         huntEnemy = finalLifeEnemy;
         const float finalDistance = std::sqrt(DistanceSquared(bot.GetPosition(), finalLifeEnemy->GetPosition()));
-        if (nearbyEnemy == nullptr || finalDistance < BotEngageRange(memory.role, botDifficulty_) * 1.8f)
+        if (nearbyEnemy == nullptr || finalDistance < BotEngageRange(memory.role, botDifficulty_, botTuning) * 1.8f)
         {
             nearbyEnemy = finalLifeEnemy;
         }
     }
-    const int retreatHealth = BotRetreatHealth(memory.role, botDifficulty_, team.coreAlive);
-    const int fightHealth = BotFightHealth(memory.role, botDifficulty_);
+    const int retreatHealth = BotRetreatHealth(memory.role, botDifficulty_, team.coreAlive, botTuning);
+    const int fightHealth = BotFightHealth(memory.role, botDifficulty_, botTuning);
     const float rushTime = botDifficulty_ == BotDifficulty::Hard ? 38.0f : (botDifficulty_ == BotDifficulty::Easy ? 115.0f : 70.0f);
 
     Player* weakEnemy = nullptr;
@@ -2709,11 +3403,10 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
     {
         memory.retreatTimer = std::max(memory.retreatTimer, botDifficulty_ == BotDifficulty::Hard ? 1.25f : 2.1f);
     }
-    const bool retreating = memory.retreatTimer > 0.0f && team.coreAlive;
     const bool defenderAwayFromBase = memory.role == BotRole::Defender
         && team.coreAlive
         && distanceFromHome > 40.0f;
-    const int desiredBlocks = BotDesiredBlocks(memory.role);
+    const int desiredBlocks = BotDesiredBlocks(memory.role, botTuning);
     const ResourcePickup* bestPickup = ::FindBestPickupForBot(
         bot,
         memory.role,
@@ -2783,9 +3476,29 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
     const bool enemyBlockingObjective = nearbyEnemy != nullptr
         && enemyCore != nullptr
         && DistanceSquared(nearbyEnemy->GetPosition(), world_.GridToWorld(enemyCore->GetBlockPosition())) < 36.0f;
+    const FightAssessment nearbyFightAssessment = nearbyEnemy != nullptr
+        ? AssessFight(
+            bot,
+            *nearbyEnemy,
+            teamContext != nullptr ? &teamContext->aliveAllies : nullptr,
+            &aliveEnemies,
+            memory.role,
+            botDifficulty_,
+            botTuning,
+            defenderThreat,
+            huntEnemyOnFinalLife && nearbyEnemy == huntEnemy,
+            enemyBlockingObjective)
+        : FightAssessment {};
+    if (nearbyFightAssessment.shouldRetreat && team.coreAlive)
+    {
+        memory.retreatTimer = std::max(memory.retreatTimer, botDifficulty_ == BotDifficulty::Hard ? 0.95f : 1.55f);
+    }
+    const bool retreating = memory.retreatTimer > 0.0f && team.coreAlive;
     const bool shouldFightNearby = nearbyEnemy != nullptr
         && bot.GetHealth() > fightHealth
-        && (memory.role == BotRole::Fighter
+        && !nearbyFightAssessment.shouldRetreat
+        && (nearbyFightAssessment.shouldFight
+            || memory.role == BotRole::Fighter
             || defenderThreat
             || vulnerableEnemy
             || (huntEnemyOnFinalLife && nearbyEnemy == huntEnemy)
@@ -2799,6 +3512,20 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
         && (readyToRush || (matchTime_ > 95.0f && inventory.GetBlocks() >= 6))
         && !retreating
         && !cleanupOverEconomy;
+    const int coordinatedAttackersOnTarget = coordBus != nullptr && enemyCore != nullptr
+        ? coordBus->CountSignal(
+            CoordinationSignal::AttackingCore,
+            matchTime_,
+            kCoordinationSignalTtl,
+            enemyCore->GetTeamId(),
+            bot.GetId())
+        : 0;
+    const int coordinatedDefenders = coordBus != nullptr
+        ? coordBus->CountSignal(CoordinationSignal::DefendingCore, matchTime_, kCoordinationSignalTtl, -999, bot.GetId())
+        : 0;
+    const int coordinatedHelpCalls = coordBus != nullptr
+        ? coordBus->CountSignal(CoordinationSignal::CallingForHelp, matchTime_, kCoordinationSignalTtl, -999, bot.GetId())
+        : 0;
 
     const Vector3 shopTarget { team.shopPosition.x, 1.5f, team.shopPosition.z };
     const Vector3 spawnTarget { team.spawnPoint.x, 1.5f, team.spawnPoint.z };
@@ -2807,6 +3534,7 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
         team,
         inventory,
         memory,
+        botTuning,
         botDifficulty_,
         matchTime_,
         nearbyEnemy,
@@ -2821,6 +3549,7 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
         enemyAtCoreDistance,
         distanceFromHome,
         nearbyEnemyDistance,
+        nearbyFightAssessment,
         retreatHealth,
         fightHealth,
         desiredBlocks,
@@ -2832,14 +3561,26 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
         canBreakDefense,
         readyToRush,
         coreNeedsRepair,
+        coreDefenseCritical,
         coreCanUpgrade,
+        strategicPlan,
         finalDuelPhase,
         huntEnemyOnFinalLife,
         finalLifeTargetClose,
         shouldFightNearby,
         shouldPressureCore,
-        hasResourceTarget
+        hasResourceTarget,
+        coordinatedAttackersOnTarget,
+        coordinatedDefenders,
+        coordinatedHelpCalls,
+        missingDefenseBlocks
     };
+    if (memory.strategicUpdateTimer <= 0.0f || ShouldInterruptStrategicPlan(memory.currentPlan, decisionContext))
+    {
+        memory.currentPlan = EvaluateStrategicPlan(decisionContext);
+        memory.strategicUpdateTimer = StrategicPlanUpdateCadence(botDifficulty_, botTuning);
+    }
+
     BotDecision decision = EvaluateBotDecision(decisionContext);
     const BotMacroDirective macroDirective = EvaluateAutonomousMacroDirective(decisionContext);
     if (macroDirective.active)
@@ -2851,7 +3592,41 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
         decision.reason = macroDirective.reason;
         decision.score += 520.0f;
     }
-    ApplyBotDecision(memory, decision, botDifficulty_);
+    ApplyBotDecision(memory, decision, botDifficulty_, botTuning);
+    if (coordBus != nullptr)
+    {
+        CoordinationSignal signal = CoordinationSignal::None;
+        int coordinationTargetTeamId = -1;
+        switch (decision.intent)
+        {
+        case BotIntent::PressureCore:
+        case BotIntent::BreakCoreDefense:
+            signal = CoordinationSignal::AttackingCore;
+            coordinationTargetTeamId = enemyCore != nullptr ? enemyCore->GetTeamId() : -1;
+            break;
+        case BotIntent::DefendCore:
+        case BotIntent::RepairCoreDefense:
+            signal = enemyAtCore != nullptr || coreDefenseCritical
+                ? CoordinationSignal::CallingForHelp
+                : CoordinationSignal::DefendingCore;
+            coordinationTargetTeamId = team.id;
+            break;
+        case BotIntent::RetreatHome:
+            signal = CoordinationSignal::Retreating;
+            coordinationTargetTeamId = team.id;
+            break;
+        case BotIntent::SecureResources:
+            signal = resourceTargetType == ResourceType::Crystal ? CoordinationSignal::HoldingMid : CoordinationSignal::None;
+            break;
+        case BotIntent::GearUp:
+        case BotIntent::FightEnemy:
+        case BotIntent::ChaseWeakEnemy:
+        case BotIntent::Recover:
+            break;
+        }
+
+        coordBus->Broadcast(bot.GetId(), signal, decision.target, matchTime_, coordinationTargetTeamId);
+    }
 
     if (memory.intent == BotIntent::RepairCoreDefense && TryBotRepairCoreDefense(bot, team, dt))
     {
@@ -3043,6 +3818,7 @@ Vector3 Game::ChooseBotPathWaypoint(Player& bot, Vector3 finalTarget, float dt, 
     const BotTeamFrameContext* teamContext = foundTeamContext != frameContext.teamContexts.end()
         ? &foundTeamContext->second
         : nullptr;
+    const BotTuningGenome& botTuning = BotTuningForTeam(bot.GetTeamId());
     const Inventory& inventory = bot.GetInventory();
     const bool defendingCore = memory.role == BotRole::Defender
         && (memory.intent == BotIntent::DefendCore || memory.intent == BotIntent::RepairCoreDefense);
@@ -3051,7 +3827,7 @@ Vector3 Game::ChooseBotPathWaypoint(Player& bot, Vector3 finalTarget, float dt, 
         || memory.state == BotState::AttackCore
         || memory.state == BotState::BreakDefense;
     const bool retreating = memory.intent == BotIntent::RetreatHome;
-    const bool carryingLoot = memory.carriedResourceValue >= BotLootReturnValue(memory.role, botDifficulty_);
+    const bool carryingLoot = memory.carriedResourceValue >= BotLootReturnValue(memory.role, botDifficulty_, botTuning);
     const bool conservativeRoute = retreating || (memory.role == BotRole::Collector && carryingLoot);
     const float refreshCadence = defendingCore
         ? 0.14f
@@ -3111,10 +3887,25 @@ Vector3 Game::ChooseBotPathWaypoint(Player& bot, Vector3 finalTarget, float dt, 
         return best;
     };
 
-    const float botPower = BotCombatPowerScore(bot, kPathCombatPowerWeights);
     const Player* duelEnemy = findDuelEnemy(defendingCore ? 30.0f : 16.0f);
-    const float enemyPower = duelEnemy != nullptr ? BotCombatPowerScore(*duelEnemy, kPathCombatPowerWeights) : 0.0f;
-    const bool canTakeFight = defendingCore || duelEnemy == nullptr || botPower + 6.0f >= enemyPower;
+    const FightAssessment pathFightAssessment = duelEnemy != nullptr
+        ? AssessFight(
+            bot,
+            *duelEnemy,
+            teamContext != nullptr ? &teamContext->aliveAllies : nullptr,
+            teamContext != nullptr ? &teamContext->aliveEnemies : nullptr,
+            memory.role,
+            botDifficulty_,
+            botTuning,
+            defendingCore,
+            false,
+            pushingObjective)
+        : FightAssessment {};
+    const bool canTakeFight = defendingCore
+        || duelEnemy == nullptr
+        || pathFightAssessment.canWin
+        || (pushingObjective && pathFightAssessment.powerMargin > -18.0f);
+    const float botPower = BotCombatPowerScore(bot, ApplyCombatTuning(kPathCombatPowerWeights, botTuning));
     const int blockCount = inventory.GetBlocks();
     const int toolLevel = inventory.GetToolLevel();
     const bool canBridge = blockCount >= (memory.role == BotRole::Rusher ? 3 : (conservativeRoute ? 6 : 4));
@@ -3131,7 +3922,7 @@ Vector3 Game::ChooseBotPathWaypoint(Player& bot, Vector3 finalTarget, float dt, 
         {
             return;
         }
-        threatSamples.push_back(ThreatSample { other.GetPosition(), BotCombatPowerScore(other, kPathCombatPowerWeights) });
+        threatSamples.push_back(ThreatSample { other.GetPosition(), BotCombatPowerScore(other, ApplyCombatTuning(kPathCombatPowerWeights, botTuning)) });
     };
     if (teamContext != nullptr)
     {
@@ -4016,10 +4807,14 @@ void Game::BotTryShop(Player& bot, Team& team)
     }
 }
 
-EnergyCore* Game::FindNearestEnemyCore(const Player& player)
+EnergyCore* Game::SelectBestAttackTarget(
+    const Player& player,
+    const BotFrameContext& frameContext,
+    const TeamCoordinationBus* coordBus)
 {
     EnergyCore* best = nullptr;
     float bestScore = std::numeric_limits<float>::max();
+    const BotTuningGenome& tuning = BotTuningForTeam(player.GetTeamId());
 
     for (EnergyCore& core : cores_)
     {
@@ -4031,7 +4826,39 @@ EnergyCore* Game::FindNearestEnemyCore(const Player& player)
         const Vector3 corePos = world_.GridToWorld(core.GetBlockPosition());
         const float distance = DistanceSquared(player.GetPosition(), corePos);
         const float weaknessBonus = static_cast<float>(core.GetMaxHealth() - core.GetHealth()) * 1.8f;
-        const float score = distance - weaknessBonus;
+        float defenderPenalty = 0.0f;
+        const auto foundTargetTeamContext = frameContext.teamContexts.find(core.GetTeamId());
+        if (foundTargetTeamContext != frameContext.teamContexts.end())
+        {
+            const BotTeamFrameContext& targetTeam = foundTargetTeamContext->second;
+            defenderPenalty += static_cast<float>(targetTeam.teamPlan.defendersNearCore) * 72.0f;
+            for (const Player* defender : targetTeam.aliveAllies)
+            {
+                if (defender == nullptr
+                    || defender->GetId() == player.GetId()
+                    || !defender->IsAlive()
+                    || defender->IsEliminated())
+                {
+                    continue;
+                }
+                if (DistanceSquared(defender->GetPosition(), corePos) < 90.0f)
+                {
+                    defenderPenalty += 34.0f;
+                }
+            }
+        }
+
+        const int coordinatedAttackers = coordBus != nullptr
+            ? coordBus->CountSignal(
+                CoordinationSignal::AttackingCore,
+                matchTime_,
+                kCoordinationSignalTtl,
+                core.GetTeamId(),
+                player.GetId())
+            : 0;
+        const float coordinationPenalty = static_cast<float>(coordinatedAttackers) * tuning.pressureCoordinationPenalty;
+        const float accessBonus = HasBotCoreAccess(player, core) ? 95.0f : 0.0f;
+        const float score = distance - weaknessBonus + defenderPenalty + coordinationPenalty - accessBonus;
         if (score < bestScore)
         {
             bestScore = score;
@@ -4124,7 +4951,7 @@ BotMemory& Game::GetBotMemory(Player& bot)
     memory.playerId = bot.GetId();
     memory.state = BotState::Collect;
     memory.role = role;
-    memory.intent = role == BotRole::Defender ? BotIntent::RepairCoreDefense : BotIntent::SecureResources;
+    memory.intent = BotIntent::SecureResources;
     memory.intentReason = "spawn plan";
     memory.roleReason = "spawn role";
     const std::size_t index = botMemories_.size();

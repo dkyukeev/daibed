@@ -70,6 +70,7 @@ public:
     bool ShouldClose() const;
     bool RunAutomatchBatch(int runs, int ticksPerFrame, int maxMinutes);
     void SetSelectedBiome(ArenaBiome biome);
+    void SetBotTuningPath(std::string path);
 
     void HandleInput();
     void Update(float dt);
@@ -78,6 +79,13 @@ public:
 private:
     struct BotTeamFrameContext;
     struct BotFrameContext;
+    struct CoreDefenseMonitor
+    {
+        float checkTimer = 0.0f;
+        int missingBlocks = 0;
+        int weakBlocks = 0;
+        bool critical = false;
+    };
 
     void SetupMatch();
     void SetupGenerators();
@@ -214,7 +222,10 @@ private:
     std::optional<GridPos> FindBotBlockingBlock(const Player& bot, Vector3 wish, Vector3 target) const;
     bool TryBotBreakBlockingBlock(Player& bot, Vector3 wish, Vector3 target, float dt);
     void BotTryShop(Player& bot, Team& team);
-    EnergyCore* FindNearestEnemyCore(const Player& player);
+    EnergyCore* SelectBestAttackTarget(
+        const Player& player,
+        const BotFrameContext& frameContext,
+        const TeamCoordinationBus* coordBus);
     Player* FindNearbyEnemyPlayer(const Player& player, float maxDistance);
     BotMemory& GetBotMemory(Player& bot);
     std::optional<RaycastHit> RaycastFromAim(const Player& player, float maxDistance) const;
@@ -375,6 +386,7 @@ private:
         float time = 0.0f;
         std::string type;
         int teamId = -1;
+        int actorTeamId = -1;
         int actorId = -1;
         int targetId = -1;
         int value = 0;
@@ -418,6 +430,8 @@ private:
     const PlayerMatchScore* FindPlayerScore(int playerId) const;
     void LoadSettings();
     void SaveSettings() const;
+    void LoadBotTuning();
+    const BotTuningGenome& BotTuningForTeam(int teamId) const;
     const char* MatchModeName() const;
     const char* BotDifficultyName() const;
     const char* ArenaLayoutName() const;
@@ -476,6 +490,16 @@ private:
     std::vector<DamageCredit> damageCredits_;
     std::vector<BotMemory> botMemories_;
     std::unordered_map<int, std::size_t> botMemoryIndexByPlayerId_;
+    std::array<TeamCoordinationBus, 4> teamCoordBuses_;
+    std::array<CoreDefenseMonitor, 4> coreDefenseMonitors_;
+    std::array<BotTuningGenome, 4> botTuningByTeam_ {
+        DefaultBotTuningGenome(),
+        DefaultBotTuningGenome(),
+        DefaultBotTuningGenome(),
+        DefaultBotTuningGenome()
+    };
+    std::string botTuningPath_ = "bot_tuning.json";
+    std::string botTuningSource_ = "defaults";
     AutomatchState automatch_;
     std::array<Inventory, 4> teamChests_;
     Inventory personalChest_;

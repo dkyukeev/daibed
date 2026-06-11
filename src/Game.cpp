@@ -551,6 +551,7 @@ bool Game::Initialize()
 {
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
     LoadSettings();
+    LoadBotTuning();
     resolutionIndex_ = std::clamp(resolutionIndex_, 0, static_cast<int>(std::size(kWindowResolutions)) - 1);
     const WindowResolution& resolution = kWindowResolutions[resolutionIndex_];
     InitWindow(resolution.width, resolution.height, "DaiBed");
@@ -593,6 +594,17 @@ bool Game::ShouldClose() const
 void Game::SetSelectedBiome(ArenaBiome biome)
 {
     arenaBiome_ = biome;
+}
+
+void Game::SetBotTuningPath(std::string path)
+{
+    if (path.empty())
+    {
+        return;
+    }
+
+    botTuningPath_ = std::move(path);
+    LoadBotTuning();
 }
 
 void Game::HandleInput()
@@ -1192,6 +1204,11 @@ void Game::SetupMatch()
     damageCredits_.clear();
     botMemories_.clear();
     botMemoryIndexByPlayerId_.clear();
+    for (TeamCoordinationBus& bus : teamCoordBuses_)
+    {
+        bus.Clear();
+    }
+    coreDefenseMonitors_ = {};
     teamChests_ = {};
     personalChest_ = Inventory {};
     placementPreview_ = PlacementPreview {};
@@ -2309,17 +2326,55 @@ void Game::WriteAutomatchStatsJson() const
     const float avgDuration = automatch_.completedRuns > 0
         ? automatch_.totalDuration / static_cast<float>(automatch_.completedRuns)
         : 0.0f;
+    int totalVoidFalls = 0;
+    int totalStuckSamples = 0;
+    int totalIntentChanges = 0;
+    for (const AutomatchBotStats& stats : automatch_.botStats)
+    {
+        totalVoidFalls += stats.voidFalls;
+        totalStuckSamples += stats.stuckSamples;
+        totalIntentChanges += stats.intentChanges;
+    }
+    const float runs = static_cast<float>(std::max(1, automatch_.completedRuns));
+    const float fitness =
+        static_cast<float>(automatch_.totalCoreDestroyed) * 520.0f
+        + static_cast<float>(automatch_.totalCoreDamage) * 1.35f
+        + static_cast<float>(automatch_.totalKills) * 30.0f
+        + static_cast<float>(automatch_.totalFinalDeaths) * 70.0f
+        - static_cast<float>(automatch_.timeouts) * 420.0f
+        - static_cast<float>(totalVoidFalls) * 55.0f
+        - static_cast<float>(totalStuckSamples) * 2.2f
+        - static_cast<float>(totalIntentChanges) * 0.55f
+        - avgDuration * 0.35f * runs;
     file << "{\n";
     file << "  \"summary\": {\n";
     file << "    \"completedRuns\": " << automatch_.completedRuns << ",\n";
     file << "    \"targetRuns\": " << automatch_.targetRuns << ",\n";
     file << "    \"biome\": \"" << JsonEscape(ArenaBiomeName()) << "\",\n";
+    file << "    \"botTuningSource\": \"" << JsonEscape(botTuningSource_) << "\",\n";
+    file << "    \"fitness\": " << fitness << ",\n";
+    file << "    \"fitnessPerRun\": " << fitness / runs << ",\n";
     file << "    \"timeouts\": " << automatch_.timeouts << ",\n";
     file << "    \"averageDurationSeconds\": " << avgDuration << ",\n";
     file << "    \"totalKills\": " << automatch_.totalKills << ",\n";
     file << "    \"totalCoreDamage\": " << automatch_.totalCoreDamage << ",\n";
     file << "    \"totalFinalDeaths\": " << automatch_.totalFinalDeaths << ",\n";
     file << "    \"totalCoreDestroyed\": " << automatch_.totalCoreDestroyed << ",\n";
+    file << "    \"totalVoidFalls\": " << totalVoidFalls << ",\n";
+    file << "    \"totalStuckSamples\": " << totalStuckSamples << ",\n";
+    file << "    \"totalIntentChanges\": " << totalIntentChanges << ",\n";
+    file << "    \"botTuningByTeam\": [\n";
+    for (int teamId = 0; teamId < 4; ++teamId)
+    {
+        const BotTuningGenome& genome = botTuningByTeam_[teamId];
+        file << "      {";
+        file << "\"teamId\": " << teamId << ", ";
+        file << "\"id\": \"" << JsonEscape(genome.id) << "\", ";
+        file << "\"generation\": " << genome.generation << ", ";
+        file << "\"hash\": " << BotTuningGenomeHash(genome);
+        file << "}" << (teamId < 3 ? "," : "") << "\n";
+    }
+    file << "    ],\n";
     file << "    \"winsByTeam\": {\n";
     file << "      \"Red\": " << automatch_.teamWins[0] << ",\n";
     file << "      \"Blue\": " << automatch_.teamWins[1] << ",\n";
@@ -2352,6 +2407,8 @@ void Game::WriteAutomatchStatsJson() const
             file << "        {\n";
             file << "          \"teamId\": " << teamId << ",\n";
             file << "          \"team\": \"" << JsonEscape(TeamName(teamId)) << "\",\n";
+            file << "          \"botTuningId\": \"" << JsonEscape(botTuningByTeam_[teamId].id) << "\",\n";
+            file << "          \"botTuningHash\": " << BotTuningGenomeHash(botTuningByTeam_[teamId]) << ",\n";
             file << "          \"kills\": " << teamStats.kills << ",\n";
             file << "          \"deaths\": " << teamStats.deaths << ",\n";
             file << "          \"finalDeaths\": " << teamStats.finalDeaths << ",\n";
@@ -2388,6 +2445,7 @@ void Game::WriteAutomatchStatsJson() const
             file << "\"time\": " << event.time << ", ";
             file << "\"type\": \"" << JsonEscape(event.type) << "\", ";
             file << "\"teamId\": " << event.teamId << ", ";
+            file << "\"actorTeamId\": " << event.actorTeamId << ", ";
             file << "\"actorId\": " << event.actorId << ", ";
             file << "\"targetId\": " << event.targetId << ", ";
             file << "\"value\": " << event.value << ", ";
@@ -6609,6 +6667,18 @@ void Game::HandleDeathsAndRespawns()
             const bool finalDeath = !team->coreAlive;
             const bool voidDeath = player.GetPosition().y < -12.0f;
             const int killerId = DeathCreditFor(player.GetId());
+            int killerTeamId = -1;
+            if (killerId >= 0)
+            {
+                for (const Player& candidate : players_)
+                {
+                    if (candidate.GetId() == killerId)
+                    {
+                        killerTeamId = candidate.GetTeamId();
+                        break;
+                    }
+                }
+            }
             HandleDeathInventory(player, killerId);
             damageCredits_.erase(
                 std::remove_if(
@@ -6645,6 +6715,7 @@ void Game::HandleDeathsAndRespawns()
                         matchTime_,
                         voidDeath ? "voidFall" : "finalDeath",
                         player.GetTeamId(),
+                        killerTeamId,
                         killerId,
                         player.GetId(),
                         finalDeath ? 1 : 0,
@@ -6688,6 +6759,7 @@ void Game::HandleDeathsAndRespawns()
                         matchTime_,
                         "finalDeath",
                         player.GetTeamId(),
+                        -1,
                         -1,
                         player.GetId(),
                         1,
@@ -7476,6 +7548,37 @@ void Game::LoadSettings()
     automatchMaxMinutes_ = std::clamp(automatchMaxMinutes_, 3, 30);
 }
 
+void Game::LoadBotTuning()
+{
+    const BotTuningGenome defaultGenome = DefaultBotTuningGenome();
+    for (BotTuningGenome& genome : botTuningByTeam_)
+    {
+        genome = defaultGenome;
+    }
+
+    std::string error;
+    if (LoadBotTuningGenomeSetFromJsonFile(botTuningPath_, botTuningByTeam_, &error))
+    {
+        botTuningSource_ = botTuningPath_;
+        return;
+    }
+
+    botTuningSource_ = "defaults";
+    if (botTuningPath_ == "bot_tuning.json")
+    {
+        WriteBotTuningGenomeJsonFile("bot_tuning.example.json", defaultGenome, nullptr);
+    }
+}
+
+const BotTuningGenome& Game::BotTuningForTeam(int teamId) const
+{
+    if (teamId >= 0 && teamId < static_cast<int>(botTuningByTeam_.size()))
+    {
+        return botTuningByTeam_[teamId];
+    }
+    return botTuningByTeam_[0];
+}
+
 void Game::SaveSettings() const
 {
     std::ofstream file("DaiBed.settings", std::ios::trunc);
@@ -7758,6 +7861,19 @@ void Game::RegisterCombatEvent(const CombatEvent& event, const std::string& mess
         AddFloatingText("Void hit", Vector3 { event.position.x, event.position.y + 0.52f, event.position.z }, Color { 255, 155, 118, 255 });
     }
 
+    int attackerTeamId = -1;
+    if (event.attackerId >= 0)
+    {
+        for (const Player& candidate : players_)
+        {
+            if (candidate.GetId() == event.attackerId)
+            {
+                attackerTeamId = candidate.GetTeamId();
+                break;
+            }
+        }
+    }
+
     if (event.attackerId >= 0)
     {
         if (!event.coreHit && event.targetId >= 0)
@@ -7781,6 +7897,7 @@ void Game::RegisterCombatEvent(const CombatEvent& event, const std::string& mess
                         matchTime_,
                         "firstCoreDamage",
                         event.targetTeamId,
+                        attackerTeamId,
                         event.attackerId,
                         -1,
                         event.damage,
@@ -7793,6 +7910,7 @@ void Game::RegisterCombatEvent(const CombatEvent& event, const std::string& mess
                         matchTime_,
                         "coreDestroyed",
                         event.targetTeamId,
+                        attackerTeamId,
                         event.attackerId,
                         -1,
                         event.damage,

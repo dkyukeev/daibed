@@ -1328,6 +1328,8 @@ void Game::RenderBotDebug() const
 
         const std::string label = std::string(ToString(memory->role)) + " / " + ToString(memory->intent)
             + " " + std::to_string(static_cast<int>(memory->intentScore))
+            + " / plan: " + ToString(memory->currentPlan.goal)
+            + (memory->currentPlan.targetTeamId >= 0 ? "->" + std::to_string(memory->currentPlan.targetTeamId) : "")
             + (memory->intentReason.empty() ? "" : " / " + memory->intentReason)
             + (memory->roleReason.empty() ? "" : " / role: " + memory->roleReason);
         const int width = MeasureText(label.c_str(), 14) + 12;

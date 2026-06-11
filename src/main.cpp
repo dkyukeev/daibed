@@ -46,6 +46,7 @@ int main(int argc, char** argv)
         int cliSpeed = 16;
         int cliMinutes = 10;
         std::optional<ArenaBiome> cliBiome;
+        std::string cliBotTuningPath;
         for (int i = 1; i < argc; ++i)
         {
             const std::string arg = argv[i];
@@ -69,6 +70,10 @@ int main(int argc, char** argv)
             {
                 cliBiome = ParseBiome(argv[++i]);
             }
+            else if (arg == "--bot-tuning" && i + 1 < argc)
+            {
+                cliBotTuningPath = argv[++i];
+            }
         }
 
         CrashLogger::Heartbeat("construct-game");
@@ -84,6 +89,10 @@ int main(int argc, char** argv)
         if (cliBiome.has_value())
         {
             game.SetSelectedBiome(*cliBiome);
+        }
+        if (!cliBotTuningPath.empty())
+        {
+            game.SetBotTuningPath(cliBotTuningPath);
         }
 
         if (cliAutomatch)
