@@ -6,8 +6,10 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <fstream>
+#include <iostream>
 #include <iterator>
 #include <limits>
 #include <optional>
@@ -19,7 +21,9 @@
 namespace
 {
 constexpr float kPi = 3.1415926535f;
-constexpr float kCoreCollapseSeconds = 30.0f * 60.0f;
+// Sudden death: cores collapse late so stalemates always resolve into a
+// final-life brawl instead of dragging on forever.
+constexpr float kCoreCollapseSeconds = 12.0f * 60.0f;
 constexpr float kItemPickupRadiusSq = 1.35f;
 constexpr float kItemMagnetRadius = 2.35f;
 constexpr float kItemMagnetRadiusSq = kItemMagnetRadius * kItemMagnetRadius;
@@ -547,14 +551,24 @@ void AddCenterMonument(World& world)
 
 }
 
-bool Game::Initialize()
+bool Game::Initialize(bool headless)
 {
-    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
+    headless_ = headless;
+    suppressLocalFeedback_ = headless_;
     LoadSettings();
     LoadBotTuning();
+    gameplayFov_ = fov_;
+    cameraController_.SetFov(gameplayFov_);
+
+    if (headless_)
+    {
+        return true;
+    }
+
+    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
     resolutionIndex_ = std::clamp(resolutionIndex_, 0, static_cast<int>(std::size(kWindowResolutions)) - 1);
     const WindowResolution& resolution = kWindowResolutions[resolutionIndex_];
-    InitWindow(resolution.width, resolution.height, "DaiBed");
+    InitWindow(resolution.width, resolution.height, "DaiBed " DAIBED_VERSION);
     if (!IsWindowReady())
     {
         return false;
@@ -564,10 +578,8 @@ bool Game::Initialize()
     ApplyFrameRateLimit();
     SetExitKey(KEY_NULL);
     EnableCursor();
-    input_.SetMouseSensitivity(1.0f);
-    gameplayFov_ = fov_;
-    cameraController_.SetFov(gameplayFov_);
     audio_.Initialize();
+    audio_.SetVolume(masterVolume_);
     renderer_.Initialize();
 
     network_.Start();
@@ -578,6 +590,11 @@ bool Game::Initialize()
 
 void Game::Shutdown()
 {
+    if (headless_)
+    {
+        return;
+    }
+
     SaveSettings();
     network_.Disconnect();
     network_.Stop();
@@ -596,6 +613,11 @@ void Game::SetSelectedBiome(ArenaBiome biome)
     arenaBiome_ = biome;
 }
 
+void Game::SetBotDifficulty(BotDifficulty difficulty)
+{
+    botDifficulty_ = difficulty;
+}
+
 void Game::SetBotTuningPath(std::string path)
 {
     if (path.empty())
@@ -605,6 +627,19 @@ void Game::SetBotTuningPath(std::string path)
 
     botTuningPath_ = std::move(path);
     LoadBotTuning();
+}
+
+void Game::SetAutomatchStatsPath(std::string path)
+{
+    if (!path.empty())
+    {
+        automatchStatsPath_ = std::move(path);
+    }
+}
+
+void Game::SetProfilingEnabled(bool enabled)
+{
+    profilingEnabled_ = enabled;
 }
 
 void Game::HandleInput()
@@ -644,6 +679,26 @@ void Game::HandleInput()
         return;
     }
 
+    if (winnerTeamId_.has_value())
+    {
+        if (currentInput_.restartPressed)
+        {
+            SetupMatch();
+            UpdateCamera(0.016f);
+            SetMessage("New match started. Protect your EnergyCore.", 3.0f);
+        }
+        else if (currentInput_.exitPressed)
+        {
+            screen_ = GameScreen::MainMenu;
+            shopOpen_ = false;
+            inventoryOpen_ = false;
+            spectatorMode_ = false;
+            EnableCursor();
+        }
+        currentInput_ = PlayerInput {};
+        return;
+    }
+
     if (spectatorMode_)
     {
         if (currentInput_.exitPressed)
@@ -660,17 +715,13 @@ void Game::HandleInput()
             cameraController_.ToggleMode();
             SetMessage(std::string("Spectator camera: ") + cameraController_.GetModeName(), 1.6f);
         }
+#if DAIBED_DEVELOPER_BUILD
         if (currentInput_.botDebugPressed)
         {
             showBotDebug_ = !showBotDebug_;
             SetMessage(std::string("Bot debug: ") + (showBotDebug_ ? "on" : "off"), 1.4f);
         }
-        if (winnerTeamId_.has_value() && currentInput_.restartPressed)
-        {
-            SetupMatch();
-            UpdateCamera(0.016f);
-            SetMessage("New match started. Protect your EnergyCore.", 3.0f);
-        }
+#endif
         currentInput_ = PlayerInput {};
         return;
     }
@@ -754,22 +805,13 @@ void Game::HandleInput()
         cameraController_.ToggleMode();
         SetMessage(std::string("Camera: ") + cameraController_.GetModeName(), 1.6f);
     }
+#if DAIBED_DEVELOPER_BUILD
     if (currentInput_.botDebugPressed)
     {
         showBotDebug_ = !showBotDebug_;
         SetMessage(std::string("Bot debug: ") + (showBotDebug_ ? "on" : "off"), 1.4f);
     }
-
-    if (winnerTeamId_.has_value())
-    {
-        if (currentInput_.restartPressed)
-        {
-            SetupMatch();
-            UpdateCamera(0.016f);
-            SetMessage("New match started. Protect your EnergyCore.", 3.0f);
-        }
-        return;
-    }
+#endif
 
     if (!shopOpen_ && currentInput_.dropPressed)
     {
@@ -910,6 +952,7 @@ void Game::HandleInput()
         }
     }
 
+#if DAIBED_DEVELOPER_BUILD
     if (currentInput_.debugRespawnPressed)
     {
         Team* team = FindTeam(localPlayer->GetTeamId());
@@ -919,6 +962,7 @@ void Game::HandleInput()
             SetMessage("Debug respawn.");
         }
     }
+#endif
 
     if (currentInput_.placePressed)
     {
@@ -936,10 +980,18 @@ void Game::Update(float dt)
         return;
     }
 
-    const int ticks = automatch_.active ? std::clamp(automatchTicksPerFrame_, 1, 32) : 1;
+    const int maxTicks = headless_ ? 1024 : 32;
+    const int ticks = automatch_.active ? std::clamp(automatchTicksPerFrame_, 1, maxTicks) : 1;
     for (int i = 0; i < ticks; ++i)
     {
+        const auto started = profilingEnabled_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
         UpdateMatchSimulation(dt);
+        if (profilingEnabled_)
+        {
+            profileSimulationMs_ += std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - started).count();
+            ++profileSimulationTicks_;
+        }
         if (!automatch_.active)
         {
             break;
@@ -949,6 +1001,10 @@ void Game::Update(float dt)
 
 void Game::UpdateMatchSimulation(float dt)
 {
+    if (!players_.empty())
+    {
+        simulationOrderOffset_ = (simulationOrderOffset_ + 1) % players_.size();
+    }
     for (Player& player : players_)
     {
         player.UpdateTimers(dt);
@@ -958,9 +1014,17 @@ void Game::UpdateMatchSimulation(float dt)
     if (!winnerTeamId_.has_value())
     {
         matchTime_ += dt;
-        if (!coreCollapseTriggered_ && matchTime_ >= kCoreCollapseSeconds)
+        if (automatch_.active)
         {
-            TriggerCoreCollapse();
+            if (!coreCollapseTriggered_ && !coreCollapseWarned_ && matchTime_ >= kCoreCollapseSeconds - 60.0f)
+            {
+                coreCollapseWarned_ = true;
+                AddKillFeed("Sudden death через 60 секунд", Color { 255, 118, 118, 255 }, 8.0f);
+            }
+            if (!coreCollapseTriggered_ && matchTime_ >= kCoreCollapseSeconds)
+            {
+                TriggerCoreCollapse();
+            }
         }
         if (!generatorBoostTriggered_ && matchTime_ >= 10.0f * 60.0f)
         {
@@ -971,7 +1035,13 @@ void Game::UpdateMatchSimulation(float dt)
         }
         UpdateLocalPlayer(dt);
         UpdateAttackOrBreak(dt);
+        const auto botsStarted = profilingEnabled_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
         UpdateBots(dt);
+        if (profilingEnabled_)
+        {
+            profileBotsMs_ += std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - botsStarted).count();
+        }
         UpdateGenerators(dt);
         UpdatePickups(dt);
         UpdateDroppedItems(dt);
@@ -982,12 +1052,24 @@ void Game::UpdateMatchSimulation(float dt)
         UpdateHeroTemporaryBlocks(dt);
         UpdateBromDevices(dt);
         UpdateKonvoyDevices(dt);
+        UpdateLikhoBleeds(dt);
+        UpdateSvidetelEffects(dt);
         UpdateAlarmTraps();
         UpdatePassiveRegeneration(dt);
         UpdateBaseHealing(dt);
         UpdateDamageCredits(dt);
         HandleDeathsAndRespawns();
         winnerTeamId_ = rules_.CheckWinCondition(teams_, players_);
+        if (!winnerTeamId_.has_value() && coreCollapseTriggered_ && suddenDeathTiebreakTeamId_.has_value())
+        {
+            const bool anyTeamStillAlive = std::any_of(
+                players_.begin(), players_.end(),
+                [](const Player& player) { return !player.IsEliminated(); });
+            if (!anyTeamStillAlive)
+            {
+                winnerTeamId_ = suddenDeathTiebreakTeamId_;
+            }
+        }
         if (winnerTeamId_.has_value())
         {
             const Team* winner = FindTeam(*winnerTeamId_);
@@ -1018,16 +1100,24 @@ void Game::UpdateMatchSimulation(float dt)
         orbitaTeleportPreviewTimer_ = std::max(0.0f, orbitaTeleportPreviewTimer_ - dt);
     }
 
-    UpdatePlacementPreview();
-    UpdateCombatPreview();
-    UpdateFastPlacement(dt);
-    UpdateFeedback(dt);
-    SendMockNetworkInput();
-    UpdateCamera(dt);
+    if (!headless_)
+    {
+        UpdatePlacementPreview();
+        UpdateCombatPreview();
+        UpdateFastPlacement(dt);
+        UpdateFeedback(dt);
+        SendMockNetworkInput();
+        UpdateCamera(dt);
+    }
 }
 
 void Game::Render()
 {
+    if (headless_)
+    {
+        return;
+    }
+
     BeginDrawing();
     const bool inWorldView = screen_ == GameScreen::Playing || screen_ == GameScreen::Paused;
     ClearBackground(inWorldView ? BiomeSkyColor() : Color { 14, 17, 24, 255 });
@@ -1127,7 +1217,7 @@ void Game::Render()
             eventMessages_,
             stats_,
             hitMarkerTimer_,
-            damageFlashTimer_,
+            reducedFlashes_ ? damageFlashTimer_ * 0.25f : damageFlashTimer_,
             matchTime_,
             KeyLabel(input_.GetBindings().heroActive1),
             KeyLabel(input_.GetBindings().heroActive2),
@@ -1153,15 +1243,21 @@ void Game::Render()
         {
             RenderGameHints(*localPlayer);
         }
+        if (tutorialMode_ || matchTime_ < 60.0f)
+        {
+            RenderOnboarding(*localPlayer);
+        }
         const Team* localTeam = FindTeam(localPlayer->GetTeamId());
         if (localTeam != nullptr && localTeam->enemyTrackerUnlocked)
         {
             RenderCompass(*localPlayer);
         }
+#if DAIBED_DEVELOPER_BUILD
         if (showBotDebug_)
         {
             RenderBotDebug();
         }
+#endif
         RenderAutomatchOverlay();
         if (scoreboardHeld_)
         {
@@ -1196,6 +1292,9 @@ void Game::SetupMatch()
     konvoyTraps_.clear();
     konvoyTethers_.clear();
     konvoyDomes_.clear();
+    likhoBleeds_.clear();
+    svidetelEchoes_.clear();
+    svidetelPhaseBlocks_.clear();
     droppedItems_.clear();
     floatingTexts_.clear();
     eventMessages_.clear();
@@ -1228,8 +1327,12 @@ void Game::SetupMatch()
     localFallVelocity_ = 0.0f;
     localAirPeakY_ = 0.0f;
     localWasOnGround_ = false;
+    simulationOrderOffset_ = 0;
     winnerTeamId_.reset();
+    suddenDeathTiebreakTeamId_.reset();
     coreCollapseTriggered_ = false;
+    coreCollapseWarned_ = false;
+    suddenDeathDecayTimer_ = 0.0f;
     generatorBoostTriggered_ = false;
     shopOpen_ = false;
     selectedHotbarSlot_ = 0;
@@ -1248,6 +1351,9 @@ void Game::SetupMatch()
     spectatorFreeCamera_ = false;
     spectatorTargetIndex_ = 0;
     spectatorPosition_ = Vector3 {};
+    localDeathKiller_.clear();
+    localDeathCause_.clear();
+    localDeathOverlayTimer_ = 0.0f;
 
     Team red {
         0,
@@ -1925,6 +2031,7 @@ void Game::AddRuinsBiomeFeatures()
 void Game::StartSelectedMatch()
 {
     automatch_.active = false;
+    tutorialMode_ = false;
     selectedTeamId_ = std::clamp(selectedTeamId_, 0, TeamCountForMode() - 1);
     selectedTeamSize_ = std::clamp(selectedTeamSize_, 1, 4);
     selectedBotCount_ = std::clamp(selectedBotCount_, 0, MaxBotCountForSelection());
@@ -1938,6 +2045,26 @@ void Game::StartSelectedMatch()
     SetMessage(std::string("Mode: ") + MatchModeName() + ". Protect your EnergyCore.", 4.0f);
 }
 
+void Game::StartTutorialMatch()
+{
+    automatch_.active = false;
+    tutorialMode_ = true;
+    selectedMode_ = MatchMode::TwoVsTwo;
+    selectedTeamId_ = 0;
+    selectedTeamSize_ = 1;
+    selectedBotCount_ = 1;
+    botDifficulty_ = BotDifficulty::Easy;
+    arenaLayout_ = ArenaLayout::Classic;
+    arenaBiome_ = ArenaBiome::Arena;
+    SetupMatch();
+    gameplayFov_ = fov_;
+    cameraController_.SetFov(gameplayFov_);
+    UpdateCamera(0.016f);
+    screen_ = GameScreen::Playing;
+    DisableCursor();
+    SetMessage("Обучение: защищайте свой EnergyCore и уничтожьте вражеский.", 6.0f);
+}
+
 void Game::StartAutomatch()
 {
     selectedMode_ = MatchMode::FourTeams;
@@ -1946,28 +2073,54 @@ void Game::StartAutomatch()
     selectedBotCount_ = MaxBotCountForSelection();
     automatch_ = AutomatchState {};
     automatch_.active = true;
-    automatch_.targetRuns = std::clamp(automatchRunTarget_, 1, 50);
+    automatch_.targetRuns = std::clamp(automatchRunTarget_, 1, 500);
     automatch_.maxMatchSeconds = static_cast<float>(std::clamp(automatchMaxMinutes_, 3, 30) * 60);
-    SaveSettings();
+    if (!headless_)
+    {
+        SaveSettings();
+    }
     SetupMatch();
     ConfigureAutomatchMatch();
     gameplayFov_ = fov_;
     cameraController_.SetFov(gameplayFov_);
-    UpdateCamera(0.016f);
+    if (!headless_)
+    {
+        UpdateCamera(0.016f);
+    }
     screen_ = GameScreen::Playing;
-    DisableCursor();
+    if (!headless_)
+    {
+        DisableCursor();
+    }
     showBotDebug_ = true;
     SetMessage("Automatch running: bot-only simulation.", 4.0f);
 }
 
-bool Game::RunAutomatchBatch(int runs, int ticksPerFrame, int maxMinutes)
+bool Game::RunAutomatchBatch(int runs, int ticksPerFrame, int maxMinutes, unsigned int seed)
 {
-    automatchRunTarget_ = std::clamp(runs, 1, 50);
-    automatchTicksPerFrame_ = std::clamp(ticksPerFrame, 1, 32);
+    profileSimulationMs_ = 0.0;
+    profileBotsMs_ = 0.0;
+    profilePathMs_ = 0.0;
+    profileDecisionMs_ = 0.0;
+    profileMovementMs_ = 0.0;
+    profileCombatMs_ = 0.0;
+    profilePerceptionMs_ = 0.0;
+    profilePlanningMs_ = 0.0;
+    profileSimulationTicks_ = 0;
+    profilePathCalls_ = 0;
+    profileDecisionCalls_ = 0;
+    profileMovementCalls_ = 0;
+    profileCombatCalls_ = 0;
+    profilePerceptionCalls_ = 0;
+    profilePlanningCalls_ = 0;
+    automatchRunTarget_ = std::clamp(runs, 1, 500);
+    automatchTicksPerFrame_ = std::clamp(ticksPerFrame, 1, headless_ ? 1024 : 32);
     automatchMaxMinutes_ = std::clamp(maxMinutes, 3, 30);
+    automatchSeed_ = seed;
     StartAutomatch();
 
-    const int guardFrames = automatchRunTarget_ * automatchMaxMinutes_ * 60 * 90;
+    const int simulationTicks = automatchRunTarget_ * automatchMaxMinutes_ * 60 * 60;
+    const int guardFrames = simulationTicks / automatchTicksPerFrame_ + automatchRunTarget_ * 8 + 64;
     int frames = 0;
     while (automatch_.active && frames++ < guardFrames && !ShouldClose())
     {
@@ -1980,11 +2133,29 @@ bool Game::RunAutomatchBatch(int runs, int ticksPerFrame, int maxMinutes)
         WriteAutomatchStatsJson();
         return false;
     }
+    if (profilingEnabled_)
+    {
+        const double botsPercent = profileSimulationMs_ > 0.0 ? profileBotsMs_ * 100.0 / profileSimulationMs_ : 0.0;
+        const double pathPercent = profileBotsMs_ > 0.0 ? profilePathMs_ * 100.0 / profileBotsMs_ : 0.0;
+        std::cout << "PROFILE simulationMs=" << profileSimulationMs_
+                  << " ticks=" << profileSimulationTicks_
+                  << " botsMs=" << profileBotsMs_
+                  << " botsPercent=" << botsPercent
+                  << " pathMs=" << profilePathMs_
+                  << " pathCalls=" << profilePathCalls_
+                  << " pathPercentOfBots=" << pathPercent
+                  << " decisionMs=" << profileDecisionMs_
+                  << " perceptionMs=" << profilePerceptionMs_
+                  << " planningMs=" << profilePlanningMs_
+                  << " movementMs=" << profileMovementMs_
+                  << " combatMs=" << profileCombatMs_ << '\n';
+    }
     return automatch_.completedRuns >= automatch_.targetRuns;
 }
 
 void Game::ConfigureAutomatchMatch()
 {
+    SetRandomSeed(automatchSeed_ + static_cast<unsigned int>(automatch_.completedRuns) * 0x9e3779b9U);
     automatch_.currentFirstCoreDamageTime = -1.0f;
     automatch_.currentTeamStats[0] = AutomatchTeamStats {};
     automatch_.currentTeamStats[1] = AutomatchTeamStats {};
@@ -1992,32 +2163,46 @@ void Game::ConfigureAutomatchMatch()
     automatch_.currentTeamStats[3] = AutomatchTeamStats {};
     automatch_.currentTimeline.clear();
 
-    std::array<int, 4> activeBotsByTeam {};
+    players_.erase(
+        std::remove_if(players_.begin(), players_.end(), [](const Player& player) { return !player.IsLocal(); }),
+        players_.end());
     int nextId = localPlayerId_ + 1;
-    for (const Player& player : players_)
-    {
-        nextId = std::max(nextId, player.GetId() + 1);
-        if (!player.IsLocal() && IsTeamActiveForMode(player.GetTeamId()))
-        {
-            ++activeBotsByTeam[player.GetTeamId()];
-        }
-    }
-
     for (Team& team : teams_)
     {
         if (!IsTeamActiveForMode(team.id))
         {
             continue;
         }
-        while (activeBotsByTeam[team.id] < selectedTeamSize_)
+        for (int slot = 0; slot < selectedTeamSize_; ++slot)
         {
-            Player bot(nextId++, std::string(TeamName(team.id)) + " Auto Bot " + std::to_string(activeBotsByTeam[team.id] + 1), team.id, team.spawnPoint, false);
-            bot.SetHeroId(HeroSystem::IdFromIndex((nextId - localPlayerId_ - 2) % HeroSystem::kHeroCount));
+            Player bot(nextId++, std::string(TeamName(team.id)) + " Bot " + std::to_string(slot + 1), team.id, team.spawnPoint, false);
+            bot.SetHeroId(HeroSystem::IdFromIndex(slot % HeroSystem::kHeroCount));
             bot.SetYaw(YawForTeam(team.id));
             ApplyBotLoadout(bot);
             players_.push_back(bot);
-            ++activeBotsByTeam[team.id];
         }
+    }
+
+    std::array<int, HeroSystem::kHeroCount> heroOrder {};
+    for (int index = 0; index < HeroSystem::kHeroCount; ++index)
+    {
+        heroOrder[index] = index;
+    }
+    for (int index = HeroSystem::kHeroCount - 1; index > 0; --index)
+    {
+        const int other = GetRandomValue(0, index);
+        std::swap(heroOrder[index], heroOrder[other]);
+    }
+    std::array<int, 4> heroSlotByTeam {};
+    for (Player& player : players_)
+    {
+        const int teamId = player.GetTeamId();
+        if (player.IsLocal() || teamId < 0 || teamId >= static_cast<int>(heroSlotByTeam.size()))
+        {
+            continue;
+        }
+        const int slot = heroSlotByTeam[teamId]++ % HeroSystem::kHeroCount;
+        player.SetHeroId(HeroSystem::IdFromIndex(heroOrder[slot]));
     }
 
     if (Player* localPlayer = GetLocalPlayer())
@@ -2145,8 +2330,8 @@ void Game::SampleAutomatchBots()
         }
 
         const Vector3 position = player.GetPosition();
-        const Team* team = FindTeam(player.GetTeamId());
-        const Vector3 base = team != nullptr ? team->spawnPoint : Vector3 {};
+        const EnergyCore* core = FindCoreByTeam(player.GetTeamId());
+        const Vector3 base = core != nullptr ? world_.GridToWorld(core->GetBlockPosition()) : Vector3 {};
         const float fromBase = Distance3D(position, base);
         const float fromCenter = Distance3D(position, Vector3 {});
         if (!stats.hasMovementSample)
@@ -2172,6 +2357,10 @@ void Game::SampleAutomatchBots()
             };
         }
         stats.maxDistanceFromBase = std::max(stats.maxDistanceFromBase, fromBase);
+        if (matchTime_ <= 60.0f)
+        {
+            stats.earlyMaxDistanceFromBase = std::max(stats.earlyMaxDistanceFromBase, fromBase);
+        }
         stats.maxDistanceFromCenter = std::max(stats.maxDistanceFromCenter, fromCenter);
         const float samples = static_cast<float>(std::max(1, stats.samples));
         stats.averageDistanceFromBase += (fromBase - stats.averageDistanceFromBase) / samples;
@@ -2191,6 +2380,26 @@ void Game::FinishAutomatchRun(bool timeout)
     for (int teamId = 0; teamId < 4; ++teamId)
     {
         run.teamStats[teamId] = automatch_.currentTeamStats[teamId];
+    }
+    for (const Player& player : players_)
+    {
+        if (player.IsLocal())
+        {
+            continue;
+        }
+        const int heroIndex = std::clamp(static_cast<int>(player.GetHeroId()), 0, HeroSystem::kHeroCount - 1);
+        AutomatchHeroStats& heroStats = automatch_.heroStats[heroIndex];
+        ++heroStats.appearances;
+        if (run.winnerTeamId == player.GetTeamId())
+        {
+            ++heroStats.wins;
+        }
+        if (const PlayerMatchScore* score = FindPlayerScore(player.GetId()))
+        {
+            heroStats.kills += score->kills;
+            heroStats.deaths += score->deaths;
+            heroStats.coreDamage += score->coreDamage;
+        }
     }
 
     const auto findBotStats = [this](const Player& player) -> AutomatchBotStats&
@@ -2313,11 +2522,17 @@ void Game::FinishAutomatchRun(bool timeout)
         ++automatch_.teamWins[run.winnerTeamId];
     }
     automatch_.runs.push_back(run);
+    std::cout << "run " << automatch_.completedRuns << "/" << automatch_.targetRuns
+              << ": winner=" << (run.winnerTeamId >= 0 ? TeamName(run.winnerTeamId) : "none")
+              << " timeout=" << (run.timeout ? "yes" : "no")
+              << " duration=" << run.duration
+              << " kills=" << run.kills
+              << " coreDamage=" << run.coreDamage << '\n';
 }
 
 void Game::WriteAutomatchStatsJson() const
 {
-    std::ofstream file("automatch_stats.json", std::ios::trunc);
+    std::ofstream file(automatchStatsPath_, std::ios::trunc);
     if (!file)
     {
         return;
@@ -2457,6 +2672,23 @@ void Game::WriteAutomatchStatsJson() const
     }
     file << "  ],\n";
 
+    file << "  \"heroes\": [\n";
+    for (int heroIndex = 0; heroIndex < HeroSystem::kHeroCount; ++heroIndex)
+    {
+        const HeroId heroId = HeroSystem::IdFromIndex(heroIndex);
+        const AutomatchHeroStats& stats = automatch_.heroStats[heroIndex];
+        file << "    {\n";
+        file << "      \"hero\": \"" << JsonEscape(HeroSystem::GetDefinition(heroId).name) << "\",\n";
+        file << "      \"appearances\": " << stats.appearances << ",\n";
+        file << "      \"wins\": " << stats.wins << ",\n";
+        file << "      \"winrate\": " << (stats.appearances > 0 ? static_cast<float>(stats.wins) / static_cast<float>(stats.appearances) : 0.0f) << ",\n";
+        file << "      \"kills\": " << stats.kills << ",\n";
+        file << "      \"deaths\": " << stats.deaths << ",\n";
+        file << "      \"coreDamage\": " << stats.coreDamage << "\n";
+        file << "    }" << (heroIndex + 1 < HeroSystem::kHeroCount ? "," : "") << "\n";
+    }
+    file << "  ],\n";
+
     file << "  \"bots\": [\n";
     for (std::size_t i = 0; i < automatch_.botStats.size(); ++i)
     {
@@ -2490,6 +2722,7 @@ void Game::WriteAutomatchStatsJson() const
         file << "      \"movement\": {\n";
         file << "        \"totalDistance\": " << stats.totalDistance << ",\n";
         file << "        \"maxDistanceFromBase\": " << stats.maxDistanceFromBase << ",\n";
+        file << "        \"earlyMaxDistanceFromBase\": " << stats.earlyMaxDistanceFromBase << ",\n";
         file << "        \"maxDistanceFromCenter\": " << stats.maxDistanceFromCenter << ",\n";
         file << "        \"averageDistanceFromBase\": " << stats.averageDistanceFromBase << ",\n";
         file << "        \"averageDistanceFromCenter\": " << stats.averageDistanceFromCenter << ",\n";
@@ -2524,11 +2757,8 @@ void Game::TriggerCoreCollapse()
         {
             core.Damage(core.GetMaxHealth());
         }
-        if (TryRadonCoreSacrifice(core))
-        {
-            AddWorldEffect(world_.GridToWorld(core.GetBlockPosition()), HeroAccentColor(HeroId::Radon), 0.75f, 0.8f);
-            continue;
-        }
+        // The collapse is the arena-wide match finisher: no hero trick may
+        // refill a core here, otherwise stalemates never resolve.
         world_.RemoveBlock(core.GetBlockPosition());
         Team* team = FindTeam(core.GetTeamId());
         if (team != nullptr)
@@ -2541,10 +2771,10 @@ void Game::TriggerCoreCollapse()
 
     if (destroyedCount > 0)
     {
-        SetMessage("30:00 reached. All EnergyCores collapsed. Final lives only.", 6.0f);
+        SetMessage("Арена рушится! Все Коры уничтожены, распад арены ранит каждого. Последняя жизнь.", 6.0f);
         AddEventMessage("All EnergyCores collapsed", Color { 255, 118, 118, 255 }, 6.0f);
         audio_.PlayCoreDestroyed();
-        cameraController_.AddShake(0.34f, 0.45f);
+        AddCameraShake(0.34f, 0.45f);
     }
 }
 
@@ -2643,7 +2873,7 @@ void Game::ApplyStandingBlockEffects(Player& player, bool localPlayer)
         AddWorldEffect(world_.GridToWorld(underFeet), Color { 128, 238, 166, 255 }, 0.34f, 0.25f);
         if (localPlayer)
         {
-            cameraController_.AddShake(0.10f, 0.12f);
+            AddCameraShake(0.10f, 0.12f);
         }
     }
 }
@@ -2724,6 +2954,14 @@ bool Game::UseHeroAbility(Player& player, HeroAbilitySlot slot)
     {
         return UseKonvoyAbility(player, slot);
     }
+    if (player.GetHeroId() == HeroId::Likho)
+    {
+        return UseLikhoAbility(player, slot);
+    }
+    if (player.GetHeroId() == HeroId::Svidetel)
+    {
+        return UseSvidetelAbility(player, slot);
+    }
 
     const HeroDefinition& hero = HeroSystem::GetDefinition(player.GetHeroId());
     const HeroAbilityDefinition* ability = nullptr;
@@ -2770,6 +3008,140 @@ bool Game::UseHeroAbility(Player& player, HeroAbilitySlot slot)
     const std::string message = hero.name + ": " + ability->name + " - базовый каркас активирован.";
     SetMessage(message, 2.2f);
     AddEventMessage(message, accent, 2.8f);
+    audio_.PlayPickup();
+    return true;
+}
+
+bool Game::UseLikhoAbility(Player& player, HeroAbilitySlot slot)
+{
+    const HeroDefinition& hero = HeroSystem::GetDefinition(HeroId::Likho);
+    const HeroAbilityDefinition& ability = slot == HeroAbilitySlot::Active1
+        ? hero.active1
+        : (slot == HeroAbilitySlot::Active2 ? hero.active2 : hero.ultimate);
+    if (!player.IsHeroAbilityReady(slot))
+    {
+        SetMessage("Лихо: способность не готова.", 1.6f);
+        audio_.PlayDenied();
+        return false;
+    }
+
+    player.StartHeroAbilityCooldown(slot, ability.cooldownSeconds, ability.durationSeconds);
+    HeroRuntimeState& state = player.MutableHeroState();
+    const Color accent = HeroAccentColor(HeroId::Likho);
+    if (slot == HeroAbilitySlot::Active1)
+    {
+        SetMessage("Лихо заглушило шаги. Первый удар проверит атаку в спину.", 2.4f);
+        AddWorldEffect(player.GetPosition(), player.Forward(), accent, 0.75f, 0.55f, WorldEffectKind::Trail);
+    }
+    else if (slot == HeroAbilitySlot::Active2)
+    {
+        SetMessage("Лихо: следующие удары накладывают кровотечение.", 2.4f);
+        AddWorldEffect(player.GetPosition(), accent, 0.70f, 0.45f);
+    }
+    else
+    {
+        int disguiseTeam = -1;
+        for (const Team& team : teams_)
+        {
+            if (team.id != player.GetTeamId() && IsTeamActiveForMode(team.id))
+            {
+                disguiseTeam = team.id;
+                break;
+            }
+        }
+        state.likhoDisguiseTeamId = disguiseTeam;
+        SetMessage("Лихо приняло искаженный облик чужой команды. Атака или урон раскроют маскировку.", 3.0f);
+        AddWorldEffect(player.GetPosition(), player.Forward(), accent, 1.1f, 0.85f, WorldEffectKind::Ring);
+    }
+    SetHeroAnimation(player, HeroAnimationState::Cast, 0.34f);
+    AddFloatingText(ability.name, Vector3 { player.GetPosition().x, player.GetPosition().y + 1.35f, player.GetPosition().z }, accent);
+    audio_.PlayPickup();
+    return true;
+}
+
+bool Game::UseSvidetelAbility(Player& player, HeroAbilitySlot slot)
+{
+    const HeroDefinition& hero = HeroSystem::GetDefinition(HeroId::Svidetel);
+    const HeroAbilityDefinition& ability = slot == HeroAbilitySlot::Active1
+        ? hero.active1
+        : (slot == HeroAbilitySlot::Active2 ? hero.active2 : hero.ultimate);
+    if (!player.IsHeroAbilityReady(slot))
+    {
+        SetMessage("Свидетель: способность не готова.", 1.6f);
+        audio_.PlayDenied();
+        return false;
+    }
+
+    if (slot == HeroAbilitySlot::Active2)
+    {
+        const Vector3 origin { player.GetPosition().x, player.GetPosition().y + 0.72f, player.GetPosition().z };
+        const Vector3 direction = player.IsLocal() ? cameraController_.GetAimDirection() : player.Forward();
+        const std::optional<RaycastHit> hit = world_.Raycast(origin, direction, 5.5f);
+        if (!hit.has_value() || hit->blockData.type == BlockType::EnergyCoreBlock)
+        {
+            SetMessage("Свидетель: наведитесь на обычные блоки вдали от Core.", 2.0f);
+            audio_.PlayDenied();
+            return false;
+        }
+
+        int phased = 0;
+        for (int x = -1; x <= 1; ++x)
+        {
+            for (int y = 0; y <= 1; ++y)
+            {
+                const GridPos pos { hit->block.x + x, hit->block.y + y, hit->block.z };
+                const Block* block = world_.GetBlock(pos);
+                if (block == nullptr || block->type == BlockType::EnergyCoreBlock || !block->breakable)
+                {
+                    continue;
+                }
+                bool nearCore = false;
+                const Vector3 center = world_.GridToWorld(pos);
+                for (const EnergyCore& core : cores_)
+                {
+                    if (DistanceSquared(center, world_.GridToWorld(core.GetBlockPosition())) < 12.0f)
+                    {
+                        nearCore = true;
+                        break;
+                    }
+                }
+                if (nearCore)
+                {
+                    continue;
+                }
+                svidetelPhaseBlocks_.push_back(SvidetelPhaseBlock { pos, *block, ability.durationSeconds });
+                world_.RemoveBlock(pos);
+                AddWorldEffect(center, HeroAccentColor(HeroId::Svidetel), 0.30f, 0.42f);
+                ++phased;
+            }
+        }
+        if (phased == 0)
+        {
+            SetMessage("Свидетель: участок защищен или слишком близко к Core.", 2.0f);
+            audio_.PlayDenied();
+            return false;
+        }
+        player.StartHeroAbilityCooldown(slot, ability.cooldownSeconds, ability.durationSeconds);
+        SetMessage("Свидетель сделал блоки фазовыми на 4 секунды.", 2.4f);
+    }
+    else
+    {
+        player.StartHeroAbilityCooldown(slot, ability.cooldownSeconds, ability.durationSeconds);
+        if (slot == HeroAbilitySlot::Active1)
+        {
+            svidetelEchoes_.push_back(SvidetelEcho {
+                player.GetPosition(), player.GetId(), player.GetTeamId(), ability.durationSeconds, 0.2f, true, {}, 0.0f });
+            SetMessage("Свидетель создал вооруженное Эхо.", 2.2f);
+        }
+        else
+        {
+            SetMessage("Свидетель видит контуры врагов, ресурсов и Core.", 2.6f);
+        }
+    }
+
+    SetHeroAnimation(player, HeroAnimationState::Cast, 0.38f);
+    AddWorldEffect(player.GetPosition(), player.Forward(), HeroAccentColor(HeroId::Svidetel), 0.95f, 0.65f, WorldEffectKind::Ring);
+    AddFloatingText(ability.name, Vector3 { player.GetPosition().x, player.GetPosition().y + 1.35f, player.GetPosition().z }, HeroAccentColor(HeroId::Svidetel));
     audio_.PlayPickup();
     return true;
 }
@@ -3034,7 +3406,7 @@ void Game::EmitRadonCoreWave(Vector3 position, int ownerTeamId, int ownerPlayerI
         if (damage > 0.0f)
         {
             const int scaledDamage = std::max(4, static_cast<int>(damage * (0.55f + fraction * 0.45f) + 0.5f));
-            NoteDamageCredit(target.GetId(), ownerPlayerId);
+            NoteDamageCredit(target.GetId(), ownerPlayerId, "взрывом Радона");
             target.Damage(scaledDamage);
         }
         const Vector3 away = Normalize2D(Vector3 { target.GetPosition().x - position.x, 0.0f, target.GetPosition().z - position.z });
@@ -3044,7 +3416,7 @@ void Game::EmitRadonCoreWave(Vector3 position, int ownerTeamId, int ownerPlayerI
     }
 
     AddWorldEffect(position, Vector3 { 0.0f, 0.0f, 1.0f }, HeroAccentColor(HeroId::Radon), radius, 0.70f, WorldEffectKind::Ring);
-    cameraController_.AddShake(0.28f, 0.28f);
+    AddCameraShake(0.28f, 0.28f);
 }
 
 bool Game::UseOrbitaAbility(Player& player, HeroAbilitySlot slot)
@@ -3341,7 +3713,7 @@ bool Game::UseOrbitaTeleport(Player& player)
     AddFloatingText("-" + std::to_string(selfDamage), Vector3 { preview.destination.x, preview.destination.y + 1.35f, preview.destination.z }, accent);
     SetMessage("Орбита телепортировалась в видимую точку и получила " + std::to_string(selfDamage) + " урона.", 2.5f);
     AddEventMessage("Ульта Орбиты: видимый телепорт завершен.", accent, 2.8f);
-    cameraController_.AddShake(0.18f, 0.18f);
+    AddCameraShake(0.18f, 0.18f);
     audio_.PlayCoreDestroyed();
     return true;
 }
@@ -3396,7 +3768,7 @@ bool Game::IsOrbitaTeleportDestinationSafe(Vector3 position, int teamId, std::st
 std::vector<HeroDeviceVisual> Game::BuildHeroDeviceVisuals() const
 {
     std::vector<HeroDeviceVisual> devices;
-    devices.reserve(bromVacuumBots_.size() + bromTurretDrones_.size());
+    devices.reserve(bromVacuumBots_.size() + bromTurretDrones_.size() + svidetelEchoes_.size());
 
     for (const BromVacuumBot& bot : bromVacuumBots_)
     {
@@ -3515,6 +3887,20 @@ std::vector<HeroDeviceVisual> Game::BuildHeroDeviceVisuals() const
         visual.active = dome.flashTimer > 0.0f;
         visual.radius = kKonvoyDomeVisualRadius;
         visual.lifetimeFraction = std::clamp(dome.lifetime / std::max(0.1f, konvoy.ultimate.durationSeconds), 0.0f, 1.0f);
+        devices.push_back(visual);
+    }
+
+    for (const SvidetelEcho& echo : svidetelEchoes_)
+    {
+        HeroDeviceVisual visual {};
+        visual.kind = HeroDeviceVisualKind::SvidetelEcho;
+        visual.position = echo.position;
+        visual.target = echo.lastTarget;
+        visual.teamId = echo.ownerTeamId;
+        visual.active = echo.flashTimer > 0.0f;
+        visual.temporary = !echo.armed;
+        visual.radius = echo.armed ? 0.72f : 0.54f;
+        visual.lifetimeFraction = std::clamp(echo.lifetime / (echo.armed ? 24.0f : 12.0f), 0.0f, 1.0f);
         devices.push_back(visual);
     }
 
@@ -4466,7 +4852,7 @@ void Game::HandleDeathInventory(Player& player, int killerId)
     }
 }
 
-void Game::NoteDamageCredit(int targetId, int attackerId)
+void Game::NoteDamageCredit(int targetId, int attackerId, std::string cause)
 {
     if (targetId < 0 || attackerId < 0 || targetId == attackerId)
     {
@@ -4479,11 +4865,12 @@ void Game::NoteDamageCredit(int targetId, int attackerId)
         {
             credit.attackerId = attackerId;
             credit.timer = 8.0f;
+            credit.cause = std::move(cause);
             return;
         }
     }
 
-    damageCredits_.push_back(DamageCredit { targetId, attackerId, 8.0f });
+    damageCredits_.push_back(DamageCredit { targetId, attackerId, 8.0f, std::move(cause) });
 }
 
 int Game::DeathCreditFor(int targetId) const
@@ -4700,7 +5087,7 @@ void Game::DetonateAt(Vector3 position, int ownerTeamId, int ownerPlayerId, floa
             continue;
         }
         const int scaledDamage = std::max(6, static_cast<int>(static_cast<float>(damage) * (1.0f - std::min(distance / (radius + 0.7f), 0.82f))));
-        NoteDamageCredit(player.GetId(), ownerPlayerId);
+        NoteDamageCredit(player.GetId(), ownerPlayerId, "взрывом");
         player.Damage(scaledDamage);
         const Vector3 away = Normalize2D(Vector3 { player.GetPosition().x - position.x, 0.0f, player.GetPosition().z - position.z });
         const float knockback = BiomeKnockbackMultiplier();
@@ -4719,7 +5106,7 @@ void Game::DetonateAt(Vector3 position, int ownerTeamId, int ownerPlayerId, floa
         createFireZone ? radius : radius * 0.24f,
         0.55f,
         createFireZone ? WorldEffectKind::FireZone : WorldEffectKind::Burst);
-    cameraController_.AddShake(0.18f + radius * 0.04f, 0.24f);
+    AddCameraShake(0.18f + radius * 0.04f, 0.24f);
     audio_.PlayCoreDestroyed();
 }
 
@@ -4779,7 +5166,8 @@ void Game::UpdateCamera(float dt)
         return;
     }
 
-    const float targetFov = fov_ + (player->IsSprinting() ? 6.0f : 0.0f);
+    fovKick_ = std::max(0.0f, fovKick_ - fovKick_ * std::min(1.0f, dt * 7.0f));
+    const float targetFov = fov_ + (player->IsSprinting() ? 6.0f : 0.0f) + fovKick_;
     gameplayFov_ += (targetFov - gameplayFov_) * std::min(1.0f, dt * 12.0f);
     cameraController_.SetFov(gameplayFov_);
     cameraController_.Update(player->GetPosition(), dt);
@@ -4916,7 +5304,7 @@ void Game::UpdateLocalPlayer(float dt)
     {
         const float strength = std::min(0.42f, 0.12f + (fallDistance - 3.0f) * 0.055f + std::fabs(fallingVelocity) * 0.008f);
         AddWorldEffect(player->GetPosition(), Color { 210, 220, 235, 255 }, 0.22f + strength, 0.25f);
-        cameraController_.AddShake(strength, 0.16f);
+        AddCameraShake(strength, 0.16f);
         audio_.PlayLanding();
         localAirPeakY_ = player->GetPosition().y;
     }
@@ -4970,8 +5358,9 @@ void Game::UpdatePickups(float dt)
             }
         }
 
-        for (Player& player : players_)
+        for (std::size_t playerOffset = 0; playerOffset < players_.size(); ++playerOffset)
         {
+            Player& player = players_[(simulationOrderOffset_ + playerOffset) % players_.size()];
             if (!player.IsAlive())
             {
                 continue;
@@ -5236,7 +5625,7 @@ void Game::UpdateProjectiles(float dt)
                 }
                 if (DistanceSquared(player.GetPosition(), projectile.position) <= 1.05f)
                 {
-                    NoteDamageCredit(player.GetId(), projectile.ownerId);
+                    NoteDamageCredit(player.GetId(), projectile.ownerId, projectile.fireZone ? "коктейлем Молотова" : "снарядом");
                     player.Damage(projectile.damage);
                     const float knockback = BiomeKnockbackMultiplier();
                     player.ApplyKnockback(Vector3 { projectile.velocity.x * 0.12f * knockback, 1.4f * knockback, projectile.velocity.z * 0.12f * knockback });
@@ -5304,7 +5693,7 @@ void Game::UpdateHazardZones(float dt)
             }
             if (DistanceSquared(player.GetPosition(), zone.position) <= zone.radius * zone.radius)
             {
-                NoteDamageCredit(player.GetId(), zone.ownerPlayerId);
+                NoteDamageCredit(player.GetId(), zone.ownerPlayerId, zone.blueFire ? "синим огнем" : "огнем");
                 player.Damage(zone.damagePerTick);
                 AddWorldEffect(player.GetPosition(), zone.blueFire ? Color { 92, 164, 255, 255 } : Color { 255, 118, 70, 255 }, 0.22f, 0.18f);
             }
@@ -5385,6 +5774,43 @@ void Game::UpdateHeroPassives(float dt)
                     player.AddHeroUltimateCharge(chargeGain);
                 }
             }
+        }
+        else if (player.GetHeroId() == HeroId::Likho && player.IsAlive())
+        {
+            bool insideEnemyBase = false;
+            for (const EnergyCore& core : cores_)
+            {
+                if (!core.IsAlive() || core.GetTeamId() == player.GetTeamId())
+                {
+                    continue;
+                }
+                const Vector3 corePosition = world_.GridToWorld(core.GetBlockPosition());
+                if (DistanceSquared(player.GetPosition(), corePosition) <= 144.0f)
+                {
+                    insideEnemyBase = true;
+                    if (heroState.ultimate.active && DistanceSquared(player.GetPosition(), corePosition) <= 49.0f)
+                    {
+                        heroState.ultimate.active = false;
+                        heroState.ultimate.activeTimer = 0.0f;
+                        heroState.likhoDisguiseTeamId = -1;
+                        if (player.IsLocal())
+                        {
+                            AddEventMessage("Кор раскрыл маскировку Лихо", HeroAccentColor(HeroId::Likho), 2.0f);
+                        }
+                    }
+                    break;
+                }
+            }
+            if (heroState.likhoInsideEnemyBase && !insideEnemyBase)
+            {
+                player.ActivateSpeedBoost(4.0f);
+                player.AddHeroUltimateCharge(8.0f);
+                if (player.IsLocal())
+                {
+                    AddFloatingText("побег", player.GetPosition(), HeroAccentColor(HeroId::Likho));
+                }
+            }
+            heroState.likhoInsideEnemyBase = insideEnemyBase;
         }
         heroState.radonProtected = radonProtected;
         heroState.radonOverloaded = radonOverloaded;
@@ -5770,7 +6196,7 @@ void Game::UpdateBromDevices(float dt)
             targetPoint.z - drone.position.z
         });
         const int targetHealthBefore = target->GetHealth();
-        NoteDamageCredit(target->GetId(), drone.ownerPlayerId);
+        NoteDamageCredit(target->GetId(), drone.ownerPlayerId, "турелью Брома");
         target->Damage(6);
         if (targetHealthBefore > 0 && target->GetHealth() <= 0 && drone.ownerPlayerId >= 0)
         {
@@ -5934,8 +6360,166 @@ void Game::UpdateKonvoyDevices(float dt)
         konvoyDomes_.end());
 }
 
+void Game::UpdateLikhoBleeds(float dt)
+{
+    for (LikhoBleed& bleed : likhoBleeds_)
+    {
+        bleed.lifetime -= dt;
+        bleed.tickTimer -= dt;
+        if (bleed.tickTimer > 0.0f)
+        {
+            continue;
+        }
+        bleed.tickTimer = 1.0f;
+        for (Player& target : players_)
+        {
+            if (target.GetId() != bleed.targetPlayerId || !target.IsAlive() || target.IsEliminated())
+            {
+                continue;
+            }
+            const int damage = 2 + std::min(3, bleed.stacks);
+            NoteDamageCredit(target.GetId(), bleed.ownerPlayerId, "кровотечением Лихо");
+            target.Damage(damage);
+            AddFloatingText("кровотечение -" + std::to_string(damage), target.GetPosition(), HeroAccentColor(HeroId::Likho));
+            break;
+        }
+    }
+    likhoBleeds_.erase(
+        std::remove_if(likhoBleeds_.begin(), likhoBleeds_.end(), [](const LikhoBleed& bleed) { return bleed.lifetime <= 0.0f; }),
+        likhoBleeds_.end());
+}
+
+void Game::UpdateSvidetelEffects(float dt)
+{
+    for (SvidetelPhaseBlock& phased : svidetelPhaseBlocks_)
+    {
+        phased.timer -= dt;
+        if (phased.timer <= 0.0f && world_.IsAir(phased.position))
+        {
+            world_.PlaceBlock(phased.position, phased.block, true);
+            AddWorldEffect(world_.GridToWorld(phased.position), HeroAccentColor(HeroId::Svidetel), 0.28f, 0.35f);
+            phased.timer = -1.0f;
+        }
+    }
+    svidetelPhaseBlocks_.erase(
+        std::remove_if(svidetelPhaseBlocks_.begin(), svidetelPhaseBlocks_.end(), [](const SvidetelPhaseBlock& phased) { return phased.timer < 0.0f; }),
+        svidetelPhaseBlocks_.end());
+
+    for (SvidetelEcho& echo : svidetelEchoes_)
+    {
+        echo.lifetime -= dt;
+        echo.fireCooldown -= dt;
+        echo.flashTimer = std::max(0.0f, echo.flashTimer - dt);
+        if (echo.fireCooldown > 0.0f)
+        {
+            continue;
+        }
+        Player* target = nullptr;
+        float bestDistance = echo.armed ? 100.0f : 64.0f;
+        for (Player& candidate : players_)
+        {
+            if (!candidate.IsAlive() || candidate.IsEliminated() || candidate.GetTeamId() == echo.ownerTeamId)
+            {
+                continue;
+            }
+            const float distance = DistanceSquared(candidate.GetPosition(), echo.position);
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                target = &candidate;
+            }
+        }
+        echo.fireCooldown = echo.armed ? 1.35f : 2.0f;
+        if (target == nullptr)
+        {
+            continue;
+        }
+        echo.lastTarget = target->GetPosition();
+        echo.flashTimer = 0.28f;
+        for (Player& owner : players_)
+        {
+            if (owner.GetId() == echo.ownerPlayerId)
+            {
+                owner.AddHeroUltimateCharge(echo.armed ? 3.0f : 5.0f);
+                break;
+            }
+        }
+        if (echo.armed)
+        {
+            NoteDamageCredit(target->GetId(), echo.ownerPlayerId, "Эхом Свидетеля");
+            target->Damage(5);
+            AddFloatingText("эхо -5", target->GetPosition(), HeroAccentColor(HeroId::Svidetel));
+        }
+    }
+    svidetelEchoes_.erase(
+        std::remove_if(svidetelEchoes_.begin(), svidetelEchoes_.end(), [](const SvidetelEcho& echo) { return echo.lifetime <= 0.0f; }),
+        svidetelEchoes_.end());
+}
+
 void Game::UpdatePassiveRegeneration(float dt)
 {
+    // Sudden death: the collapsed arena drains everyone instead of healing,
+    // so the final brawl always resolves into a winner.
+    if (coreCollapseTriggered_)
+    {
+        suddenDeathDecayTimer_ += dt;
+        if (suddenDeathDecayTimer_ >= 2.5f)
+        {
+            suddenDeathDecayTimer_ = 0.0f;
+            int bestScore = std::numeric_limits<int>::min();
+            std::vector<int> tiedTeams;
+            for (const Team& team : teams_)
+            {
+                if (!IsTeamActiveForMode(team.id))
+                {
+                    continue;
+                }
+                int score = 0;
+                for (const Player& player : players_)
+                {
+                    if (player.GetTeamId() != team.id)
+                    {
+                        continue;
+                    }
+                    if (player.IsAlive() && !player.IsEliminated())
+                    {
+                        score += player.GetHealth() * 1000;
+                    }
+                }
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    tiedTeams.assign(1, team.id);
+                }
+                else if (score == bestScore)
+                {
+                    tiedTeams.push_back(team.id);
+                }
+            }
+            if (!tiedTeams.empty())
+            {
+                suddenDeathTiebreakTeamId_ = tiedTeams[GetRandomValue(0, static_cast<int>(tiedTeams.size()) - 1)];
+            }
+            for (Player& player : players_)
+            {
+                if (!player.IsAlive() || player.IsEliminated())
+                {
+                    continue;
+                }
+                player.Damage(3);
+                if (player.GetId() == localPlayerId_)
+                {
+                    damageFlashTimer_ = std::max(damageFlashTimer_, 0.35f);
+                }
+                if (!player.IsAlive())
+                {
+                    AddKillFeed(player.GetName() + " поглощен распадом арены", Color { 255, 118, 118, 255 }, 5.0f);
+                }
+            }
+        }
+        return;
+    }
+
     passiveRegenTimer_ += dt;
     if (passiveRegenTimer_ < 2.0f)
     {
@@ -5956,6 +6540,10 @@ void Game::UpdatePassiveRegeneration(float dt)
 
 void Game::UpdateBaseHealing(float dt)
 {
+    if (coreCollapseTriggered_)
+    {
+        return;
+    }
     baseHealTimer_ += dt;
     if (baseHealTimer_ < 0.25f)
     {
@@ -5983,6 +6571,7 @@ void Game::UpdateFeedback(float dt)
 {
     hitMarkerTimer_ = std::max(0.0f, hitMarkerTimer_ - dt);
     damageFlashTimer_ = std::max(0.0f, damageFlashTimer_ - dt);
+    localDeathOverlayTimer_ = std::max(0.0f, localDeathOverlayTimer_ - dt);
 
     for (WorldEffect& effect : worldEffects_)
     {
@@ -6220,7 +6809,7 @@ void Game::UpdateAttackOrBreak(float dt)
     attackChargeActive_ = false;
     attackChargeTimer_ = 0.0f;
 
-    const std::optional<RaycastHit> hit = RaycastFromAim(*player, 5.5f);
+    const std::optional<RaycastHit> hit = RaycastFromAim(*player, 4.5f);
     if (!hit.has_value())
     {
         ResetBreakProgress();
@@ -6247,6 +6836,27 @@ void Game::UpdateAttackOrBreak(float dt)
     {
         ResetBreakProgress();
         return;
+    }
+
+    if (!isCore && player->GetHeroId() == HeroId::Likho)
+    {
+        const bool allyNearby = std::any_of(
+            players_.begin(), players_.end(),
+            [player](const Player& candidate)
+            {
+                return candidate.GetId() != player->GetId()
+                    && candidate.GetTeamId() == player->GetTeamId()
+                    && candidate.IsAlive()
+                    && DistanceSquared(candidate.GetPosition(), player->GetPosition()) <= 64.0f;
+            });
+        if (!allyNearby)
+        {
+            requiredSeconds *= 0.75f;
+        }
+        if (player->GetHeroState().active2.active)
+        {
+            requiredSeconds *= 0.72f;
+        }
     }
 
     if (!breakProgress_.visible || breakProgress_.target != hit->block || breakProgress_.isCore != isCore)
@@ -6409,17 +7019,9 @@ PlacementPreview Game::BuildPlacementPreview(const Player& player) const
             player.GetPosition().z + flatForward.z * forwardDistance
         });
     }
-    else if (currentInput_.sneak)
-    {
-        placePos = world_.WorldToGrid(Vector3 {
-            player.GetPosition().x,
-            player.GetPosition().y - 1.08f,
-            player.GetPosition().z
-        });
-    }
     else
     {
-        const std::optional<RaycastHit> hit = RaycastFromAim(player, 5.7f);
+        const std::optional<RaycastHit> hit = RaycastFromAim(player, 4.5f);
         if (hit.has_value())
         {
             placePos = hit->adjacent;
@@ -6668,6 +7270,16 @@ void Game::HandleDeathsAndRespawns()
             const bool voidDeath = player.GetPosition().y < -12.0f;
             const int killerId = DeathCreditFor(player.GetId());
             int killerTeamId = -1;
+            std::string killerName = "Окружение";
+            std::string deathCause = voidDeath ? "падение в воид" : "опасность арены";
+            for (const DamageCredit& credit : damageCredits_)
+            {
+                if (credit.targetId == player.GetId() && credit.timer > 0.0f)
+                {
+                    deathCause = credit.cause;
+                    break;
+                }
+            }
             if (killerId >= 0)
             {
                 for (const Player& candidate : players_)
@@ -6675,11 +7287,18 @@ void Game::HandleDeathsAndRespawns()
                     if (candidate.GetId() == killerId)
                     {
                         killerTeamId = candidate.GetTeamId();
+                        killerName = candidate.GetName();
                         break;
                     }
                 }
             }
             HandleDeathInventory(player, killerId);
+            if (player.GetHeroId() == HeroId::Svidetel)
+            {
+                svidetelEchoes_.push_back(SvidetelEcho {
+                    player.GetPosition(), player.GetId(), player.GetTeamId(), 12.0f, 0.0f, false, {}, 0.0f });
+                player.AddHeroUltimateCharge(8.0f);
+            }
             damageCredits_.erase(
                 std::remove_if(
                     damageCredits_.begin(),
@@ -6735,9 +7354,12 @@ void Game::HandleDeathsAndRespawns()
             audio_.PlayDeath();
             if (player.IsLocal())
             {
+                localDeathKiller_ = killerName;
+                localDeathCause_ = deathCause;
+                localDeathOverlayTimer_ = finalDeath ? 7.0f : 4.0f;
                 ++stats_.deaths;
                 damageFlashTimer_ = 0.9f;
-                cameraController_.AddShake(0.28f, 0.25f);
+                AddCameraShake(0.28f, 0.25f);
                 audio_.PlayDenied();
                 if (finalDeath)
                 {
@@ -6797,8 +7419,16 @@ bool Game::IsLocalPlayerInShopZone() const
         return false;
     }
 
-    const Team* team = FindTeam(player->GetTeamId());
-    return team != nullptr && shop_.IsPlayerInShop(*player, *team);
+    // Any team's shop serves any customer (Hypixel rule): raiding an enemy
+    // base and restocking right there is a legitimate tactic.
+    for (const Team& team : teams_)
+    {
+        if (shop_.IsPlayerInShop(*player, team))
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool Game::WouldBlockOverlapPlayer(const GridPos& pos, int underfootPlayerId) const
@@ -7211,12 +7841,20 @@ int Game::EffectiveToolLevel(const Player& player) const
 
 void Game::SetMessage(std::string message, float seconds)
 {
+    if (suppressLocalFeedback_)
+    {
+        return;
+    }
     message_ = std::move(message);
     messageTimer_ = seconds;
 }
 
 void Game::AddEventMessage(std::string message, Color color, float seconds)
 {
+    if (suppressLocalFeedback_)
+    {
+        return;
+    }
     eventMessages_.push_back(EventMessage { std::move(message), color, seconds, 0.0f });
     if (eventMessages_.size() > 5)
     {
@@ -7301,8 +7939,13 @@ void Game::ApplyWindowSettings()
     const int index = std::clamp(resolutionIndex_, 0, static_cast<int>(std::size(kWindowResolutions)) - 1);
     const WindowResolution& resolution = kWindowResolutions[index];
 
-    if (fullscreen_)
+    const bool borderless = IsWindowState(FLAG_BORDERLESS_WINDOWED_MODE);
+    if (windowMode_ == 2)
     {
+        if (borderless)
+        {
+            ToggleBorderlessWindowed();
+        }
         if (!IsWindowFullscreen())
         {
             const int monitor = GetCurrentMonitor();
@@ -7316,6 +7959,18 @@ void Game::ApplyWindowSettings()
     {
         ToggleFullscreen();
     }
+    if (windowMode_ == 1)
+    {
+        if (!IsWindowState(FLAG_BORDERLESS_WINDOWED_MODE))
+        {
+            ToggleBorderlessWindowed();
+        }
+        return;
+    }
+    if (IsWindowState(FLAG_BORDERLESS_WINDOWED_MODE))
+    {
+        ToggleBorderlessWindowed();
+    }
     const int monitor = GetCurrentMonitor();
     const int maxWidth = std::max(640, GetMonitorWidth(monitor) - 80);
     const int maxHeight = std::max(360, GetMonitorHeight(monitor) - 80);
@@ -7327,6 +7982,11 @@ void Game::ApplyFrameRateLimit()
 {
     const int index = std::clamp(fpsLimitIndex_, 0, static_cast<int>(std::size(kFpsLimits)) - 1);
     SetTargetFPS(kFpsLimits[index].fps);
+}
+
+void Game::AddCameraShake(float strength, float seconds)
+{
+    cameraController_.AddShake(strength * (reducedCameraShake_ ? 0.25f : 1.0f), seconds);
 }
 
 void Game::CenterWindowOnCurrentMonitor() const
@@ -7379,7 +8039,17 @@ void Game::LoadSettings()
         }
         else if (key == "fullscreen")
         {
-            file >> fullscreen_;
+            bool fullscreen = false;
+            file >> fullscreen;
+            windowMode_ = fullscreen ? 2 : 0;
+        }
+        else if (key == "windowMode")
+        {
+            file >> windowMode_;
+        }
+        else if (key == "masterVolume")
+        {
+            file >> masterVolume_;
         }
         else if (key == "showHints")
         {
@@ -7388,6 +8058,14 @@ void Game::LoadSettings()
         else if (key == "showMinimap")
         {
             file >> showMinimap_;
+        }
+        else if (key == "reducedCameraShake")
+        {
+            file >> reducedCameraShake_;
+        }
+        else if (key == "reducedFlashes")
+        {
+            file >> reducedFlashes_;
         }
         else if (key == "selectedMode")
         {
@@ -7539,6 +8217,8 @@ void Game::LoadSettings()
 
     resolutionIndex_ = std::clamp(resolutionIndex_, 0, static_cast<int>(std::size(kWindowResolutions)) - 1);
     fpsLimitIndex_ = std::clamp(fpsLimitIndex_, 0, static_cast<int>(std::size(kFpsLimits)) - 1);
+    windowMode_ = std::clamp(windowMode_, 0, 2);
+    masterVolume_ = std::clamp(masterVolume_, 0.0f, 1.0f);
     selectedTeamSize_ = std::clamp(selectedTeamSize_, 1, 4);
     selectedTeamId_ = std::clamp(selectedTeamId_, 0, TeamCountForMode() - 1);
     selectedBotCount_ = std::clamp(selectedBotCount_, 0, MaxBotCountForSelection());
@@ -7591,9 +8271,12 @@ void Game::SaveSettings() const
     file << "fov " << fov_ << "\n";
     file << "resolutionIndex " << resolutionIndex_ << "\n";
     file << "fpsLimitIndex " << fpsLimitIndex_ << "\n";
-    file << "fullscreen " << fullscreen_ << "\n";
+    file << "windowMode " << windowMode_ << "\n";
+    file << "masterVolume " << masterVolume_ << "\n";
     file << "showHints " << showControlHints_ << "\n";
     file << "showMinimap " << showMinimap_ << "\n";
+    file << "reducedCameraShake " << reducedCameraShake_ << "\n";
+    file << "reducedFlashes " << reducedFlashes_ << "\n";
     file << "selectedMode " << static_cast<int>(selectedMode_) << "\n";
     file << "selectedTeamId " << selectedTeamId_ << "\n";
     file << "selectedTeamSize " << selectedTeamSize_ << "\n";
@@ -7816,11 +8499,19 @@ const char* Game::KeyLabel(int key) const
 
 void Game::AddWorldEffect(Vector3 position, Color color, float radius, float seconds)
 {
+    if (suppressLocalFeedback_)
+    {
+        return;
+    }
     worldEffects_.push_back(WorldEffect { position, Vector3 { 0.0f, 0.0f, 1.0f }, color, radius, seconds, 0.0f, WorldEffectKind::Burst });
 }
 
 void Game::AddWorldEffect(Vector3 position, Vector3 direction, Color color, float radius, float seconds, WorldEffectKind kind)
 {
+    if (suppressLocalFeedback_)
+    {
+        return;
+    }
     const Vector3 flatDirection = Normalize2D(direction);
     const Vector3 safeDirection = Length2D(flatDirection) > 0.0001f ? flatDirection : Vector3 { 0.0f, 0.0f, 1.0f };
     worldEffects_.push_back(WorldEffect { position, safeDirection, color, radius, seconds, 0.0f, kind });
@@ -7828,11 +8519,19 @@ void Game::AddWorldEffect(Vector3 position, Vector3 direction, Color color, floa
 
 void Game::AddFloatingText(std::string text, Vector3 position, Color color)
 {
+    if (suppressLocalFeedback_)
+    {
+        return;
+    }
     floatingTexts_.push_back(FloatingText { std::move(text), position, color, 0.8f, 0.0f });
 }
 
 void Game::AddKillFeed(std::string text, Color color, float seconds)
 {
+    if (suppressLocalFeedback_)
+    {
+        return;
+    }
     killFeed_.push_back(KillFeedEntry { std::move(text), color, seconds, 0.0f });
     if (killFeed_.size() > 6)
     {
@@ -7862,15 +8561,85 @@ void Game::RegisterCombatEvent(const CombatEvent& event, const std::string& mess
     }
 
     int attackerTeamId = -1;
+    Player* attackerPlayer = nullptr;
+    Player* targetPlayer = nullptr;
     if (event.attackerId >= 0)
     {
-        for (const Player& candidate : players_)
+        for (Player& candidate : players_)
         {
             if (candidate.GetId() == event.attackerId)
             {
                 attackerTeamId = candidate.GetTeamId();
-                break;
+                attackerPlayer = &candidate;
             }
+            if (candidate.GetId() == event.targetId)
+            {
+                targetPlayer = &candidate;
+            }
+        }
+    }
+
+    if (!event.coreHit && attackerPlayer != nullptr && targetPlayer != nullptr)
+    {
+        if (attackerPlayer->GetHeroId() == HeroId::Likho)
+        {
+            HeroRuntimeState& likhoState = attackerPlayer->MutableHeroState();
+            if (likhoState.active1.active)
+            {
+                const Vector3 fromTarget = Normalize2D(Vector3 {
+                    attackerPlayer->GetPosition().x - targetPlayer->GetPosition().x,
+                    0.0f,
+                    attackerPlayer->GetPosition().z - targetPlayer->GetPosition().z });
+                const bool backstab = Dot2D(targetPlayer->Forward(), fromTarget) < -0.35f;
+                likhoState.active1.active = false;
+                likhoState.active1.activeTimer = 0.0f;
+                if (backstab)
+                {
+                    const int bonusDamage = std::max(3, event.damage / 2);
+                    targetPlayer->Damage(bonusDamage);
+                    NoteDamageCredit(targetPlayer->GetId(), attackerPlayer->GetId(), "ударом Лихо в спину");
+                    attackerPlayer->AddHeroUltimateCharge(14.0f);
+                    AddFloatingText("в спину -" + std::to_string(bonusDamage), targetPlayer->GetPosition(), HeroAccentColor(HeroId::Likho));
+                }
+            }
+            if (likhoState.active2.active)
+            {
+                auto found = std::find_if(
+                    likhoBleeds_.begin(), likhoBleeds_.end(),
+                    [targetPlayer, attackerPlayer](const LikhoBleed& bleed)
+                    {
+                        return bleed.targetPlayerId == targetPlayer->GetId() && bleed.ownerPlayerId == attackerPlayer->GetId();
+                    });
+                if (found == likhoBleeds_.end())
+                {
+                    likhoBleeds_.push_back(LikhoBleed { targetPlayer->GetId(), attackerPlayer->GetId(), attackerPlayer->GetTeamId(), 6.0f, 0.8f, 1 });
+                }
+                else
+                {
+                    found->lifetime = 6.0f;
+                    found->stacks = std::min(4, found->stacks + 1);
+                }
+                attackerPlayer->AddHeroUltimateCharge(3.0f);
+            }
+            if (likhoState.ultimate.active)
+            {
+                likhoState.ultimate.active = false;
+                likhoState.ultimate.activeTimer = 0.0f;
+                likhoState.likhoDisguiseTeamId = -1;
+            }
+        }
+        if (targetPlayer->GetHeroId() == HeroId::Likho && targetPlayer->GetHeroState().ultimate.active)
+        {
+            HeroRuntimeState& targetState = targetPlayer->MutableHeroState();
+            targetState.ultimate.active = false;
+            targetState.ultimate.activeTimer = 0.0f;
+            targetState.likhoDisguiseTeamId = -1;
+        }
+        if (event.killed && attackerPlayer->GetHeroId() == HeroId::Svidetel)
+        {
+            svidetelEchoes_.push_back(SvidetelEcho {
+                targetPlayer->GetPosition(), attackerPlayer->GetId(), attackerPlayer->GetTeamId(), 12.0f, 0.0f, false, {}, 0.0f });
+            attackerPlayer->AddHeroUltimateCharge(10.0f);
         }
     }
 
@@ -7878,7 +8647,7 @@ void Game::RegisterCombatEvent(const CombatEvent& event, const std::string& mess
     {
         if (!event.coreHit && event.targetId >= 0)
         {
-            NoteDamageCredit(event.targetId, event.attackerId);
+            NoteDamageCredit(event.targetId, event.attackerId, CombatSystem::WeaponName(event.weapon));
         }
         PlayerMatchScore& attackerScore = GetPlayerScore(event.attackerId);
         if (event.killed)
@@ -7958,25 +8727,33 @@ void Game::RegisterCombatEvent(const CombatEvent& event, const std::string& mess
         if (event.coreHit)
         {
             audio_.PlayCoreHit();
-            cameraController_.AddShake(event.coreDestroyed ? 0.34f : 0.14f, event.coreDestroyed ? 0.34f : 0.16f);
+            AddCameraShake(event.coreDestroyed ? 0.34f : 0.14f, event.coreDestroyed ? 0.34f : 0.16f);
         }
         else
         {
             audio_.PlayHit();
-            cameraController_.AddShake(0.10f + std::min(0.12f, event.damage * 0.002f), 0.13f);
+            AddCameraShake(0.10f + std::min(0.12f, event.damage * 0.002f), 0.13f);
+        }
+        if (event.killed)
+        {
+            fovKick_ = std::max(fovKick_, 5.0f);
+        }
+        else if (event.combo || event.charged || event.sprintReset)
+        {
+            fovKick_ = std::max(fovKick_, 2.2f);
         }
     }
 
     if (event.targetId == localPlayerId_)
     {
         damageFlashTimer_ = 0.75f;
-        cameraController_.AddShake(0.24f, 0.20f);
+        AddCameraShake(0.24f, 0.20f);
         audio_.PlayHit();
     }
 
     if (event.coreDestroyed)
     {
-        cameraController_.AddShake(0.30f, 0.32f);
+        AddCameraShake(0.30f, 0.32f);
         audio_.PlayCoreDestroyed();
         AddKillFeed(std::string(TeamName(event.targetTeamId)) + " Core destroyed", Color { 255, 118, 118, 255 }, 7.0f);
     }

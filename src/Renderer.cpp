@@ -854,6 +854,7 @@ void DrawHeroDeviceVisual(const HeroDeviceVisual& device)
 {
     const Color bromColor = HeroUiColor(HeroId::Brom);
     const Color konvoyColor = HeroUiColor(HeroId::Konvoy);
+    const Color svidetelColor = HeroUiColor(HeroId::Svidetel);
     const float time = static_cast<float>(GetTime());
     const float pulse = 0.5f + 0.5f * std::sin(time * 8.0f + device.position.x * 0.7f + device.position.z * 0.4f);
     Vector3 forward = Normalize(device.direction);
@@ -899,6 +900,20 @@ void DrawHeroDeviceVisual(const HeroDeviceVisual& device)
         DrawCylinderWires(center, radius, radius, 0.075f, 48, Fade(konvoyColor, 0.72f));
         DrawSphereWires(Vector3 { center.x, center.y + 1.25f, center.z }, radius, 12, 20, Fade(konvoyColor, device.active ? 0.66f : 0.38f));
         DrawSphere(Vector3 { center.x, center.y + 1.25f, center.z }, 0.18f + pulse * 0.05f, Fade(WHITE, 0.54f));
+        return;
+    }
+    if (device.kind == HeroDeviceVisualKind::SvidetelEcho)
+    {
+        const Vector3 center { device.position.x, device.position.y + 0.85f, device.position.z };
+        const float alpha = device.temporary ? 0.38f : 0.68f;
+        DrawCube(center, 0.52f, 1.45f, 0.52f, Fade(svidetelColor, alpha));
+        DrawCubeWires(center, 0.58f, 1.52f, 0.58f, Fade(WHITE, 0.48f));
+        DrawSphere(Vector3 { center.x, center.y + 0.92f, center.z }, 0.28f, Fade(svidetelColor, alpha + 0.12f));
+        DrawSphereWires(center, std::max(0.45f, device.radius) + pulse * 0.08f, 8, 12, Fade(svidetelColor, 0.54f));
+        if (device.active)
+        {
+            DrawLine3D(center, Vector3 { device.target.x, device.target.y + 0.7f, device.target.z }, Fade(WHITE, 0.82f));
+        }
         return;
     }
 
@@ -1266,6 +1281,9 @@ void Renderer::RenderScene(
             break;
         }
     }
+    const bool svidetelContours = localPlayer != nullptr
+        && localPlayer->GetHeroId() == HeroId::Svidetel
+        && localPlayer->GetHeroState().ultimate.active;
 
     BeginMode3D(camera);
 
@@ -1356,6 +1374,10 @@ void Renderer::RenderScene(
         const Vector3 pos = generator.GetPosition();
         DrawCube(Vector3 { pos.x, pos.y + 0.18f, pos.z }, 0.85f, 0.35f, 0.85f, GetResourceColor(generator.GetType()));
         DrawSphere(Vector3 { pos.x, pos.y + 0.62f, pos.z }, 0.24f, WHITE);
+        if (svidetelContours)
+        {
+            DrawSphereWires(Vector3 { pos.x, pos.y + 0.62f, pos.z }, 0.42f, 8, 12, Fade(HeroUiColor(HeroId::Svidetel), 0.78f));
+        }
     }
 
     for (const EnergyCore& core : cores)
@@ -1386,6 +1408,10 @@ void Renderer::RenderScene(
         DrawCube(coreCenter, 0.92f * stageScale, 0.78f * stageScale, 0.92f * stageScale, Fade(teamColor, 0.70f + healthFraction * 0.22f));
         DrawSphere(Vector3 { pos.x, pos.y + 0.40f * stageScale, pos.z }, 0.18f + 0.08f * healthFraction, Color { 178, 245, 255, 255 });
         DrawCubeWires(coreCenter, 0.96f * stageScale, 0.82f * stageScale, 0.96f * stageScale, WHITE);
+        if (svidetelContours)
+        {
+            DrawSphereWires(coreCenter, 1.30f, 10, 18, Fade(HeroUiColor(HeroId::Svidetel), 0.74f));
+        }
         if (radonPrimedForCore)
         {
             const float pulse = 1.02f + 0.12f * std::sin(static_cast<float>(GetTime()) * 6.0f);
@@ -1416,13 +1442,18 @@ void Renderer::RenderScene(
         }
 
         const Team* team = FindTeam(teams, player.GetTeamId());
-        const Color baseColor = team != nullptr ? GetTeamColor(team->color) : WHITE;
+        const HeroRuntimeState& heroState = player.GetHeroState();
+        const Team* disguiseTeam = heroState.ultimate.active && heroState.likhoDisguiseTeamId >= 0
+            ? FindTeam(teams, heroState.likhoDisguiseTeamId)
+            : nullptr;
+        const Color baseColor = disguiseTeam != nullptr
+            ? GetTeamColor(disguiseTeam->color)
+            : (team != nullptr ? GetTeamColor(team->color) : WHITE);
         Color color = baseColor;
         const bool enemy = localTeamId >= 0 && player.GetTeamId() != localTeamId;
         const Vector3 pos = player.GetPosition();
         const bool radon = player.GetHeroId() == HeroId::Radon;
         const bool orbita = player.GetHeroId() == HeroId::Orbita;
-        const HeroRuntimeState& heroState = player.GetHeroState();
         const float anim = HeroAnimationFraction(heroState);
         float bodyPulse = 1.0f;
         float bodyLift = 0.0f;
@@ -1475,8 +1506,88 @@ void Renderer::RenderScene(
                 bodyPulse += 0.08f * (1.0f - anim * 0.5f);
             }
         }
-        const Vector3 drawPos { pos.x, pos.y + bodyLift, pos.z };
-        DrawCube(drawPos, 0.68f * bodyPulse, 1.7f * (0.98f + (bodyPulse - 1.0f) * 0.45f), 0.68f * bodyPulse, color);
+        if (player.GetHeroId() == HeroId::Likho && heroState.ultimate.active)
+        {
+            color = MixColor(color, HeroUiColor(HeroId::Likho), 0.18f + 0.10f * std::sin(static_cast<float>(GetTime()) * 13.0f));
+        }
+        if (svidetelContours && enemy)
+        {
+            DrawSphereWires(Vector3 { pos.x, pos.y + 0.25f, pos.z }, 1.15f, 10, 16, Fade(HeroUiColor(HeroId::Svidetel), 0.86f));
+        }
+        // Procedural character animation: walk cycle, jump stretch, sneak
+        // crouch, hurt flash and attack swing, all derived from gameplay
+        // state so bots and the local player read identically.
+        const Vector3 velocity = player.GetVelocity();
+        const float horizontalSpeed = std::sqrt(velocity.x * velocity.x + velocity.z * velocity.z);
+        const float walkAmplitude = std::clamp(horizontalSpeed / 6.5f, 0.0f, 1.0f) * (player.IsOnGround() ? 1.0f : 0.25f);
+        const float walkPhase = static_cast<float>(GetTime()) * (player.IsSprinting() ? 10.5f : 7.5f)
+            + static_cast<float>(player.GetId()) * 1.7f;
+        const float swingSin = std::sin(walkPhase) * walkAmplitude;
+        const float bobLift = std::fabs(std::sin(walkPhase * 2.0f)) * 0.035f * walkAmplitude;
+        const float stretch = player.IsOnGround()
+            ? 1.0f
+            : std::clamp(1.0f + std::fabs(velocity.y) * 0.016f, 1.0f, 1.12f);
+        const bool sneaking = player.IsSneaking();
+        const float sneakDrop = sneaking ? 0.14f : 0.0f;
+        const float hurtFlash = std::clamp(player.GetInvulnerabilityTimer() / 0.45f, 0.0f, 1.0f);
+        if (hurtFlash > 0.0f)
+        {
+            color = MixColor(color, Color { 255, 84, 84, 255 }, 0.55f * hurtFlash);
+        }
+        float attackSwing = 0.0f;
+        const float attackCdDuration = player.GetAttackCooldownDuration();
+        const float attackCdRemaining = player.GetAttackCooldownRemaining();
+        if (attackCdDuration > 0.01f && attackCdRemaining > 0.0f)
+        {
+            attackSwing = 1.0f - std::clamp((attackCdDuration - attackCdRemaining) / 0.26f, 0.0f, 1.0f);
+        }
+
+        const Vector3 animForward = player.Forward();
+        const Vector3 animRight { -animForward.z, 0.0f, animForward.x };
+        const Color limbColor = MixColor(color, Color { 20, 22, 30, 255 }, 0.35f);
+        const float torsoLift = bodyLift + bobLift - sneakDrop;
+
+        // Torso.
+        DrawCube(
+            Vector3 { pos.x, pos.y + 0.28f + torsoLift, pos.z },
+            0.60f * bodyPulse,
+            (sneaking ? 0.84f : 0.98f) * stretch * (0.98f + (bodyPulse - 1.0f) * 0.45f),
+            0.44f * bodyPulse,
+            color);
+
+        // Legs swing along the walk cycle, tucked together in the air.
+        const float legSwing = swingSin * 0.30f;
+        const float legHeight = (sneaking ? 0.66f : 0.78f) * stretch;
+        DrawCube(
+            Vector3 { pos.x + animRight.x * 0.17f + animForward.x * legSwing, pos.y - 0.46f, pos.z + animRight.z * 0.17f + animForward.z * legSwing },
+            0.20f, legHeight, 0.20f, limbColor);
+        DrawCube(
+            Vector3 { pos.x - animRight.x * 0.17f - animForward.x * legSwing, pos.y - 0.46f, pos.z - animRight.z * 0.17f - animForward.z * legSwing },
+            0.20f, legHeight, 0.20f, limbColor);
+
+        // Arms counter-swing; the weapon arm whips forward on attack.
+        const float armSwing = -swingSin * 0.26f;
+        const Vector3 leftArm {
+            pos.x - animRight.x * 0.42f - animForward.x * armSwing,
+            pos.y + 0.30f + torsoLift,
+            pos.z - animRight.z * 0.42f - animForward.z * armSwing
+        };
+        Vector3 rightArm {
+            pos.x + animRight.x * 0.42f + animForward.x * armSwing,
+            pos.y + 0.30f + torsoLift,
+            pos.z + animRight.z * 0.42f + animForward.z * armSwing
+        };
+        if (attackSwing > 0.0f)
+        {
+            rightArm = Vector3 {
+                pos.x + animRight.x * 0.34f + animForward.x * (0.30f + attackSwing * 0.28f),
+                pos.y + 0.38f + attackSwing * 0.22f + torsoLift,
+                pos.z + animRight.z * 0.34f + animForward.z * (0.30f + attackSwing * 0.28f)
+            };
+        }
+        DrawCube(leftArm, 0.16f, 0.60f, 0.16f, limbColor);
+        DrawCube(rightArm, 0.16f, 0.60f, 0.16f, limbColor);
+
         Color headColor = Color { 238, 230, 210, 255 };
         if (radon)
         {
@@ -1486,7 +1597,11 @@ void Renderer::RenderScene(
         {
             headColor = MixColor(headColor, Color { 255, 210, 202, 255 }, std::clamp(heroState.orbitaPulseTimer / 3.0f, 0.0f, 0.45f));
         }
-        DrawSphere(Vector3 { pos.x, pos.y + 1.08f + bodyLift, pos.z }, 0.36f * ((radon || orbita) ? bodyPulse : 1.0f), headColor);
+        if (hurtFlash > 0.0f)
+        {
+            headColor = MixColor(headColor, Color { 255, 84, 84, 255 }, 0.45f * hurtFlash);
+        }
+        DrawSphere(Vector3 { pos.x, pos.y + 1.08f + torsoLift, pos.z }, 0.36f * ((radon || orbita) ? bodyPulse : 1.0f), headColor);
         if (enemy)
         {
             DrawCylinderWires(Vector3 { pos.x, pos.y - 0.84f, pos.z }, 0.62f, 0.62f, 0.04f, 24, Color { 255, 118, 118, 220 });
@@ -1552,10 +1667,21 @@ void Renderer::RenderScene(
             {
                 itemTint = GetBlockColor(Block { *block, player.GetTeamId(), true }, teams);
             }
+            // The held item follows the attack swing: forward lunge plus a
+            // downward tilt right after the strike.
+            const Vector3 swingForward {
+                forward.x,
+                -attackSwing * 0.85f,
+                forward.z
+            };
             DrawHeldItemModel(
                 heldItem,
-                Vector3 { pos.x + right.x * 0.42f + forward.x * 0.14f, pos.y + 0.36f, pos.z + right.z * 0.42f + forward.z * 0.14f },
-                forward,
+                Vector3 {
+                    pos.x + right.x * 0.42f + forward.x * (0.14f + attackSwing * 0.40f),
+                    pos.y + 0.36f + attackSwing * 0.16f,
+                    pos.z + right.z * 0.42f + forward.z * (0.14f + attackSwing * 0.40f)
+                },
+                attackSwing > 0.0f ? swingForward : forward,
                 right,
                 Vector3 { 0.0f, 1.0f, 0.0f },
                 0.72f,
@@ -1581,15 +1707,15 @@ void Renderer::RenderScene(
 
     if (hideLocalPlayer && !localHeldItem.IsEmpty())
     {
-        const Vector3 cameraForward = Normalize(Vector3 {
+        const Vector3 handForward = Normalize(Vector3 {
             camera.target.x - camera.position.x,
             camera.target.y - camera.position.y,
             camera.target.z - camera.position.z
         });
-        const Vector3 cameraRight = Normalize(Cross(cameraForward, camera.up));
-        const Vector3 cameraUp = Normalize(Cross(cameraRight, cameraForward));
+        const Vector3 cameraRight = Normalize(Cross(handForward, camera.up));
+        const Vector3 cameraUp = Normalize(Cross(cameraRight, handForward));
         const Vector3 hand = Add(
-            Add(camera.position, Scale(cameraForward, 0.52f)),
+            Add(camera.position, Scale(handForward, 0.52f)),
             Add(Scale(cameraRight, 0.44f), Scale(cameraUp, -0.34f)));
         const std::optional<BlockType> block = ItemToBlock(localHeldItem.type);
         const Texture2D* blockTexture = block.has_value() ? GetBlockTexture(*block) : nullptr;
@@ -1599,7 +1725,7 @@ void Renderer::RenderScene(
             itemTint = GetBlockColor(Block { *block, localTeamId, true }, teams);
         }
         const float firstPersonScale = ItemIsBlock(localHeldItem.type) ? 0.54f : 0.66f;
-        DrawHeldItemModel(localHeldItem, hand, cameraForward, cameraRight, cameraUp, firstPersonScale, GetItemTexture(localHeldItem.type), blockTexture, itemTint, true);
+        DrawHeldItemModel(localHeldItem, hand, handForward, cameraRight, cameraUp, firstPersonScale, GetItemTexture(localHeldItem.type), blockTexture, itemTint, true);
     }
     if (hideLocalPlayer
         && localPlayer != nullptr
@@ -1611,22 +1737,22 @@ void Renderer::RenderScene(
             || heroState.ultimatePrimed
             || heroState.radonOverloaded)
         {
-            const Vector3 cameraForward = Normalize(Vector3 {
+            const Vector3 heroForward = Normalize(Vector3 {
                 camera.target.x - camera.position.x,
                 camera.target.y - camera.position.y,
                 camera.target.z - camera.position.z
             });
-            const Vector3 cameraRight = Normalize(Cross(cameraForward, camera.up));
-            const Vector3 cameraUp = Normalize(Cross(cameraRight, cameraForward));
+            const Vector3 cameraRight = Normalize(Cross(heroForward, camera.up));
+            const Vector3 cameraUp = Normalize(Cross(cameraRight, heroForward));
             const float anim = HeroAnimationFraction(heroState);
             const Color radonColor = heroState.radonOverloaded ? Color { 255, 118, 70, 255 } : Color { 92, 164, 255, 255 };
-            const Vector3 leftHand = Add(Add(camera.position, Scale(cameraForward, 0.58f + anim * 0.12f)), Add(Scale(cameraRight, -0.32f), Scale(cameraUp, -0.30f)));
-            const Vector3 rightHand = Add(Add(camera.position, Scale(cameraForward, 0.58f + anim * 0.12f)), Add(Scale(cameraRight, 0.32f), Scale(cameraUp, -0.30f)));
+            const Vector3 leftHand = Add(Add(camera.position, Scale(heroForward, 0.58f + anim * 0.12f)), Add(Scale(cameraRight, -0.32f), Scale(cameraUp, -0.30f)));
+            const Vector3 rightHand = Add(Add(camera.position, Scale(heroForward, 0.58f + anim * 0.12f)), Add(Scale(cameraRight, 0.32f), Scale(cameraUp, -0.30f)));
             const float pulse = 0.09f + 0.05f * std::sin(static_cast<float>(GetTime()) * 12.0f);
             DrawSphere(leftHand, pulse, Fade(radonColor, 0.62f));
             DrawSphere(rightHand, pulse, Fade(radonColor, 0.62f));
-            DrawLine3D(leftHand, Add(leftHand, Scale(cameraForward, 0.55f + anim * 0.35f)), Fade(radonColor, 0.74f));
-            DrawLine3D(rightHand, Add(rightHand, Scale(cameraForward, 0.55f + anim * 0.35f)), Fade(radonColor, 0.74f));
+            DrawLine3D(leftHand, Add(leftHand, Scale(heroForward, 0.55f + anim * 0.35f)), Fade(radonColor, 0.74f));
+            DrawLine3D(rightHand, Add(rightHand, Scale(heroForward, 0.55f + anim * 0.35f)), Fade(radonColor, 0.74f));
         }
     }
     if (hideLocalPlayer
@@ -1636,22 +1762,22 @@ void Renderer::RenderScene(
         const HeroRuntimeState& heroState = localPlayer->GetHeroState();
         if (heroState.animationState == HeroAnimationState::Cast || heroState.orbitaPulseTimer > 0.0f)
         {
-            const Vector3 cameraForward = Normalize(Vector3 {
+            const Vector3 heroForward = Normalize(Vector3 {
                 camera.target.x - camera.position.x,
                 camera.target.y - camera.position.y,
                 camera.target.z - camera.position.z
             });
-            const Vector3 cameraRight = Normalize(Cross(cameraForward, camera.up));
-            const Vector3 cameraUp = Normalize(Cross(cameraRight, cameraForward));
+            const Vector3 cameraRight = Normalize(Cross(heroForward, camera.up));
+            const Vector3 cameraUp = Normalize(Cross(cameraRight, heroForward));
             const float anim = HeroAnimationFraction(heroState);
             const float pulse = std::clamp(heroState.orbitaPulseTimer / 3.0f, 0.0f, 1.0f);
             const Color orbitaColor = HeroUiColor(HeroId::Orbita);
-            const Vector3 leftHand = Add(Add(camera.position, Scale(cameraForward, 0.62f + anim * 0.10f)), Add(Scale(cameraRight, -0.34f), Scale(cameraUp, -0.30f)));
-            const Vector3 rightHand = Add(Add(camera.position, Scale(cameraForward, 0.62f + anim * 0.10f)), Add(Scale(cameraRight, 0.34f), Scale(cameraUp, -0.30f)));
+            const Vector3 leftHand = Add(Add(camera.position, Scale(heroForward, 0.62f + anim * 0.10f)), Add(Scale(cameraRight, -0.34f), Scale(cameraUp, -0.30f)));
+            const Vector3 rightHand = Add(Add(camera.position, Scale(heroForward, 0.62f + anim * 0.10f)), Add(Scale(cameraRight, 0.34f), Scale(cameraUp, -0.30f)));
             DrawSphere(leftHand, 0.08f + pulse * 0.06f, Fade(WHITE, 0.72f));
             DrawSphere(rightHand, 0.08f + pulse * 0.06f, Fade(orbitaColor, 0.70f));
-            DrawLine3D(leftHand, Add(leftHand, Scale(cameraForward, 0.72f + pulse * 0.36f)), Fade(WHITE, 0.74f));
-            DrawLine3D(rightHand, Add(rightHand, Scale(cameraForward, 0.72f + pulse * 0.36f)), Fade(orbitaColor, 0.64f));
+            DrawLine3D(leftHand, Add(leftHand, Scale(heroForward, 0.72f + pulse * 0.36f)), Fade(WHITE, 0.74f));
+            DrawLine3D(rightHand, Add(rightHand, Scale(heroForward, 0.72f + pulse * 0.36f)), Fade(orbitaColor, 0.64f));
         }
     }
 
@@ -2174,9 +2300,12 @@ void Renderer::RenderUI(
     if (winnerTeamId.has_value())
     {
         const Team* winner = FindTeam(teams, *winnerTeamId);
-        const std::string title = (winner != nullptr ? winner->name : "Unknown") + " team wins!";
+        const bool localVictory = localPlayer.GetTeamId() == *winnerTeamId;
+        const std::string title = localVictory ? "VICTORY" : "DEFEAT";
+        const std::string winnerText = (winner != nullptr ? winner->name : "Unknown") + " team wins";
         DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Fade(BLACK, 0.45f));
-        DrawText(title.c_str(), GetScreenWidth() / 2 - MeasureText(title.c_str(), 42) / 2, GetScreenHeight() / 2 - 42, 42, WHITE);
+        DrawText(title.c_str(), GetScreenWidth() / 2 - MeasureText(title.c_str(), 48) / 2, GetScreenHeight() / 2 - 68, 48, localVictory ? Color { 142, 255, 170, 255 } : Color { 255, 138, 138, 255 });
+        DrawText(winnerText.c_str(), GetScreenWidth() / 2 - MeasureText(winnerText.c_str(), 24) / 2, GetScreenHeight() / 2 - 18, 24, WHITE);
         const std::string combatStats = "Time " + std::to_string(static_cast<int>(matchTime)) + "s"
             + " | K/D " + std::to_string(stats.kills) + "/" + std::to_string(stats.deaths)
             + " | Hits " + std::to_string(stats.hitsDealt)
@@ -2185,9 +2314,10 @@ void Renderer::RenderUI(
         const std::string economyStats = "Cores " + std::to_string(stats.coresDestroyed)
             + " | Blocks " + std::to_string(stats.blocksPlaced) + "/" + std::to_string(stats.blocksBroken)
             + " | Resources " + std::to_string(stats.resourcesPicked);
-        DrawText(combatStats.c_str(), GetScreenWidth() / 2 - MeasureText(combatStats.c_str(), 22) / 2, GetScreenHeight() / 2 + 8, 22, Color { 220, 220, 220, 255 });
-        DrawText(economyStats.c_str(), GetScreenWidth() / 2 - MeasureText(economyStats.c_str(), 22) / 2, GetScreenHeight() / 2 + 38, 22, Color { 220, 220, 220, 255 });
-        DrawText("Enter restart | ESC quit", GetScreenWidth() / 2 - 132, GetScreenHeight() / 2 + 76, 24, Color { 220, 220, 220, 255 });
+        DrawText(combatStats.c_str(), GetScreenWidth() / 2 - MeasureText(combatStats.c_str(), 22) / 2, GetScreenHeight() / 2 + 20, 22, Color { 220, 220, 220, 255 });
+        DrawText(economyStats.c_str(), GetScreenWidth() / 2 - MeasureText(economyStats.c_str(), 22) / 2, GetScreenHeight() / 2 + 50, 22, Color { 220, 220, 220, 255 });
+        const char* actions = "Enter: new match | Esc: main menu";
+        DrawText(actions, GetScreenWidth() / 2 - MeasureText(actions, 24) / 2, GetScreenHeight() / 2 + 88, 24, Color { 220, 220, 220, 255 });
     }
 
 }

@@ -20,12 +20,16 @@ public:
     void PlayDenied() const;
     void PlayLanding() const;
     void PlayVictory() const;
+    void SetMuted(bool muted);
+    void SetVolume(float volume);
 
 private:
     Sound CreateTone(float frequency, float duration, float volume, float slide) const;
     void Play(const Sound& sound) const;
 
     bool ready_ = false;
+    bool muted_ = false;
+    float volume_ = 1.0f;
     Sound hit_ {};
     Sound coreHit_ {};
     Sound coreDestroyed_ {};

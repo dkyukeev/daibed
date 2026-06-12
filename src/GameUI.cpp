@@ -166,7 +166,11 @@ std::string AbilityMetaText(const HeroAbilityDefinition& ability)
 }
 void Game::HandleMenuInput()
 {
+#if DAIBED_DEVELOPER_BUILD
     constexpr int kMenuRows = 15;
+#else
+    constexpr int kMenuRows = 6;
+#endif
     if (IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_S))
     {
         menuIndex_ = (menuIndex_ + 1) % kMenuRows;
@@ -179,6 +183,7 @@ void Game::HandleMenuInput()
     const int delta = (IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_D)) ? 1 : ((IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_A)) ? -1 : 0);
     if (delta != 0)
     {
+#if DAIBED_DEVELOPER_BUILD
         if (menuIndex_ == 1)
         {
             const int value = (static_cast<int>(selectedMode_) + delta + 4) % 4;
@@ -228,11 +233,19 @@ void Game::HandleMenuInput()
         {
             automatchMaxMinutes_ = std::clamp(automatchMaxMinutes_ + delta, 3, 30);
         }
+#else
+        if (menuIndex_ == 2)
+        {
+            const int value = (static_cast<int>(botDifficulty_) + delta + 3) % 3;
+            botDifficulty_ = static_cast<BotDifficulty>(value);
+        }
+#endif
         SaveSettings();
     }
 
     if (IsKeyPressed(KEY_ENTER))
     {
+#if DAIBED_DEVELOPER_BUILD
         if (menuIndex_ == 0)
         {
             heroSelectIndex_ = HeroSystem::IndexOf(selectedHeroId_);
@@ -256,6 +269,36 @@ void Game::HandleMenuInput()
         {
             exitRequested_ = true;
         }
+#else
+        if (menuIndex_ == 0)
+        {
+            selectedMode_ = MatchMode::FourTeams;
+            selectedTeamSize_ = 4;
+            selectedBotCount_ = 15;
+            arenaLayout_ = ArenaLayout::Classic;
+            arenaBiome_ = ArenaBiome::Arena;
+            heroSelectIndex_ = HeroSystem::IndexOf(selectedHeroId_);
+            screen_ = GameScreen::HeroSelect;
+        }
+        else if (menuIndex_ == 1)
+        {
+            StartTutorialMatch();
+        }
+        else if (menuIndex_ == 3)
+        {
+            returnScreen_ = GameScreen::MainMenu;
+            screen_ = GameScreen::Settings;
+        }
+        else if (menuIndex_ == 4)
+        {
+            controlsReturnScreen_ = GameScreen::MainMenu;
+            screen_ = GameScreen::Controls;
+        }
+        else if (menuIndex_ == 5)
+        {
+            exitRequested_ = true;
+        }
+#endif
     }
 
     if (IsKeyPressed(KEY_ESCAPE))
@@ -351,7 +394,7 @@ void Game::HandleHeroSelectInput()
 
 void Game::HandleSettingsInput()
 {
-    constexpr int kSettingsRows = 9;
+    constexpr int kSettingsRows = 12;
     if (IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_S))
     {
         settingsIndex_ = (settingsIndex_ + 1) % kSettingsRows;
@@ -382,7 +425,7 @@ void Game::HandleSettingsInput()
         }
         else if (settingsIndex_ == 3)
         {
-            fullscreen_ = !fullscreen_;
+            windowMode_ = (windowMode_ + delta + 3) % 3;
             ApplyWindowSettings();
         }
         else if (settingsIndex_ == 4)
@@ -392,11 +435,24 @@ void Game::HandleSettingsInput()
         }
         else if (settingsIndex_ == 5)
         {
-            showControlHints_ = !showControlHints_;
+            masterVolume_ = std::clamp(masterVolume_ + delta * 0.1f, 0.0f, 1.0f);
+            audio_.SetVolume(masterVolume_);
         }
         else if (settingsIndex_ == 6)
         {
+            showControlHints_ = !showControlHints_;
+        }
+        else if (settingsIndex_ == 7)
+        {
             showMinimap_ = !showMinimap_;
+        }
+        else if (settingsIndex_ == 8)
+        {
+            reducedCameraShake_ = !reducedCameraShake_;
+        }
+        else if (settingsIndex_ == 9)
+        {
+            reducedFlashes_ = !reducedFlashes_;
         }
         SaveSettings();
     }
@@ -405,24 +461,32 @@ void Game::HandleSettingsInput()
     {
         if (settingsIndex_ == 3)
         {
-            fullscreen_ = !fullscreen_;
+            windowMode_ = (windowMode_ + 1) % 3;
             ApplyWindowSettings();
-        }
-        else if (settingsIndex_ == 5)
-        {
-            showControlHints_ = !showControlHints_;
         }
         else if (settingsIndex_ == 6)
         {
-            showMinimap_ = !showMinimap_;
+            showControlHints_ = !showControlHints_;
         }
         else if (settingsIndex_ == 7)
+        {
+            showMinimap_ = !showMinimap_;
+        }
+        else if (settingsIndex_ == 8)
+        {
+            reducedCameraShake_ = !reducedCameraShake_;
+        }
+        else if (settingsIndex_ == 9)
+        {
+            reducedFlashes_ = !reducedFlashes_;
+        }
+        else if (settingsIndex_ == 10)
         {
             controlsReturnScreen_ = GameScreen::Settings;
             screen_ = GameScreen::Controls;
             waitingForKey_ = false;
         }
-        else if (settingsIndex_ == 8)
+        else if (settingsIndex_ == 11)
         {
             SaveSettings();
             screen_ = returnScreen_;
@@ -446,7 +510,11 @@ void Game::HandleSettingsInput()
 
 void Game::HandleControlsInput()
 {
+#if DAIBED_DEVELOPER_BUILD
     constexpr int kActionCount = 23;
+#else
+    constexpr int kActionCount = 22;
+#endif
     constexpr int kControlRows = kActionCount + 1;
     constexpr int kRowsPerColumn = 12;
     KeyBindings& bindings = input_.MutableBindings();
@@ -492,38 +560,80 @@ void Game::HandleControlsInput()
             bindings.cameraToggle = key;
             break;
         case 12:
+#if DAIBED_DEVELOPER_BUILD
             bindings.debugRespawn = key;
+#else
+            bindings.heroActive1 = key;
+#endif
             break;
         case 13:
+#if DAIBED_DEVELOPER_BUILD
             bindings.heroActive1 = key;
+#else
+            bindings.heroActive2 = key;
+#endif
             break;
         case 14:
+#if DAIBED_DEVELOPER_BUILD
             bindings.heroActive2 = key;
+#else
+            bindings.heroUltimate = key;
+#endif
             break;
         case 15:
+#if DAIBED_DEVELOPER_BUILD
             bindings.heroUltimate = key;
+#else
+            bindings.shoot = key;
+#endif
             break;
         case 16:
+#if DAIBED_DEVELOPER_BUILD
             bindings.shoot = key;
+#else
+            bindings.fireball = key;
+#endif
             break;
         case 17:
+#if DAIBED_DEVELOPER_BUILD
             bindings.fireball = key;
+#else
+            bindings.heal = key;
+#endif
             break;
         case 18:
+#if DAIBED_DEVELOPER_BUILD
             bindings.heal = key;
+#else
+            bindings.teleport = key;
+#endif
             break;
         case 19:
+#if DAIBED_DEVELOPER_BUILD
             bindings.teleport = key;
+#else
+            bindings.dash = key;
+#endif
             break;
         case 20:
+#if DAIBED_DEVELOPER_BUILD
             bindings.dash = key;
+#else
+            bindings.molotov = key;
+#endif
             break;
         case 21:
+#if DAIBED_DEVELOPER_BUILD
             bindings.molotov = key;
+#else
+            bindings.alarm = key;
+#endif
             break;
+#if DAIBED_DEVELOPER_BUILD
         case 22:
             bindings.alarm = key;
             break;
+#endif
         default:
             break;
         }
@@ -637,6 +747,7 @@ void Game::HandlePauseInput()
 
 void Game::RenderMainMenu() const
 {
+#if DAIBED_DEVELOPER_BUILD
     const char* labels[] {
         "Start match",
         "Mode",
@@ -671,19 +782,43 @@ void Game::RenderMainMenu() const
         "",
         ""
     };
+#else
+    const char* labels[] {
+        "Начать матч 4x4x4x4",
+        "Обучение",
+        "Сложность ботов",
+        "Настройки",
+        "Управление",
+        "Выход"
+    };
+    const std::string values[] {
+        "",
+        "",
+        BotDifficultyName(),
+        "",
+        "",
+        ""
+    };
+#endif
 
-    DrawCenteredText("DaiBed", 48, 40, WHITE);
-    DrawCenteredText("Choose match setup", 92, 18, Fade(WHITE, 0.72f));
+    DrawCenteredText("DaiBed " DAIBED_VERSION, 48, 40, WHITE);
+#if DAIBED_DEVELOPER_BUILD
+    DrawCenteredText("Developer match setup", 92, 18, Fade(WHITE, 0.72f));
+#else
+    DrawCenteredText("Геройский BedWars против ботов", 92, 18, Fade(WHITE, 0.72f));
+#endif
 
     const int panelWidth = 640;
     const int panelX = GetScreenWidth() / 2 - panelWidth / 2;
     const int panelY = 116;
-    DrawRectangle(panelX, panelY, panelWidth, 512, Fade(Color { 8, 10, 14, 255 }, 0.82f));
-    DrawRectangleLines(panelX, panelY, panelWidth, 512, Fade(WHITE, 0.20f));
+    const int rowCount = static_cast<int>(std::size(labels));
+    const int panelHeight = std::max(250, 44 + rowCount * 42);
+    DrawRectangle(panelX, panelY, panelWidth, panelHeight, Fade(Color { 8, 10, 14, 255 }, 0.82f));
+    DrawRectangleLines(panelX, panelY, panelWidth, panelHeight, Fade(WHITE, 0.20f));
 
-    for (int i = 0; i < 15; ++i)
+    for (int i = 0; i < rowCount; ++i)
     {
-        const int y = panelY + 22 + i * 32;
+        const int y = panelY + 24 + i * 42;
         const bool selected = i == menuIndex_;
         const Color color = selected ? Color { 255, 235, 142, 255 } : Fade(WHITE, 0.78f);
         DrawRectangle(panelX + 18, y - 7, panelWidth - 36, 30, selected ? Fade(Color { 42, 52, 62, 255 }, 0.92f) : Fade(Color { 18, 21, 29, 255 }, 0.42f));
@@ -694,6 +829,7 @@ void Game::RenderMainMenu() const
         }
     }
 
+#if DAIBED_DEVELOPER_BUILD
     std::string biomeHint = "Arena: neutral rules.";
     switch (arenaBiome_)
     {
@@ -714,6 +850,10 @@ void Game::RenderMainMenu() const
     }
     DrawCenteredText("Arrows/WASD navigate | Left/Right change | Enter select", GetScreenHeight() - 70, 18, Fade(WHITE, 0.62f));
     DrawCenteredText(biomeHint.c_str(), GetScreenHeight() - 42, 16, Fade(WHITE, 0.48f));
+#else
+    DrawCenteredText("W/S или стрелки: выбор | Enter: подтвердить", GetScreenHeight() - 70, 18, Fade(WHITE, 0.62f));
+    DrawCenteredText("Классическая арена | 4 команды по 4 игрока", GetScreenHeight() - 42, 16, Fade(WHITE, 0.48f));
+#endif
 }
 
 void Game::RenderHeroSelect() const
@@ -805,10 +945,13 @@ void Game::RenderSettings() const
         "Mouse sensitivity",
         "FOV",
         "Resolution",
-        "Fullscreen",
+        "Window mode",
         "FPS limit",
+        "Master volume",
         "Control hints",
         "Minimap",
+        "Reduced camera shake",
+        "Reduced flashes",
         "Open controls",
         "Back"
     };
@@ -816,10 +959,13 @@ void Game::RenderSettings() const
         FormatTenths(input_.GetMouseSensitivity()),
         std::to_string(static_cast<int>(fov_)),
         ResolutionName(),
-        fullscreen_ ? "On" : "Off",
+        windowMode_ == 0 ? "Windowed" : (windowMode_ == 1 ? "Borderless" : "Fullscreen"),
         FpsLimitName(),
+        std::to_string(static_cast<int>(masterVolume_ * 100.0f + 0.5f)) + "%",
         showControlHints_ ? "On" : "Off",
         showMinimap_ ? "On" : "Off",
+        reducedCameraShake_ ? "On" : "Off",
+        reducedFlashes_ ? "On" : "Off",
         "",
         ""
     };
@@ -828,11 +974,11 @@ void Game::RenderSettings() const
     const int panelWidth = 620;
     const int panelX = GetScreenWidth() / 2 - panelWidth / 2;
     const int panelY = 132;
-    DrawRectangle(panelX, panelY, panelWidth, 420, Fade(Color { 8, 10, 14, 255 }, 0.86f));
-    DrawRectangleLines(panelX, panelY, panelWidth, 420, Fade(WHITE, 0.20f));
-    for (int i = 0; i < 9; ++i)
+    DrawRectangle(panelX, panelY, panelWidth, 510, Fade(Color { 8, 10, 14, 255 }, 0.86f));
+    DrawRectangleLines(panelX, panelY, panelWidth, 510, Fade(WHITE, 0.20f));
+    for (int i = 0; i < 12; ++i)
     {
-        const int y = panelY + 28 + i * 40;
+        const int y = panelY + 24 + i * 38;
         const bool selected = i == settingsIndex_;
         const Color color = selected ? Color { 255, 235, 142, 255 } : Fade(WHITE, 0.78f);
         DrawRectangle(panelX + 20, y - 8, panelWidth - 40, 31, selected ? Fade(Color { 42, 52, 62, 255 }, 0.92f) : Fade(Color { 18, 21, 29, 255 }, 0.44f));
@@ -861,7 +1007,9 @@ void Game::RenderControls() const
         "Инвентарь",
         "Выбросить",
         "Камера",
+#if DAIBED_DEVELOPER_BUILD
         "Отладочный респаун",
+#endif
         "Активка 1",
         "Активка 2",
         "Ульта",
@@ -887,7 +1035,9 @@ void Game::RenderControls() const
         bindings.inventory,
         bindings.drop,
         bindings.cameraToggle,
+#if DAIBED_DEVELOPER_BUILD
         bindings.debugRespawn,
+#endif
         bindings.heroActive1,
         bindings.heroActive2,
         bindings.heroUltimate,
@@ -900,7 +1050,11 @@ void Game::RenderControls() const
         bindings.alarm,
         KEY_NULL
     };
+#if DAIBED_DEVELOPER_BUILD
     constexpr int kActionCount = 23;
+#else
+    constexpr int kActionCount = 22;
+#endif
     constexpr int kControlRows = kActionCount + 1;
     constexpr int kRowsPerColumn = 12;
     constexpr int kColumnWidth = 440;
@@ -983,6 +1137,49 @@ void Game::RenderGameHints(const Player& localPlayer) const
     {
         DrawCenteredText("Waiting to respawn", GetScreenHeight() / 2 + 96, 24, ORANGE);
     }
+}
+
+void Game::RenderOnboarding(const Player& localPlayer) const
+{
+    const Team* team = FindTeam(localPlayer.GetTeamId());
+    const HeroDefinition& hero = HeroSystem::GetDefinition(localPlayer.GetHeroId());
+    std::string title = tutorialMode_ ? "ОБУЧЕНИЕ" : "ПЕРВЫЙ МАТЧ";
+    std::string instruction;
+    if (matchTime_ < 12.0f)
+    {
+        instruction = "EnergyCore дает респаун. Защищайте его блоками и не падайте в воид.";
+    }
+    else if (matchTime_ < 24.0f)
+    {
+        instruction = "Собирайте железо и золото у генератора. Кристаллы находятся ближе к центру.";
+    }
+    else if (matchTime_ < 36.0f)
+    {
+        instruction = std::string(KeyLabel(input_.GetBindings().interact)) + " открывает магазин у любой базы. Купите блоки или улучшение.";
+    }
+    else if (matchTime_ < 48.0f)
+    {
+        instruction = "RMB ставит блок. Удерживайте Shift у края для безопасного моста.";
+    }
+    else
+    {
+        instruction = hero.name + ": " + KeyLabel(input_.GetBindings().heroActive1) + "/"
+            + KeyLabel(input_.GetBindings().heroActive2) + " активки, "
+            + KeyLabel(input_.GetBindings().heroUltimate) + " ульта. Уничтожьте вражеский Core.";
+    }
+
+    if (team != nullptr && !team->coreAlive)
+    {
+        instruction = "Ваш Core разрушен: следующая смерть финальная. Играйте осторожно.";
+    }
+
+    const int width = std::min(760, GetScreenWidth() - 40);
+    const int x = GetScreenWidth() / 2 - width / 2;
+    const int y = 118;
+    DrawRectangle(x, y, width, 66, Fade(Color { 8, 10, 14, 255 }, 0.76f));
+    DrawRectangleLines(x, y, width, 66, Fade(Color { 112, 232, 255, 255 }, 0.42f));
+    DrawText(title.c_str(), x + 16, y + 10, 16, Color { 112, 232, 255, 255 });
+    DrawText(instruction.c_str(), x + 16, y + 36, 16, Fade(WHITE, 0.86f));
 }
 
 void Game::RenderMinimap(const Player& localPlayer) const
@@ -1168,12 +1365,12 @@ void Game::RenderDeathOverlay(const Player& localPlayer) const
     }
 
     const bool finalDeath = localPlayer.IsEliminated();
-    if (finalDeath && spectatorMode_)
+    if (localDeathOverlayTimer_ <= 0.0f)
     {
         return;
     }
     const int width = 420;
-    const int height = finalDeath ? 126 : 112;
+    const int height = finalDeath ? 178 : 164;
     const int x = GetScreenWidth() / 2 - width / 2;
     const int y = GetScreenHeight() / 2 - height / 2;
     DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Fade(BLACK, finalDeath ? 0.20f : 0.34f));
@@ -1182,14 +1379,17 @@ void Game::RenderDeathOverlay(const Player& localPlayer) const
     DrawCenteredText(finalDeath ? "FINAL DEATH" : "YOU DIED", y + 22, 28, finalDeath ? Color { 255, 118, 118, 255 } : ORANGE);
     if (finalDeath)
     {
-        DrawCenteredText("Spectator mode enabled", y + 62, 18, Fade(WHITE, 0.78f));
-        DrawCenteredText("Left/Right switch target | F free/follow | Tab scoreboard", y + 92, 14, Fade(WHITE, 0.58f));
+        DrawCenteredText(("Убийца: " + localDeathKiller_).c_str(), y + 62, 18, Fade(WHITE, 0.82f));
+        DrawCenteredText(("Причина: " + localDeathCause_).c_str(), y + 88, 18, Fade(WHITE, 0.72f));
+        DrawCenteredText("Вы выбыли. Режим наблюдателя включен.", y + 118, 16, Fade(WHITE, 0.70f));
+        DrawCenteredText("Left/Right цель | F свободная камера | Tab таблица", y + 146, 14, Fade(WHITE, 0.58f));
     }
     else
     {
+        DrawCenteredText(("Убийца: " + localDeathKiller_ + " | " + localDeathCause_).c_str(), y + 62, 17, Fade(WHITE, 0.78f));
         const std::string respawn = "Respawning in "
             + std::to_string(static_cast<int>(std::ceil(localPlayer.GetRespawnTimer()))) + "s";
-        DrawCenteredText(respawn.c_str(), y + 66, 20, Fade(WHITE, 0.78f));
+        DrawCenteredText(respawn.c_str(), y + 100, 20, Fade(WHITE, 0.78f));
     }
 }
 

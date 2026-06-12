@@ -150,9 +150,24 @@ Sound AudioSystem::CreateTone(float frequency, float duration, float volume, flo
     return sound;
 }
 
+void AudioSystem::SetMuted(bool muted)
+{
+    muted_ = muted;
+    SetMasterVolume(muted_ ? 0.0f : volume_);
+}
+
+void AudioSystem::SetVolume(float volume)
+{
+    volume_ = std::clamp(volume, 0.0f, 1.0f);
+    if (ready_)
+    {
+        SetMasterVolume(muted_ ? 0.0f : volume_);
+    }
+}
+
 void AudioSystem::Play(const Sound& sound) const
 {
-    if (ready_)
+    if (ready_ && !muted_)
     {
         PlaySound(sound);
     }

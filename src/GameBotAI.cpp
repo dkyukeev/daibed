@@ -3,6 +3,7 @@
 #include "raylib.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <optional>
@@ -18,6 +19,41 @@ constexpr int kBotPathMinY = -2;
 constexpr int kBotPathMaxY = 64;
 constexpr float kBotPi = 3.1415926535f;
 constexpr float kCoordinationSignalTtl = 2.25f;
+
+class ScopedProfileTimer
+{
+public:
+    ScopedProfileTimer(bool enabled, double& elapsedMs, unsigned long long& calls)
+        : enabled_(enabled), elapsedMs_(elapsedMs), calls_(calls)
+    {
+        if (enabled_)
+        {
+            started_ = std::chrono::steady_clock::now();
+        }
+    }
+
+    ~ScopedProfileTimer()
+    {
+        Stop();
+    }
+
+    void Stop()
+    {
+        if (enabled_)
+        {
+            elapsedMs_ += std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - started_).count();
+            ++calls_;
+            enabled_ = false;
+        }
+    }
+
+private:
+    bool enabled_ = false;
+    double& elapsedMs_;
+    unsigned long long& calls_;
+    std::chrono::steady_clock::time_point started_ {};
+};
 
 float DistanceSquared(Vector3 a, Vector3 b)
 {
@@ -255,25 +291,34 @@ float BotBridgeCooldown(BotDifficulty difficulty)
     return 0.22f;
 }
 
-float BotUtilityCooldown(BotDifficulty difficulty)
-{
-    switch (difficulty)
-    {
-    case BotDifficulty::Easy:
-        return 2.8f;
-    case BotDifficulty::Hard:
-        return 1.05f;
-    case BotDifficulty::Normal:
-        break;
-    }
-    return 1.7f;
-}
-
 BotRole RoleForBotId(int id)
 {
     return id % 4 == 0
         ? BotRole::Defender
         : (id % 4 == 1 ? BotRole::Fighter : (id % 4 == 2 ? BotRole::Rusher : BotRole::Collector));
+}
+
+int PreferredNeighborTeam(int teamId, bool clockwise)
+{
+    if (clockwise)
+    {
+        switch (teamId)
+        {
+        case 0: return 2;
+        case 2: return 1;
+        case 1: return 3;
+        case 3: return 0;
+        default: return -1;
+        }
+    }
+    switch (teamId)
+    {
+    case 0: return 3;
+    case 3: return 1;
+    case 1: return 2;
+    case 2: return 0;
+    default: return -1;
+    }
 }
 
 const BotRoleTuning& RoleTuning(const BotTuningGenome& tuning, BotRole role)
@@ -835,6 +880,9 @@ BotRoleDecision EvaluateDynamicRoleDecision(
         }
         return desired - roleCountWithSelf(role);
     };
+    // Voluntary role hops are only allowed when the current role is overstaffed,
+    // otherwise bots ping-pong between roles chasing each other's deficits.
+    const bool ownRoleSurplus = roleDeficit(memory.role) < 0;
 
     if (!team.coreAlive)
     {
@@ -872,7 +920,8 @@ BotRoleDecision EvaluateDynamicRoleDecision(
         return decision;
     }
 
-    if (roleDeficit(BotRole::Collector) > 0
+    if (ownRoleSurplus
+        && roleDeficit(BotRole::Collector) > 0
         && (carryingLoot || wantsShop || lowBlocks || lowHealth))
     {
         decision.role = BotRole::Collector;
@@ -880,7 +929,8 @@ BotRoleDecision EvaluateDynamicRoleDecision(
         return decision;
     }
 
-    if (roleDeficit(BotRole::Rusher) > 0
+    if (ownRoleSurplus
+        && roleDeficit(BotRole::Rusher) > 0
         && (nearEnemyCore || !lowCombat || matchTime > 75.0f))
     {
         decision.role = BotRole::Rusher;
@@ -888,14 +938,14 @@ BotRoleDecision EvaluateDynamicRoleDecision(
         return decision;
     }
 
-    if (roleDeficit(BotRole::Fighter) > 0)
+    if (ownRoleSurplus && roleDeficit(BotRole::Fighter) > 0)
     {
         decision.role = BotRole::Fighter;
         decision.reason = "mid control";
         return decision;
     }
 
-    if (roleDeficit(BotRole::Defender) > 0)
+    if (ownRoleSurplus && roleDeficit(BotRole::Defender) > 0)
     {
         decision.role = BotRole::Defender;
         decision.reason = "maintain defense";
@@ -920,8 +970,8 @@ bool TryApplyDynamicRoleDecision(
         return false;
     }
     const float minimumRoleTime = difficulty == BotDifficulty::Hard
-        ? 3.0f
-        : (difficulty == BotDifficulty::Easy ? 5.5f : 4.2f);
+        ? 6.0f
+        : (difficulty == BotDifficulty::Easy ? 9.0f : 7.5f);
     if (!decision.force && memory.roleTimer < minimumRoleTime)
     {
         return false;
@@ -955,6 +1005,11 @@ void TickBotMemory(BotMemory& memory, float dt)
     memory.currentPlan.elapsedTime += dt;
     memory.roleTimer += dt;
     memory.roleLockTimer = std::max(0.0f, memory.roleLockTimer - dt);
+    memory.chaseBanTimer = std::max(0.0f, memory.chaseBanTimer - dt);
+    memory.heroAbilityTimer = std::max(0.0f, memory.heroAbilityTimer - dt);
+    memory.repairPlaceCooldown = std::max(0.0f, memory.repairPlaceCooldown - dt);
+    memory.resourcePlanTimer = std::max(0.0f, memory.resourcePlanTimer - dt);
+    memory.tacticalCheckTimer = std::max(0.0f, memory.tacticalCheckTimer - dt);
 }
 
 BotTeamSnapshot BuildBotTeamSnapshot(
@@ -1144,7 +1199,8 @@ const ResourcePickup* FindBestPickupForBot(
     const std::vector<ResourcePickup>& pickups,
     const std::vector<Player*>& enemies,
     Vector3 coreHome,
-    bool ruinsBiome)
+    bool ruinsBiome,
+    bool allowHomePickup)
 {
     const ResourcePickup* best = nullptr;
     float bestScore = std::numeric_limits<float>::max();
@@ -1153,6 +1209,10 @@ const ResourcePickup* FindBestPickupForBot(
     for (const ResourcePickup& pickup : pickups)
     {
         if (pickup.collected)
+        {
+            continue;
+        }
+        if (!allowHomePickup && DistanceSquared(pickup.position, coreHome) <= 144.0f)
         {
             continue;
         }
@@ -1300,7 +1360,9 @@ FightAssessment AssessFight(
     result.targetPower = BotCombatPowerScore(target, tuning);
     result.distance = std::sqrt(DistanceSquared(bot.GetPosition(), target.GetPosition()));
 
-    constexpr float allyAssistRangeSq = 9.5f * 9.5f;
+    // Hunting a final-life target is a pack activity: allies still closing in
+    // should already count, otherwise hunters trickle in one by one and lose.
+    const float allyAssistRangeSq = finalLifeTarget ? 16.0f * 16.0f : 9.5f * 9.5f;
     constexpr float enemyAssistRangeSq = 8.5f * 8.5f;
     if (aliveAllies != nullptr)
     {
@@ -1378,8 +1440,11 @@ FightAssessment AssessFight(
     {
         requiredMargin += 18.0f;
     }
+    const int outnumberedBy = std::max(0, result.nearbyEnemies - result.nearbyAllies);
+    requiredMargin += static_cast<float>(outnumberedBy) * 16.0f;
 
-    const bool targetWeak = target.GetHealth() <= bot.GetHealth() - (difficulty == BotDifficulty::Easy ? 34 : 18);
+    const bool targetWeak = target.GetHealth() <= bot.GetHealth() - (difficulty == BotDifficulty::Easy ? 34 : 18)
+        && outnumberedBy < 2;
     result.canWin = result.powerMargin >= requiredMargin;
     result.shouldFight = defendingCore
         || finalLifeTarget
@@ -1390,8 +1455,24 @@ FightAssessment AssessFight(
         && !finalLifeTarget
         && bot.GetHealth() < (role == BotRole::Collector ? 72 : 58)
         && result.powerMargin < RetreatPowerMarginForDifficulty(tuning, difficulty);
+    if (!defendingCore && !finalLifeTarget && outnumberedBy >= 2 && bot.GetHealth() < 70)
+    {
+        result.shouldRetreat = true;
+    }
 
     return result;
+}
+
+// A chase that has not closed the gap for a while gets banned for a few
+// seconds: endless pursuits are what stalls the late game. Targets already
+// in melee reach are always worth finishing regardless of the ban.
+bool ChaseBlockedByFutility(const BotMemory& memory, const Player* target, Vector3 botPos)
+{
+    if (memory.chaseBanTimer <= 0.0f || target == nullptr)
+    {
+        return false;
+    }
+    return DistanceSquared(botPos, target->GetPosition()) > 49.0f;
 }
 
 struct BotMacroDirective
@@ -1621,6 +1702,7 @@ BotMacroDirective EvaluateAutonomousMacroDirective(const BotDecisionContext& ctx
         && ctx.huntEnemy != nullptr
         && ctx.matchTime > 145.0f
         && ctx.finalLifeTargetClose
+        && !ChaseBlockedByFutility(ctx.memory, ctx.huntEnemy, ctx.botPos)
         && (ctx.bot.GetHealth() > ctx.fightHealth || ctx.matchTime > 150.0f)
         && (ctx.memory.role != BotRole::Defender || ctx.matchTime > 150.0f || !ctx.team.coreAlive))
     {
@@ -1632,7 +1714,7 @@ BotMacroDirective EvaluateAutonomousMacroDirective(const BotDecisionContext& ctx
         return directive;
     }
 
-    if (ctx.nearbyEnemy != nullptr && !isDefender)
+    if (ctx.nearbyEnemy != nullptr && !isDefender && ctx.memory.chaseBanTimer <= 0.0f)
     {
         const bool canWinFight = ctx.nearbyFight.canWin || ctx.nearbyFight.powerMargin >= -4.0f;
         if (canWinFight && (isAssaultRole || ctx.matchTime > 55.0f))
@@ -1785,7 +1867,10 @@ BotMacroDirective EvaluateAutonomousMacroDirective(const BotDecisionContext& ctx
 
     if (ctx.matchTime >= ctx.tuning.latePressureSeconds)
     {
-        if (ctx.huntEnemyOnFinalLife && ctx.huntEnemy != nullptr && (ctx.finalLifeTargetClose || ctx.matchTime > 210.0f))
+        if (ctx.huntEnemyOnFinalLife
+            && ctx.huntEnemy != nullptr
+            && (ctx.finalLifeTargetClose || ctx.matchTime > 210.0f)
+            && !ChaseBlockedByFutility(ctx.memory, ctx.huntEnemy, ctx.botPos))
         {
             directive.active = true;
             directive.intent = BotIntent::ChaseWeakEnemy;
@@ -1806,7 +1891,7 @@ BotMacroDirective EvaluateAutonomousMacroDirective(const BotDecisionContext& ctx
                 return directive;
             }
         }
-        else if (ctx.huntEnemy != nullptr)
+        else if (ctx.huntEnemy != nullptr && !ChaseBlockedByFutility(ctx.memory, ctx.huntEnemy, ctx.botPos))
         {
             directive.active = true;
             directive.intent = BotIntent::ChaseWeakEnemy;
@@ -2074,7 +2159,9 @@ void ConsiderCombatIntent(BotDecision& decision, const BotDecisionContext& ctx)
             "take fight");
     }
 
-    if (ctx.weakEnemy != nullptr && ctx.bot.GetHealth() > ctx.fightHealth)
+    if (ctx.weakEnemy != nullptr
+        && ctx.bot.GetHealth() > ctx.fightHealth
+        && !ChaseBlockedByFutility(ctx.memory, ctx.weakEnemy, ctx.botPos))
     {
         const float weakDistance = std::sqrt(DistanceSquared(ctx.bot.GetPosition(), ctx.weakEnemy->GetPosition()));
         ConsiderBotDecision(
@@ -2111,6 +2198,9 @@ void ConsiderCorePressureIntent(BotDecision& decision, const BotDecisionContext&
         ? (ctx.memory.currentPlan.goal == StrategicGoal::CoreAssault ? 155.0f : 105.0f)
         : 0.0f;
     const float attackSlotBonus = attackSlotOpen || ctx.strategicPlan.allIn ? ctx.tuning.attackSlotBonus : ctx.tuning.attackSlotPenalty;
+    // Destroying a surviving core ends the match much faster than hunting
+    // runners, so the assault options keep gaining weight in the late game.
+    const float lateAssaultBonus = std::min(300.0f, std::max(0.0f, ctx.matchTime - ctx.tuning.latePressureSeconds) * 2.4f);
 
     if (ctx.canBreakDefense && ctx.enemyCore != nullptr)
     {
@@ -2119,7 +2209,7 @@ void ConsiderCorePressureIntent(BotDecision& decision, const BotDecisionContext&
             decision,
             ctx,
             BotIntent::BreakCoreDefense,
-            650.0f + (ctx.memory.role == BotRole::Rusher ? 120.0f : 0.0f) + strategicAttackBonus + personalPlanAttackBonus + attackSlotBonus - coordinationPenalty,
+            650.0f + (ctx.memory.role == BotRole::Rusher ? 120.0f : 0.0f) + strategicAttackBonus + personalPlanAttackBonus + attackSlotBonus + lateAssaultBonus - coordinationPenalty,
             CoreTargetPosition(*ctx.enemyCore),
             nullptr,
             "crack defense");
@@ -2129,13 +2219,13 @@ void ConsiderCorePressureIntent(BotDecision& decision, const BotDecisionContext&
     {
         const float teamPushBonus = ctx.teamPlan.activePressure > 0 ? 70.0f : 0.0f;
         const float baseCoveredBonus = ctx.teamPlan.alliesNearCore > 0 || !ctx.team.coreAlive ? 60.0f : -85.0f;
-        const float timePressureBonus = std::max(0.0f, ctx.matchTime - 80.0f) * 1.6f;
+        const float timePressureBonus = std::min(280.0f, std::max(0.0f, ctx.matchTime - 80.0f) * 1.6f);
         const float coordinationPenalty = static_cast<float>(ctx.coordinatedAttackersOnTarget) * ctx.tuning.pressureCoordinationPenalty;
         ConsiderBotDecision(
             decision,
             ctx,
             BotIntent::PressureCore,
-            570.0f + teamPushBonus + baseCoveredBonus + timePressureBonus + strategicAttackBonus + personalPlanAttackBonus + attackSlotBonus + (ctx.memory.role == BotRole::Rusher ? 150.0f : 60.0f) - coordinationPenalty,
+            570.0f + teamPushBonus + baseCoveredBonus + timePressureBonus + strategicAttackBonus + personalPlanAttackBonus + attackSlotBonus + lateAssaultBonus + (ctx.memory.role == BotRole::Rusher ? 150.0f : 60.0f) - coordinationPenalty,
             CoreTargetPosition(*ctx.enemyCore),
             nullptr,
             "rush core");
@@ -2181,13 +2271,18 @@ void ConsiderFinalDuelIntent(BotDecision& decision, const BotDecisionContext& ct
 {
     if (!ctx.finalDuelPhase
         || ctx.huntEnemy == nullptr
+        || ChaseBlockedByFutility(ctx.memory, ctx.huntEnemy, ctx.botPos)
         || (ctx.bot.GetHealth() <= ctx.fightHealth && !(ctx.huntEnemyOnFinalLife && ctx.matchTime > 145.0f)))
     {
         return;
     }
 
     const float finalLifeBonus = ctx.huntEnemyOnFinalLife ? (ctx.finalLifeTargetClose && ctx.matchTime > 145.0f ? 420.0f : 120.0f) : 0.0f;
-    const float cleanupUrgency = ctx.huntEnemyOnFinalLife ? std::max(0.0f, ctx.matchTime - 145.0f) * 5.0f : 0.0f;
+    // Capped: an unbounded urgency made every bot chase runners forever
+    // instead of finishing the remaining cores.
+    const float cleanupUrgency = ctx.huntEnemyOnFinalLife
+        ? std::min(140.0f, std::max(0.0f, ctx.matchTime - 145.0f) * 5.0f)
+        : 0.0f;
     const float personalHuntBonus = ctx.memory.currentPlan.goal == StrategicGoal::HuntPlayers ? 170.0f : 0.0f;
     const float distance = std::sqrt(DistanceSquared(ctx.bot.GetPosition(), ctx.huntEnemy->GetPosition()));
     ConsiderBotDecision(
@@ -2721,21 +2816,35 @@ bool Game::BotUseUtility(Player& bot, Team& team, Player* enemy, EnergyCore* ene
 {
     BotMemory& memory = GetBotMemory(bot);
     const BotTuningGenome& botTuning = BotTuningForTeam(team.id);
-    if (memory.utilityTimer > 0.0f || botDifficulty_ == BotDifficulty::Easy)
+    if (memory.utilityTimer > 0.0f)
     {
         return false;
     }
+    // Easy bots still defend themselves (heal, retreat tools) but skip the
+    // offensive utility play to keep the difficulty gap.
+    const bool offensiveUtilities = botDifficulty_ != BotDifficulty::Easy;
+    const float cooldownScale = botDifficulty_ == BotDifficulty::Hard
+        ? 0.7f
+        : (botDifficulty_ == BotDifficulty::Easy ? 1.6f : 1.0f);
+    const auto armUtilityCooldown = [&memory, cooldownScale](float seconds)
+    {
+        memory.utilityTimer = seconds * cooldownScale;
+    };
 
     if (bot.GetHealth() <= 45 && SpendUtilityItem(bot, UtilityType::Heal))
     {
         bot.Heal(45);
         AddWorldEffect(bot.GetPosition(), Color { 128, 238, 166, 255 }, 0.30f, 0.30f);
+        armUtilityCooldown(1.3f);
         return true;
     }
-    if (enemy != nullptr && bot.GetHealth() <= 68 && SpendUtilityItem(bot, UtilityType::Heal))
+    // Mid-combat heals are deliberately slow: spamming them made bot fights
+    // unkillable healing wars that stalled entire matches.
+    if (enemy != nullptr && bot.GetHealth() <= 55 && SpendUtilityItem(bot, UtilityType::Heal))
     {
         bot.Heal(45);
         AddWorldEffect(bot.GetPosition(), Color { 128, 238, 166, 255 }, 0.24f, 0.24f);
+        armUtilityCooldown(3.0f);
         return true;
     }
 
@@ -2751,6 +2860,7 @@ bool Game::BotUseUtility(Player& bot, Team& team, Player* enemy, EnergyCore* ene
         memory.stuckTimer = 0.0f;
         AddWorldEffect(team.spawnPoint, GetTeamColor(team.color), 0.38f, 0.42f);
         AddFloatingText("home", team.spawnPoint, GetTeamColor(team.color));
+        armUtilityCooldown(2.6f);
         return true;
     }
 
@@ -2768,10 +2878,11 @@ bool Game::BotUseUtility(Player& bot, Team& team, Player* enemy, EnergyCore* ene
     {
         alarmTraps_.push_back(AlarmTrap { team.spawnPoint, bot.GetTeamId(), 5.2f, false });
         AddEventMessage(bot.GetName() + " armed base alarm", GetTeamColor(team.color), 1.5f);
+        armUtilityCooldown(1.5f);
         return true;
     }
 
-    if (enemy != nullptr)
+    if (enemy != nullptr && offensiveUtilities)
     {
         const Vector3 toEnemy {
             enemy->GetPosition().x - bot.GetPosition().x,
@@ -2789,6 +2900,7 @@ bool Game::BotUseUtility(Player& bot, Team& team, Player* enemy, EnergyCore* ene
             {
                 LaunchProjectileDirected(bot, UtilityType::Arrows, toEnemy, false);
                 AddFloatingText("shot", bot.GetPosition(), Color { 112, 232, 255, 255 });
+                armUtilityCooldown(1.0f);
                 return true;
             }
         }
@@ -2807,6 +2919,7 @@ bool Game::BotUseUtility(Player& bot, Team& team, Player* enemy, EnergyCore* ene
             {
                 LaunchProjectileDirected(bot, UtilityType::Fireball, toEnemy, false);
                 AddFloatingText("fireball", bot.GetPosition(), Color { 255, 178, 96, 255 });
+                armUtilityCooldown(1.9f);
                 return true;
             }
         }
@@ -2821,6 +2934,7 @@ bool Game::BotUseUtility(Player& bot, Team& team, Player* enemy, EnergyCore* ene
         {
             LaunchProjectileDirected(bot, UtilityType::Molotov, toEnemy, false);
             AddFloatingText("molotov", bot.GetPosition(), Color { 255, 128, 72, 255 });
+            armUtilityCooldown(2.2f);
             return true;
         }
 
@@ -2834,12 +2948,14 @@ bool Game::BotUseUtility(Player& bot, Team& team, Player* enemy, EnergyCore* ene
                 const Vector3 dash = Normalize2D(toEnemy);
                 bot.ApplyKnockback(Vector3 { dash.x * 7.2f, 1.1f, dash.z * 7.2f });
                 AddWorldEffect(bot.GetPosition(), Color { 112, 232, 255, 255 }, 0.28f, 0.28f);
+                armUtilityCooldown(2.6f);
                 return true;
             }
         }
     }
 
     if (enemyCore != nullptr
+        && offensiveUtilities
         && enemyCore->IsAlive()
         && memory.role == BotRole::Rusher
         && bot.GetInventory().GetUtility(UtilityType::Fireball) > 0)
@@ -2864,6 +2980,7 @@ bool Game::BotUseUtility(Player& bot, Team& team, Player* enemy, EnergyCore* ene
                         defensePos.z - bot.GetPosition().z },
                     false);
                 AddFloatingText("molotov", bot.GetPosition(), Color { 255, 128, 72, 255 });
+                armUtilityCooldown(2.2f);
                 return true;
             }
             if (defense.has_value() && SpendUtilityItem(bot, UtilityType::Fireball))
@@ -2878,9 +2995,284 @@ bool Game::BotUseUtility(Player& bot, Team& team, Player* enemy, EnergyCore* ene
                         defensePos.z - bot.GetPosition().z },
                     false);
                 AddFloatingText("fireball", bot.GetPosition(), Color { 255, 178, 96, 255 });
+                armUtilityCooldown(1.9f);
                 return true;
             }
         }
+    }
+
+    return false;
+}
+
+namespace
+{
+// Forward() is {sin(yaw), 0, -cos(yaw)}, so yaw = atan2(dx, -dz).
+void FaceBotTowards(Player& bot, Vector3 target)
+{
+    const float dx = target.x - bot.GetPosition().x;
+    const float dz = target.z - bot.GetPosition().z;
+    if (std::fabs(dx) + std::fabs(dz) > 0.0001f)
+    {
+        bot.SetYaw(std::atan2(dx, -dz));
+    }
+}
+}
+
+bool Game::BotCastHeroAbility(Player& bot, HeroAbilitySlot slot)
+{
+    // Hero abilities share the local player's feedback pipeline; mute it so a
+    // bot casting across the map does not spam the HUD and speakers.
+    suppressLocalFeedback_ = true;
+    audio_.SetMuted(true);
+    const bool used = UseHeroAbility(bot, slot);
+    audio_.SetMuted(false);
+    suppressLocalFeedback_ = false;
+    return used;
+}
+
+bool Game::BotUseHeroAbility(Player& bot, Team& team, Player* enemy, EnergyCore* enemyCore)
+{
+    BotMemory& memory = GetBotMemory(bot);
+    if (memory.heroAbilityTimer > 0.0f)
+    {
+        return false;
+    }
+
+    const float retryDelay = 0.6f;
+    const float castDelay = botDifficulty_ == BotDifficulty::Hard
+        ? 1.1f
+        : (botDifficulty_ == BotDifficulty::Easy ? 3.2f : 1.8f);
+    const auto cast = [&](HeroAbilitySlot slot, Vector3 faceTarget, bool face)
+    {
+        if (face)
+        {
+            FaceBotTowards(bot, faceTarget);
+        }
+        const bool used = BotCastHeroAbility(bot, slot);
+        memory.heroAbilityTimer = used ? castDelay : retryDelay;
+        return used;
+    };
+
+    const HeroRuntimeState& heroState = bot.GetHeroState();
+    const Inventory& inventory = bot.GetInventory();
+    const float enemyDistance = enemy != nullptr
+        ? std::sqrt(DistanceSquared(bot.GetPosition(), enemy->GetPosition()))
+        : 999.0f;
+    const bool fightingIntent = memory.intent == BotIntent::FightEnemy
+        || memory.intent == BotIntent::DefendCore
+        || memory.intent == BotIntent::ChaseWeakEnemy;
+    const bool defendingBase = memory.intent == BotIntent::DefendCore
+        || memory.intent == BotIntent::RepairCoreDefense;
+    const bool assaultIntent = memory.intent == BotIntent::PressureCore
+        || memory.intent == BotIntent::BreakCoreDefense;
+    const float distanceFromHomeSq = DistanceSquared(bot.GetPosition(), team.spawnPoint);
+
+    switch (bot.GetHeroId())
+    {
+    case HeroId::Radon:
+    {
+        if (bot.IsHeroAbilityReady(HeroAbilitySlot::Ultimate))
+        {
+            EnergyCore* ownCore = FindCoreByTeam(team.id);
+            const bool coreAlive = ownCore != nullptr && ownCore->IsAlive();
+            // Prime the sacrifice only when the base is in real danger; the
+            // primed state is a toggle, so never re-cast while primed.
+            const bool coreInDanger = coreAlive
+                && (memory.coreDefenseCritical
+                    || ownCore->GetHealth() <= ownCore->GetMaxHealth() / 3
+                    || (enemy != nullptr
+                        && DistanceSquared(enemy->GetPosition(), world_.GridToWorld(ownCore->GetBlockPosition())) < 60.0f));
+            if (coreAlive && coreInDanger && !heroState.ultimatePrimed)
+            {
+                return cast(HeroAbilitySlot::Ultimate, Vector3 {}, false);
+            }
+            if (!coreAlive && enemy != nullptr && enemyDistance < 4.5f)
+            {
+                return cast(HeroAbilitySlot::Ultimate, enemy->GetPosition(), true);
+            }
+        }
+        // Force pulse: shove a close attacker away, extra value near the void.
+        if (enemy != nullptr
+            && enemyDistance < 4.0f
+            && bot.IsHeroAbilityReady(HeroAbilitySlot::Active1)
+            && (defendingBase
+                || bot.GetHealth() <= enemy->GetHealth() + 12
+                || IsVoidThreatAt(enemy->GetPosition())))
+        {
+            return cast(HeroAbilitySlot::Active1, enemy->GetPosition(), true);
+        }
+        // Molotov zones a mid-range target while fighting or sieging.
+        if (enemy != nullptr
+            && enemyDistance > 4.5f
+            && enemyDistance < 12.0f
+            && (fightingIntent || assaultIntent)
+            && bot.IsHeroAbilityReady(HeroAbilitySlot::Active2))
+        {
+            return cast(HeroAbilitySlot::Active2, enemy->GetPosition(), true);
+        }
+        break;
+    }
+    case HeroId::Orbita:
+    {
+        // Escape teleport: hurt and cornered. The teleport costs health, so
+        // skip it when nearly dead.
+        if (bot.IsHeroAbilityReady(HeroAbilitySlot::Ultimate)
+            && enemy != nullptr
+            && enemyDistance < 6.0f
+            && bot.GetHealth() < 40
+            && bot.GetHealth() > 18)
+        {
+            return cast(
+                HeroAbilitySlot::Ultimate,
+                Vector3 { team.spawnPoint.x, bot.GetPosition().y, team.spawnPoint.z },
+                true);
+        }
+        if (bot.IsHeroAbilityReady(HeroAbilitySlot::Active1) && bot.IsOnGround())
+        {
+            // Gap-closing dash on runners; this also primes the momentum strike.
+            if (enemy != nullptr
+                && enemyDistance > 4.5f
+                && enemyDistance < 11.0f
+                && (memory.intent == BotIntent::ChaseWeakEnemy
+                    || (fightingIntent && bot.GetHealth() >= enemy->GetHealth() - 8)))
+            {
+                return cast(HeroAbilitySlot::Active1, enemy->GetPosition(), true);
+            }
+            // Disengage dash when retreating with an enemy on top of us.
+            if (enemy != nullptr && enemyDistance < 4.0f && memory.intent == BotIntent::RetreatHome)
+            {
+                const Vector3 away {
+                    bot.GetPosition().x * 2.0f - enemy->GetPosition().x,
+                    bot.GetPosition().y,
+                    bot.GetPosition().z * 2.0f - enemy->GetPosition().z
+                };
+                return cast(HeroAbilitySlot::Active1, away, true);
+            }
+        }
+        // Phantom bridge: cross a gap toward the objective without real blocks.
+        if (bot.IsHeroAbilityReady(HeroAbilitySlot::Active2)
+            && assaultIntent
+            && inventory.GetBlocks() <= 4)
+        {
+            const Vector3 ahead {
+                bot.GetPosition().x + bot.Forward().x * 1.6f,
+                bot.GetPosition().y,
+                bot.GetPosition().z + bot.Forward().z * 1.6f
+            };
+            if (IsVoidThreatAt(ahead))
+            {
+                return cast(HeroAbilitySlot::Active2, Vector3 {}, false);
+            }
+        }
+        break;
+    }
+    case HeroId::Brom:
+    {
+        const bool nearHome = distanceFromHomeSq < 900.0f;
+        if (bot.IsHeroAbilityReady(HeroAbilitySlot::Ultimate)
+            && nearHome
+            && (defendingBase || memory.coreDefenseCritical))
+        {
+            return cast(HeroAbilitySlot::Ultimate, Vector3 {}, false);
+        }
+        // Turret holds ground while defending or brawling near base. Keep a
+        // small gold reserve when not defending.
+        if (bot.IsHeroAbilityReady(HeroAbilitySlot::Active2)
+            && inventory.GetResource(ResourceType::Gold) >= 12 + (defendingBase ? 0 : 8)
+            && (defendingBase || (enemy != nullptr && enemyDistance < 9.0f)))
+        {
+            return cast(HeroAbilitySlot::Active2, Vector3 {}, false);
+        }
+        // Vacuum bot only with a clear iron surplus and nobody attacking.
+        if (bot.IsHeroAbilityReady(HeroAbilitySlot::Active1)
+            && enemy == nullptr
+            && inventory.GetResource(ResourceType::Iron) >= 60
+            && nearHome)
+        {
+            return cast(HeroAbilitySlot::Active1, Vector3 {}, false);
+        }
+        break;
+    }
+    case HeroId::Konvoy:
+    {
+        // Containment dome on a committed kill or base defense.
+        if (bot.IsHeroAbilityReady(HeroAbilitySlot::Ultimate)
+            && enemy != nullptr
+            && enemyDistance < 5.0f
+            && (memory.intent == BotIntent::ChaseWeakEnemy
+                || defendingBase
+                || enemy->GetHealth() < bot.GetHealth()))
+        {
+            return cast(HeroAbilitySlot::Ultimate, enemy->GetPosition(), true);
+        }
+        // Handcuffs tether a kiting enemy.
+        if (bot.IsHeroAbilityReady(HeroAbilitySlot::Active2)
+            && enemy != nullptr
+            && enemyDistance < 5.5f
+            && fightingIntent)
+        {
+            return cast(HeroAbilitySlot::Active2, enemy->GetPosition(), true);
+        }
+        // Defenders seed traps around the base while it is quiet.
+        if (bot.IsHeroAbilityReady(HeroAbilitySlot::Active1)
+            && memory.role == BotRole::Defender
+            && enemy == nullptr
+            && distanceFromHomeSq < 110.0f)
+        {
+            return cast(HeroAbilitySlot::Active1, Vector3 {}, false);
+        }
+        break;
+    }
+    case HeroId::Likho:
+    {
+        // Silent steps into the backline while sieging or stalking.
+        if (bot.IsHeroAbilityReady(HeroAbilitySlot::Active1)
+            && enemy != nullptr
+            && enemyDistance < 14.0f
+            && (assaultIntent || memory.intent == BotIntent::ChaseWeakEnemy))
+        {
+            return cast(HeroAbilitySlot::Active1, enemy->GetPosition(), true);
+        }
+        // Bleed once we are trading hits.
+        if (bot.IsHeroAbilityReady(HeroAbilitySlot::Active2)
+            && enemy != nullptr
+            && enemyDistance < 3.5f)
+        {
+            return cast(HeroAbilitySlot::Active2, enemy->GetPosition(), true);
+        }
+        // Disguise to slip toward the enemy core.
+        if (bot.IsHeroAbilityReady(HeroAbilitySlot::Ultimate)
+            && assaultIntent
+            && enemyCore != nullptr
+            && DistanceSquared(bot.GetPosition(), world_.GridToWorld(enemyCore->GetBlockPosition())) < 900.0f)
+        {
+            return cast(HeroAbilitySlot::Ultimate, Vector3 {}, false);
+        }
+        break;
+    }
+    case HeroId::Svidetel:
+    {
+        // Echo support when entering a fight.
+        if (bot.IsHeroAbilityReady(HeroAbilitySlot::Active1)
+            && enemy != nullptr
+            && enemyDistance < 8.0f
+            && fightingIntent)
+        {
+            return cast(HeroAbilitySlot::Active1, enemy->GetPosition(), true);
+        }
+        // Phase a blocked path open.
+        if (bot.IsHeroAbilityReady(HeroAbilitySlot::Active2) && memory.stuckTimer > 1.4f)
+        {
+            return cast(HeroAbilitySlot::Active2, Vector3 {}, false);
+        }
+        // Void contours to find the last runners.
+        if (bot.IsHeroAbilityReady(HeroAbilitySlot::Ultimate)
+            && (memory.intent == BotIntent::ChaseWeakEnemy || matchTime_ > 150.0f))
+        {
+            return cast(HeroAbilitySlot::Ultimate, Vector3 {}, false);
+        }
+        break;
+    }
     }
 
     return false;
@@ -3097,10 +3489,13 @@ void Game::UpdateBots(float dt)
                     kCoordinationSignalTtl,
                     core.GetTeamId())
                 : 0;
+            const bool clockwisePressure = !automatch_.active || automatch_.completedRuns % 2 == 0;
+            const float neighborBonus = core.GetTeamId() == PreferredNeighborTeam(team.id, clockwisePressure) ? 48.0f : 0.0f;
             const float score = distanceFromBase * 0.38f
                 - weaknessBonus
                 + defenderPenalty
-                + static_cast<float>(coordinatedAttackers) * 88.0f;
+                + static_cast<float>(coordinatedAttackers) * 88.0f
+                - neighborBonus;
             if (score < bestCoreScore)
             {
                 bestCoreScore = score;
@@ -3144,8 +3539,9 @@ void Game::UpdateBots(float dt)
         teamContext.strategicPlan = plan;
     }
 
-    for (Player& bot : players_)
+    for (std::size_t botOffset = 0; botOffset < players_.size(); ++botOffset)
     {
+        Player& bot = players_[(simulationOrderOffset_ + botOffset) % players_.size()];
         if (bot.IsLocal() || !bot.IsAlive() || bot.IsEliminated())
         {
             continue;
@@ -3163,6 +3559,7 @@ void Game::UpdateBots(float dt)
 
 void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameContext& frameContext)
 {
+    ScopedProfileTimer decisionProfile(profilingEnabled_, profileDecisionMs_, profileDecisionCalls_);
     BotMemory& memory = GetBotMemory(bot);
     TickBotMemory(memory, dt);
     memory.carriedResourceValue = CarriedResourceValue(bot.GetInventory());
@@ -3206,6 +3603,16 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
     const Vector3 coreHome = teamContext != nullptr ? teamContext->coreHome : world_.GridToWorld(team.coreBlock);
     const Vector3 botPos = bot.GetPosition();
     const float distanceFromHome = DistanceSquared(bot.GetPosition(), coreHome);
+    int openingRank = 0;
+    for (const Player& candidate : players_)
+    {
+        if (!candidate.IsLocal()
+            && candidate.GetTeamId() == bot.GetTeamId()
+            && candidate.GetId() < bot.GetId())
+        {
+            ++openingRank;
+        }
+    }
     BotTeamSnapshot teamPlan = teamContext != nullptr
         ? teamContext->teamPlan
         : BuildBotTeamSnapshot(bot, coreHome, players_, botMemories_, botMemoryIndexByPlayerId_);
@@ -3276,6 +3683,7 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
         AddEventMessage(bot.GetName() + " role -> " + ToString(memory.role), GetTeamColor(team.color), 1.2f);
     }
 
+    ScopedProfileTimer perceptionProfile(profilingEnabled_, profilePerceptionMs_, profilePerceptionCalls_);
     const auto findNearbyEnemyFromSnapshot = [&](float maxDistance) -> Player*
     {
         Player* best = nullptr;
@@ -3329,9 +3737,15 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
     };
 
     Player* nearbyEnemy = findNearbyEnemyFromSnapshot(BotEngageRange(memory.role, botDifficulty_, botTuning));
-    const float huntRange = matchTime_ > 120.0f
-        ? (botDifficulty_ == BotDifficulty::Hard ? 168.0f : 142.0f)
-        : (botDifficulty_ == BotDifficulty::Hard ? 128.0f : 108.0f);
+    // Once no cores remain anywhere the whole map is the hunting ground:
+    // corner bases sit farther apart than the normal hunt radius, and a bot
+    // that cannot "see" anyone will idle at home until sudden death kills it.
+    const bool allCoresGone = !team.coreAlive && (enemyCore == nullptr || !enemyCore->IsAlive());
+    const float huntRange = allCoresGone
+        ? 100000.0f
+        : (matchTime_ > 120.0f
+            ? (botDifficulty_ == BotDifficulty::Hard ? 168.0f : 142.0f)
+            : (botDifficulty_ == BotDifficulty::Hard ? 128.0f : 108.0f));
     Player* huntEnemy = findNearbyEnemyFromSnapshot(huntRange);
     Player* finalLifeEnemy = nullptr;
     float finalLifeEnemyDistanceSq = std::numeric_limits<float>::max();
@@ -3407,22 +3821,63 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
         && team.coreAlive
         && distanceFromHome > 40.0f;
     const int desiredBlocks = BotDesiredBlocks(memory.role, botTuning);
-    const ResourcePickup* bestPickup = ::FindBestPickupForBot(
-        bot,
-        memory.role,
-        pickups_,
-        aliveEnemies,
-        coreHome,
-        arenaBiome_ == ArenaBiome::Ruins);
-    const BotResourcePlan resourcePlan = BuildBotResourcePlan(bot, bestPickup, generators_, memory.role, arenaBiome_ == ArenaBiome::Ruins);
+    BotResourcePlan resourcePlan {};
+    if (memory.resourcePlanTimer <= 0.0f)
+    {
+        int openingHomeCollectorId = std::numeric_limits<int>::max();
+        for (const Player& candidate : players_)
+        {
+            if (!candidate.IsLocal()
+                && candidate.IsAlive()
+                && !candidate.IsEliminated()
+                && candidate.GetTeamId() == bot.GetTeamId())
+            {
+                openingHomeCollectorId = std::min(openingHomeCollectorId, candidate.GetId());
+            }
+        }
+        const bool allowHomePickup = matchTime_ >= 60.0f || bot.GetId() == openingHomeCollectorId;
+        const ResourcePickup* bestPickup = ::FindBestPickupForBot(
+            bot,
+            memory.role,
+            pickups_,
+            aliveEnemies,
+            coreHome,
+            arenaBiome_ == ArenaBiome::Ruins,
+            allowHomePickup);
+        resourcePlan = BuildBotResourcePlan(bot, bestPickup, generators_, memory.role, arenaBiome_ == ArenaBiome::Ruins);
+        memory.cachedResourceTarget = resourcePlan.target;
+        memory.cachedResourceType = static_cast<int>(resourcePlan.type);
+        memory.hasCachedResourceTarget = resourcePlan.hasTarget;
+        memory.resourcePlanTimer = botDifficulty_ == BotDifficulty::Hard ? 0.12f : 0.24f;
+    }
+    else
+    {
+        resourcePlan.target = memory.cachedResourceTarget;
+        resourcePlan.type = static_cast<ResourceType>(memory.cachedResourceType);
+        resourcePlan.hasTarget = memory.hasCachedResourceTarget;
+    }
     const Vector3 resourceTarget = resourcePlan.target;
     const bool hasResourceTarget = resourcePlan.hasTarget;
     const ResourceType resourceTargetType = resourcePlan.type;
     const float nearbyEnemyDistance = nearbyEnemy != nullptr ? std::sqrt(DistanceSquared(bot.GetPosition(), nearbyEnemy->GetPosition())) : 999.0f;
-    const bool canBreakDefense = enemyCore != nullptr
+    const int tacticalEnemyCoreTeamId = enemyCore != nullptr ? enemyCore->GetTeamId() : -1;
+    if (memory.tacticalCheckTimer <= 0.0f || memory.tacticalEnemyCoreTeamId != tacticalEnemyCoreTeamId)
+    {
+        memory.tacticalEnemyCoreTeamId = tacticalEnemyCoreTeamId;
+        memory.cachedCanBreakDefense = enemyCore != nullptr
+            && enemyCore->IsAlive()
+            && DistanceSquared(bot.GetPosition(), world_.GridToWorld(enemyCore->GetBlockPosition())) < 28.0f
+            && FindCoreDefenseBlock(*enemyCore, bot).has_value();
+        memory.cachedCoreCanUpgrade = team.coreAlive
+            && memory.role == BotRole::Defender
+            && FindUpgradeableCoreDefenseBlock(team, bot).has_value();
+        memory.tacticalCheckTimer = botDifficulty_ == BotDifficulty::Hard ? 0.10f : 0.18f;
+    }
+    const bool canBreakDefense = memory.cachedCanBreakDefense
+        && enemyCore != nullptr
         && enemyCore->IsAlive()
-        && DistanceSquared(bot.GetPosition(), world_.GridToWorld(enemyCore->GetBlockPosition())) < 28.0f
-        && FindCoreDefenseBlock(*enemyCore, bot).has_value();
+        && enemyCore->GetTeamId() == memory.tacticalEnemyCoreTeamId
+        && DistanceSquared(bot.GetPosition(), world_.GridToWorld(enemyCore->GetBlockPosition())) < 32.0f;
     const bool closeToEnemyCore = enemyCore != nullptr
         && DistanceSquared(botPos, world_.GridToWorld(enemyCore->GetBlockPosition())) < 150.0f;
     const bool bridgeKitReady = inventory.GetBlocks() >= (memory.role == BotRole::Rusher ? 12 : 18)
@@ -3436,7 +3891,7 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
     const bool readyToRush = bridgeKitReady && combatKitReady;
     const bool coreCanUpgrade = team.coreAlive
         && memory.role == BotRole::Defender
-        && FindUpgradeableCoreDefenseBlock(team, bot).has_value();
+        && memory.cachedCoreCanUpgrade;
     const Team* huntEnemyTeam = huntEnemy != nullptr ? FindTeam(huntEnemy->GetTeamId()) : nullptr;
     const bool huntEnemyOnFinalLife = huntEnemyTeam != nullptr && !huntEnemyTeam->coreAlive;
     int finalLifeTeamAlive = 0;
@@ -3494,7 +3949,14 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
         memory.retreatTimer = std::max(memory.retreatTimer, botDifficulty_ == BotDifficulty::Hard ? 0.95f : 1.55f);
     }
     const bool retreating = memory.retreatTimer > 0.0f && team.coreAlive;
+    // A stalled-fight ban means: stop seeking this brawl, play the objective.
+    // Defending the base or finishing a final-life enemy always overrides it.
+    const bool fightSeekAllowed = memory.chaseBanTimer <= 0.0f
+        || defenderThreat
+        || enemyBlockingObjective
+        || (huntEnemyOnFinalLife && nearbyEnemy == huntEnemy);
     const bool shouldFightNearby = nearbyEnemy != nullptr
+        && fightSeekAllowed
         && bot.GetHealth() > fightHealth
         && !nearbyFightAssessment.shouldRetreat
         && (nearbyFightAssessment.shouldFight
@@ -3529,6 +3991,8 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
 
     const Vector3 shopTarget { team.shopPosition.x, 1.5f, team.shopPosition.z };
     const Vector3 spawnTarget { team.spawnPoint.x, 1.5f, team.spawnPoint.z };
+    perceptionProfile.Stop();
+    ScopedProfileTimer planningProfile(profilingEnabled_, profilePlanningMs_, profilePlanningCalls_);
     const BotDecisionContext decisionContext {
         bot,
         team,
@@ -3592,7 +4056,25 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
         decision.reason = macroDirective.reason;
         decision.score += 520.0f;
     }
+    const bool openingScout = matchTime_ < 60.0f
+        && openingRank >= 1
+        && openingRank <= 2
+        && distanceFromHome < 196.0f
+        && enemyAtCore == nullptr
+        && !coreDefenseCritical;
+    if (openingScout)
+    {
+        decision.intent = BotIntent::PressureCore;
+        decision.state = BotState::AttackCore;
+        decision.target = enemyCore != nullptr
+            ? world_.GridToWorld(enemyCore->GetBlockPosition())
+            : Vector3 { 0.0f, 1.5f, 0.0f };
+        decision.fightTarget = nullptr;
+        decision.reason = "opening bridge pressure";
+        decision.score = 2000.0f;
+    }
     ApplyBotDecision(memory, decision, botDifficulty_, botTuning);
+    planningProfile.Stop();
     if (coordBus != nullptr)
     {
         CoordinationSignal signal = CoordinationSignal::None;
@@ -3633,6 +4115,8 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
         return;
     }
 
+    decisionProfile.Stop();
+    ScopedProfileTimer movementProfile(profilingEnabled_, profileMovementMs_, profileMovementCalls_);
     Vector3 target = decision.target;
     if (memory.intent == BotIntent::RetreatHome && memory.role != BotRole::Defender && bot.GetHealth() < 55)
     {
@@ -3666,7 +4150,7 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
     {
         target = ChooseBotWaypoint(bot, target);
     }
-    if (memory.state != BotState::Fight && !objectivePush)
+    if (memory.state != BotState::Fight)
     {
         target = ChooseBotPathWaypoint(bot, target, dt, frameContext);
     }
@@ -3747,9 +4231,90 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
         BiomeGroundControlMultiplier(bot),
         BiomeAirControlMultiplier());
     ApplyStandingBlockEffects(bot, false);
+    movementProfile.Stop();
+    ScopedProfileTimer combatProfile(profilingEnabled_, profileCombatMs_, profileCombatCalls_);
 
     const float movedDistance = DistanceSquared(beforeMove, bot.GetPosition());
     UpdateBotStuckAfterMove(memory, wish, movedDistance, dt, bot.GetPosition());
+
+    // Chase futility bookkeeping: pursuits that stop closing the distance get
+    // banned for a while so the bot pivots to core assault or economy instead
+    // of orbiting a runner (and falling into the void) for minutes.
+    const bool suddenDeathBrawl = !team.coreAlive
+        && (enemyCore == nullptr || !enemyCore->IsAlive());
+    if (suddenDeathBrawl)
+    {
+        memory.chaseBanTimer = 0.0f;
+        memory.fightStallTimer = 0.0f;
+        memory.chaseStuckTimer = 0.0f;
+    }
+    else if (memory.intent == BotIntent::FightEnemy && fightTarget != nullptr)
+    {
+        // A fight that is not actually hurting anyone for a long stretch is a
+        // stall (heal wars, knockback ping-pong). Walk away and play the map.
+        if (memory.chaseTargetId != fightTarget->GetId())
+        {
+            memory.chaseTargetId = fightTarget->GetId();
+            memory.fightTargetHealth = fightTarget->GetHealth();
+            memory.fightStallTimer = 0.0f;
+        }
+        else if (fightTarget->GetHealth() < memory.fightTargetHealth - 4 || bot.GetHealth() < 30)
+        {
+            memory.fightTargetHealth = fightTarget->GetHealth();
+            memory.fightStallTimer = std::max(0.0f, memory.fightStallTimer - 2.5f);
+        }
+        else
+        {
+            memory.fightStallTimer += dt;
+        }
+        if (memory.fightStallTimer > 11.0f)
+        {
+            memory.chaseBanTimer = std::max(memory.chaseBanTimer, 22.0f);
+            memory.fightStallTimer = 0.0f;
+            memory.chaseTargetId = -1;
+        }
+    }
+    else if (memory.intent == BotIntent::ChaseWeakEnemy && fightTarget != nullptr)
+    {
+        const float chaseDistance = std::sqrt(DistanceSquared(bot.GetPosition(), fightTarget->GetPosition()));
+        if (memory.chaseTargetId != fightTarget->GetId())
+        {
+            memory.chaseTargetId = fightTarget->GetId();
+            memory.chaseStuckTimer = 0.0f;
+            memory.chaseLastDistance = chaseDistance;
+        }
+        const float closingSpeed = dt > 0.0f ? (memory.chaseLastDistance - chaseDistance) / dt : 0.0f;
+        memory.chaseLastDistance = chaseDistance;
+        if (chaseDistance < 3.4f)
+        {
+            memory.chaseStuckTimer = std::max(0.0f, memory.chaseStuckTimer - dt * 2.0f);
+        }
+        else if (closingSpeed < 0.35f)
+        {
+            memory.chaseStuckTimer += dt;
+            if (edgePressure && bot.GetInventory().GetBlocks() <= 0)
+            {
+                memory.chaseStuckTimer += dt * 2.0f;
+            }
+        }
+        else
+        {
+            memory.chaseStuckTimer = std::max(0.0f, memory.chaseStuckTimer - dt * 0.6f);
+        }
+
+        if (memory.chaseStuckTimer > 8.0f)
+        {
+            memory.chaseBanTimer = enemyCore != nullptr && enemyCore->IsAlive() ? 26.0f : 11.0f;
+            memory.chaseStuckTimer = 0.0f;
+            memory.chaseTargetId = -1;
+        }
+    }
+    else if (memory.chaseTargetId != -1)
+    {
+        memory.chaseTargetId = -1;
+        memory.chaseStuckTimer = 0.0f;
+        memory.fightStallTimer = 0.0f;
+    }
 
     if ((memory.intent == BotIntent::GearUp || memory.state == BotState::Shop || wantsShop)
         && nearbyEnemy == nullptr)
@@ -3757,10 +4322,8 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
         BotTryShop(bot, team);
     }
 
-    if (BotUseUtility(bot, team, fightTarget, enemyCore))
-    {
-        memory.utilityTimer = BotUtilityCooldown(botDifficulty_);
-    }
+    BotUseHeroAbility(bot, team, fightTarget, enemyCore);
+    BotUseUtility(bot, team, fightTarget, enemyCore);
 
     TryPerformBotMeleeAttack(
         bot,
@@ -3813,6 +4376,7 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
 
 Vector3 Game::ChooseBotPathWaypoint(Player& bot, Vector3 finalTarget, float dt, const BotFrameContext& frameContext)
 {
+    ScopedProfileTimer profileTimer(profilingEnabled_, profilePathMs_, profilePathCalls_);
     BotMemory& memory = GetBotMemory(bot);
     const auto foundTeamContext = frameContext.teamContexts.find(bot.GetTeamId());
     const BotTeamFrameContext* teamContext = foundTeamContext != frameContext.teamContexts.end()
@@ -4225,11 +4789,12 @@ Vector3 Game::ChooseBotPathWaypoint(Player& bot, Vector3 finalTarget, float dt, 
             break;
         }
 
+        const bool preferZFirst = bot.GetId() % 2 == 0;
         const GridPos offsets[] {
-            GridPos { 1, 0, 0 },
-            GridPos { -1, 0, 0 },
-            GridPos { 0, 0, 1 },
-            GridPos { 0, 0, -1 }
+            preferZFirst ? GridPos { 0, 0, 1 } : GridPos { 1, 0, 0 },
+            preferZFirst ? GridPos { 0, 0, -1 } : GridPos { -1, 0, 0 },
+            preferZFirst ? GridPos { 1, 0, 0 } : GridPos { 0, 0, 1 },
+            preferZFirst ? GridPos { -1, 0, 0 } : GridPos { 0, 0, -1 }
         };
         for (const GridPos& offset : offsets)
         {
@@ -4396,7 +4961,9 @@ bool Game::TryBotBridgeBlock(Player& bot, Vector3 target)
     });
     const int stepX = direction.x > 0.18f ? 1 : (direction.x < -0.18f ? -1 : 0);
     const int stepZ = direction.z > 0.18f ? 1 : (direction.z < -0.18f ? -1 : 0);
-    const bool xDominant = std::fabs(direction.x) >= std::fabs(direction.z);
+    const float axisDifference = std::fabs(direction.x) - std::fabs(direction.z);
+    const bool xDominant = axisDifference > 0.001f
+        || (std::fabs(axisDifference) <= 0.001f && bot.GetId() % 2 != 0);
     const GridPos primary {
         underFeet.x + (xDominant ? stepX : 0),
         bridgeY,
@@ -4408,9 +4975,9 @@ bool Game::TryBotBridgeBlock(Player& bot, Vector3 target)
         underFeet.z + (xDominant ? stepZ : 0)
     };
     const GridPos sideStep {
-        std::fabs(direction.x) > std::fabs(direction.z) ? 0 : memory.strafeSign,
+        xDominant ? 0 : memory.strafeSign,
         0,
-        std::fabs(direction.x) > std::fabs(direction.z) ? memory.strafeSign : 0
+        xDominant ? memory.strafeSign : 0
     };
     const GridPos candidates[] {
         primary,
@@ -4858,7 +5425,9 @@ EnergyCore* Game::SelectBestAttackTarget(
             : 0;
         const float coordinationPenalty = static_cast<float>(coordinatedAttackers) * tuning.pressureCoordinationPenalty;
         const float accessBonus = HasBotCoreAccess(player, core) ? 95.0f : 0.0f;
-        const float score = distance - weaknessBonus + defenderPenalty + coordinationPenalty - accessBonus;
+        const bool clockwisePressure = !automatch_.active || automatch_.completedRuns % 2 == 0;
+        const float neighborBonus = core.GetTeamId() == PreferredNeighborTeam(player.GetTeamId(), clockwisePressure) ? 120.0f : 0.0f;
+        const float score = distance - weaknessBonus + defenderPenalty + coordinationPenalty - accessBonus - neighborBonus;
         if (score < bestScore)
         {
             bestScore = score;
@@ -5215,8 +5784,19 @@ bool Game::TryBotRepairCoreDefense(Player& bot, Team& team, float dt)
         return true;
     }
 
+    BotMemory& memory = GetBotMemory(bot);
+    if (memory.repairPlaceCooldown > 0.0f)
+    {
+        return true;
+    }
     if (TryPlaceBlockForPlayer(bot, *missing, false))
     {
+        // Rate-limit wall rebuilding: an instant infinite wall made every
+        // siege unwinnable; a paced defender can be out-damaged by two
+        // coordinated attackers but still holds off a single one.
+        memory.repairPlaceCooldown = botDifficulty_ == BotDifficulty::Hard
+            ? 0.75f
+            : (botDifficulty_ == BotDifficulty::Easy ? 1.3f : 0.95f);
         AddEventMessage(bot.GetName() + " repaired Core defense", GetTeamColor(team.color), 1.5f);
         return true;
     }

@@ -266,6 +266,22 @@ struct BotMemory
     bool coreDefenseCritical = false;
     int missingDefenseBlocks = 0;
     Vector3 lastPosition {};
+    int chaseTargetId = -1;
+    int fightTargetHealth = -1;
+    float fightStallTimer = 0.0f;
+    float chaseStuckTimer = 0.0f;
+    float chaseBanTimer = 0.0f;
+    float chaseLastDistance = -1.0f;
+    float heroAbilityTimer = 0.0f;
+    float repairPlaceCooldown = 0.0f;
+    float resourcePlanTimer = 0.0f;
+    Vector3 cachedResourceTarget {};
+    int cachedResourceType = 0;
+    bool hasCachedResourceTarget = false;
+    float tacticalCheckTimer = 0.0f;
+    int tacticalEnemyCoreTeamId = -1;
+    bool cachedCanBreakDefense = false;
+    bool cachedCoreCanUpgrade = false;
 };
 
 const char* ToString(BotState state);

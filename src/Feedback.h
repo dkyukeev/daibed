@@ -67,7 +67,8 @@ enum class HeroDeviceVisualKind
     BromTurretDrone,
     KonvoyTrap,
     KonvoyTether,
-    KonvoyDome
+    KonvoyDome,
+    SvidetelEcho
 };
 
 struct HeroDeviceVisual

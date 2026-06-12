@@ -42,7 +42,6 @@ std::optional<int> GameRules::CheckWinCondition(const std::vector<Team>& teams, 
     {
         return winnerTeamId;
     }
-
     return std::nullopt;
 }
 

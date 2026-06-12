@@ -74,6 +74,8 @@ struct HeroRuntimeState
     bool orbitaMomentumStrike = false;
     bool orbitaAirDashLocked = false;
     float orbitaPulseTimer = 0.0f;
+    int likhoDisguiseTeamId = -1;
+    bool likhoInsideEnemyBase = false;
 };
 
 const char* HeroIdKey(HeroId id);

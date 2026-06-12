@@ -1,12 +1,17 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(DaiBed LANGUAGES CXX)
+project(DaiBed VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 option(DAIBED_USE_SYSTEM_RAYLIB "Use an already installed raylib package" ON)
+option(DAIBED_DEVELOPER_BUILD "Expose automatch and experimental setup in the UI" OFF)
 
 if(DAIBED_USE_SYSTEM_RAYLIB)
     find_package(raylib QUIET)
@@ -65,9 +70,30 @@ add_executable(DaiBed
 
 target_include_directories(DaiBed PRIVATE src)
 target_link_libraries(DaiBed PRIVATE raylib)
+target_compile_definitions(DaiBed PRIVATE
+    DAIBED_VERSION="${PROJECT_VERSION}"
+    DAIBED_DEVELOPER_BUILD=$<BOOL:${DAIBED_DEVELOPER_BUILD}>
+)
 
 if(MSVC)
     target_compile_options(DaiBed PRIVATE /W4 /permissive-)
+    if(NOT DAIBED_DEVELOPER_BUILD)
+        target_link_options(DaiBed PRIVATE "$<$<CONFIG:Release>:/SUBSYSTEM:WINDOWS>" "$<$<CONFIG:Release>:/ENTRY:mainCRTStartup>")
+    endif()
 else()
     target_compile_options(DaiBed PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+
+install(TARGETS DaiBed RUNTIME DESTINATION . COMPONENT Runtime)
+install(DIRECTORY assets DESTINATION . COMPONENT Runtime)
+install(FILES README.md THIRD_PARTY_LICENSES.md DESTINATION . COMPONENT Runtime)
+install(FILES docs/RELEASE_0.1.0.md docs/FEEL_AUDIT.md DESTINATION docs COMPONENT Runtime)
+
+set(CPACK_PACKAGE_NAME "DaiBed")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_FILE_NAME "DaiBed-${PROJECT_VERSION}-windows-x64")
+set(CPACK_GENERATOR "ZIP")
+set(CPACK_COMPONENTS_ALL Runtime)
+set(CPACK_ARCHIVE_COMPONENT_INSTALL ON)
+set(CPACK_COMPONENTS_GROUPING ALL_COMPONENTS_IN_ONE)
+include(CPack)

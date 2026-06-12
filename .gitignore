@@ -1,4 +1,8 @@
 build/
+build-release/
+build-public/
+_CPack_Packages/
+DaiBed-*-windows-x64.zip
 .vs/
 .vscode/
 CMakeFiles/
@@ -59,3 +63,19 @@ skills-lock.json
 .agents/skills/caveman-review/SKILL.md
 .agents/skills/caveman-stats/README.md
 .agents/skills/caveman-stats/SKILL.md
+docs/CODEX_PROMPT.md
+docs/GAME_QUALITY_AUDIT.md
+docs/ROADMAP.md
+test-src/allchanges.diff
+test-src/AudioSystem.cpp
+test-src/AudioSystem.h
+test-src/BotAI.h
+test-src/Game (1).cpp
+test-src/GAME_QUALITY_AUDIT.md
+test-src/Game.cpp
+test-src/Game.h
+test-src/GameBotAI.cpp
+test-src/GameRules.cpp
+test-src/Renderer.cpp
+test-src/VISION.md
+docs/VISION.md

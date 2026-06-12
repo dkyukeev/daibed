@@ -12,12 +12,14 @@ from __future__ import annotations
 import argparse
 import copy
 import json
-import math
 import os
+import queue
 import random
-import shutil
 import subprocess
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -175,6 +177,8 @@ def resolve_from_cwd(cwd: str, path: str) -> Path:
 
 def mutate(genome: dict[str, Any], generation: int, scale: float) -> dict[str, Any]:
     child = copy.deepcopy(genome)
+    for key in ("screeningFitness", "evaluationStage", "fitnessLast", "fitnessMean", "fitnessBestSeen", "evaluations"):
+        child.pop(key, None)
     child["generation"] = generation
     child["fitness"] = 0.0
     for key, value in list(child.items()):
@@ -192,6 +196,8 @@ def mutate(genome: dict[str, Any], generation: int, scale: float) -> dict[str, A
 
 def crossover(a: dict[str, Any], b: dict[str, Any], generation: int) -> dict[str, Any]:
     child = copy.deepcopy(a)
+    for key in ("screeningFitness", "evaluationStage", "fitnessLast", "fitnessMean", "fitnessBestSeen", "evaluations"):
+        child.pop(key, None)
     for key, value in list(child.items()):
         if key in ("id", "generation", "fitness"):
             continue
@@ -218,39 +224,6 @@ def write_process_log(path: Path, payload: str | bytes | None) -> None:
     if isinstance(payload, bytes):
         payload = payload.decode("utf-8", errors="replace")
     path.write_text(payload, encoding="utf-8")
-
-
-def quarantine_failed_tournament(
-    args: argparse.Namespace,
-    tuning_path: Path,
-    command: list[str],
-    return_code: int | None,
-    reason: str,
-    run_started_at: float,
-    stdout: str | bytes | None = None,
-    stderr: str | bytes | None = None,
-) -> None:
-    write_process_log(tuning_path.with_suffix(".stdout.log"), stdout)
-    write_process_log(tuning_path.with_suffix(".stderr.log"), stderr)
-
-    stats_path = Path(args.cwd) / "automatch_stats.json"
-    failed_stats_path = None
-    if stats_path.exists() and stats_path.stat().st_mtime >= run_started_at - 1.0:
-        failed_stats_path = tuning_path.with_suffix(".failed.stats.json")
-        shutil.copy2(stats_path, failed_stats_path)
-
-    failure = {
-        "reason": reason,
-        "returnCode": return_code,
-        "hexReturnCode": hex(return_code & 0xFFFFFFFF) if return_code is not None else None,
-        "command": command,
-        "tuning": str(tuning_path),
-        "copiedStats": str(failed_stats_path) if failed_stats_path else None,
-    }
-    tuning_path.with_suffix(".failed.json").write_text(
-        json.dumps(failure, indent=2),
-        encoding="utf-8",
-    )
 
 
 def team_progress_from_timeline(run: dict[str, Any], team_id: int) -> dict[str, int]:
@@ -372,122 +345,244 @@ def merge_hall_of_fame(
     return merged[:16]
 
 
-def run_tournament_once(
+@dataclass
+class TournamentTask:
+    job_id: str
+    group_index: int
+    tuning_path: Path
+    stats_path: Path
+    score_indexes: list[int]
+    runs: int
+    speed: int
+    minutes: int
+    seed: int
+
+
+class PersistentWorker:
+    def __init__(self, index: int, args: argparse.Namespace, run_dir: Path):
+        self.index = index
+        self.args = args
+        self.run_dir = run_dir
+        self.process: subprocess.Popen[str] | None = None
+        self.output: queue.Queue[str | None] = queue.Queue()
+        self.stderr_file = (run_dir / f"worker_{index:02d}.stderr.log").open("a", encoding="utf-8")
+        self.start()
+
+    def start(self) -> None:
+        self.stop()
+        command = [str(self.args.exe_path), "--automatch-worker"]
+        if self.args.biome:
+            command.extend(["--biome", self.args.biome])
+        self.output = queue.Queue()
+        self.process = subprocess.Popen(
+            command,
+            cwd=self.args.cwd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=self.stderr_file,
+            text=True,
+            bufsize=1,
+        )
+        threading.Thread(target=self._read_output, daemon=True).start()
+        ready = self.output.get(timeout=20.0)
+        if ready != "WORKER_READY":
+            raise RuntimeError(f"worker {self.index} failed to start: {ready!r}")
+
+    def _read_output(self) -> None:
+        process = self.process
+        if process is None or process.stdout is None:
+            self.output.put(None)
+            return
+        for line in process.stdout:
+            self.output.put(line.rstrip("\r\n"))
+        self.output.put(None)
+
+    def run(self, task: TournamentTask) -> list[float]:
+        process = self.process
+        if process is None or process.poll() is not None or process.stdin is None:
+            self.start()
+            process = self.process
+        assert process is not None and process.stdin is not None
+
+        command = "\t".join(
+            [
+                task.job_id,
+                str(task.runs),
+                str(task.speed),
+                str(task.minutes),
+                str(task.seed),
+                str(task.tuning_path),
+                str(task.stats_path),
+            ]
+        )
+        output_lines: list[str] = []
+        try:
+            process.stdin.write(command + "\n")
+            process.stdin.flush()
+            deadline = None
+            if self.args.process_timeout_seconds > 0:
+                deadline = time.monotonic() + self.args.process_timeout_seconds
+            while True:
+                timeout = None if deadline is None else max(0.01, deadline - time.monotonic())
+                line = self.output.get(timeout=timeout)
+                if line is None:
+                    raise RuntimeError(f"worker {self.index} exited during {task.job_id}")
+                output_lines.append(line)
+                if line.startswith(f"WORKER_DONE\t{task.job_id}\t"):
+                    if not line.endswith("\t1"):
+                        raise RuntimeError(f"worker reported failed job: {line}")
+                    break
+                if line.startswith(f"WORKER_ERROR\t{task.job_id}\t"):
+                    raise RuntimeError(line)
+        except queue.Empty as exc:
+            self.stop(force=True)
+            raise TimeoutError(f"worker {self.index} timed out on {task.job_id}") from exc
+        finally:
+            write_process_log(task.tuning_path.with_suffix(".stdout.log"), "\n".join(output_lines))
+
+        if not task.stats_path.exists():
+            raise RuntimeError(f"worker completed without {task.stats_path.name}")
+        stats = json.loads(task.stats_path.read_text(encoding="utf-8"))
+        scores = [0.0, 0.0, 0.0, 0.0]
+        counts = [0, 0, 0, 0]
+        for run in stats.get("runs", []):
+            for team in run.get("teams", []):
+                team_id = int(team.get("teamId", -1))
+                if 0 <= team_id < 4:
+                    scores[team_id] += team_score(run, team)
+                    counts[team_id] += 1
+        return [scores[index] / max(1, counts[index]) for index in task.score_indexes]
+
+    def stop(self, force: bool = False) -> None:
+        process = self.process
+        self.process = None
+        if process is None or process.poll() is not None:
+            return
+        try:
+            if not force and process.stdin is not None:
+                process.stdin.write("QUIT\n")
+                process.stdin.flush()
+                process.wait(timeout=5.0)
+            else:
+                process.terminate()
+                process.wait(timeout=5.0)
+        except (BrokenPipeError, subprocess.TimeoutExpired):
+            process.kill()
+            process.wait(timeout=5.0)
+
+    def close(self) -> None:
+        self.stop()
+        self.stderr_file.close()
+
+
+class WorkerPool:
+    def __init__(self, args: argparse.Namespace, run_dir: Path):
+        self.args = args
+        self.workers = [PersistentWorker(index, args, run_dir) for index in range(args.workers)]
+        self.available: queue.Queue[PersistentWorker] = queue.Queue()
+        for worker in self.workers:
+            self.available.put(worker)
+        self.executor = ThreadPoolExecutor(max_workers=len(self.workers))
+
+    def _run_task(self, task: TournamentTask) -> tuple[TournamentTask, list[float]]:
+        worker = self.available.get()
+        try:
+            return task, worker.run(task)
+        except Exception as exc:
+            failure = {
+                "reason": str(exc),
+                "jobId": task.job_id,
+                "tuning": str(task.tuning_path),
+                "stats": str(task.stats_path),
+            }
+            task.tuning_path.with_suffix(".failed.json").write_text(
+                json.dumps(failure, indent=2), encoding="utf-8"
+            )
+            print(f"tournament failed: {task.job_id}: {exc}")
+            return task, [self.args.failure_penalty for _ in task.score_indexes]
+        finally:
+            self.available.put(worker)
+
+    def run_all(self, tasks: list[TournamentTask]) -> list[tuple[TournamentTask, list[float]]]:
+        futures = [self.executor.submit(self._run_task, task) for task in tasks]
+        return [future.result() for future in as_completed(futures)]
+
+    def close(self) -> None:
+        self.executor.shutdown(wait=True)
+        for worker in self.workers:
+            worker.close()
+
+    def __enter__(self) -> "WorkerPool":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
+def evaluation_seed(args: argparse.Namespace, generation: int, rotation: int, stage: str) -> int:
+    stage_salt = 0xC2B2AE35 if stage == "final" else 0x27D4EB2F
+    seed = (
+        args.evaluation_seed
+        + generation * 0x9E3779B9
+        + rotation * 0x85EBCA6B
+        + stage_salt
+    ) & 0xFFFFFFFF
+    return seed or 1
+
+
+def evaluate_genomes(
     args: argparse.Namespace,
+    pool: WorkerPool,
     run_dir: Path,
     generation: int,
-    candidates: list[dict[str, Any]],
-    score_indexes: list[int],
-    rotation: int,
+    genomes: list[dict[str, Any]],
+    runs: int,
+    rotations: int,
+    stage: str,
 ) -> list[float]:
-    tuning_path = run_dir / f"gen{generation:04d}_{int(time.time() * 1000)}_r{rotation}.json"
-    write_team_tuning(tuning_path, candidates)
+    groups = [genomes[start:start + 4] for start in range(0, len(genomes), 4)]
+    totals = [[0.0 for _ in group] for group in groups]
+    counts = [[0 for _ in group] for group in groups]
+    tasks: list[TournamentTask] = []
 
-    command = [
-        str(args.exe_path),
-        "--automatch",
-        "--runs",
-        str(args.runs_per_tournament),
-        "--speed",
-        str(args.speed),
-        "--minutes",
-        str(args.minutes),
-        "--bot-tuning",
-        str(tuning_path),
-    ]
-    if args.biome:
-        command.extend(["--biome", args.biome])
+    for group_index, group in enumerate(groups):
+        padded = [copy.deepcopy(item) for item in group]
+        while len(padded) < 4:
+            padded.append(copy.deepcopy(padded[-1]))
+        for rotation in range(max(1, min(rotations, 4))):
+            order = [(slot + rotation) % 4 for slot in range(4)]
+            candidates = [copy.deepcopy(padded[index]) for index in order]
+            stamp = time.time_ns()
+            name = f"gen{generation:04d}_{stage}_g{group_index:03d}_r{rotation}_{stamp}"
+            tuning_path = run_dir / f"{name}.json"
+            stats_path = run_dir / f"{name}.stats.json"
+            write_team_tuning(tuning_path, candidates)
+            tasks.append(
+                TournamentTask(
+                    job_id=name,
+                    group_index=group_index,
+                    tuning_path=tuning_path,
+                    stats_path=stats_path,
+                    score_indexes=[order.index(index) for index in range(len(group))],
+                    runs=max(1, runs),
+                    speed=args.speed,
+                    minutes=args.minutes,
+                    seed=evaluation_seed(args, generation, rotation, stage),
+                )
+            )
 
-    run_started_at = time.time()
-    try:
-        result = subprocess.run(
-            command,
-            cwd=args.cwd,
-            capture_output=True,
-            text=True,
-            timeout=args.process_timeout_seconds if args.process_timeout_seconds > 0 else None,
+    for task, scores in pool.run_all(tasks):
+        for index, score in enumerate(scores):
+            totals[task.group_index][index] += score
+            counts[task.group_index][index] += 1
+
+    result: list[float] = []
+    for group_index, group in enumerate(groups):
+        result.extend(
+            totals[group_index][index] / max(1, counts[group_index][index])
+            for index in range(len(group))
         )
-    except subprocess.TimeoutExpired as exc:
-        quarantine_failed_tournament(
-            args,
-            tuning_path,
-            command,
-            None,
-            f"process timeout after {exc.timeout} seconds",
-            run_started_at,
-            exc.stdout,
-            exc.stderr,
-        )
-        print(f"tournament failed: {tuning_path.name} timeout after {exc.timeout}s")
-        return [args.failure_penalty for _ in score_indexes]
-
-    write_process_log(tuning_path.with_suffix(".stdout.log"), result.stdout)
-    write_process_log(tuning_path.with_suffix(".stderr.log"), result.stderr)
-    if result.returncode != 0:
-        quarantine_failed_tournament(
-            args,
-            tuning_path,
-            command,
-            result.returncode,
-            "process returned a non-zero exit code",
-            run_started_at,
-            result.stdout,
-            result.stderr,
-        )
-        print(
-            f"tournament failed: {tuning_path.name} "
-            f"return={result.returncode} hex={hex(result.returncode & 0xFFFFFFFF)}"
-        )
-        return [args.failure_penalty for _ in score_indexes]
-
-    stats_path = Path(args.cwd) / "automatch_stats.json"
-    if not stats_path.exists() or stats_path.stat().st_mtime < run_started_at - 1.0:
-        quarantine_failed_tournament(
-            args,
-            tuning_path,
-            command,
-            result.returncode,
-            "process completed without a fresh automatch_stats.json",
-            run_started_at,
-            result.stdout,
-            result.stderr,
-        )
-        print(f"tournament failed: {tuning_path.name} missing fresh automatch_stats.json")
-        return [args.failure_penalty for _ in score_indexes]
-
-    stats = json.loads(stats_path.read_text(encoding="utf-8"))
-    shutil.copy2(stats_path, tuning_path.with_suffix(".stats.json"))
-
-    scores = [0.0, 0.0, 0.0, 0.0]
-    counts = [0, 0, 0, 0]
-    for run in stats.get("runs", []):
-        for team in run.get("teams", []):
-            team_id = int(team.get("teamId", -1))
-            if 0 <= team_id < 4:
-                scores[team_id] += team_score(run, team)
-                counts[team_id] += 1
-    return [scores[i] / max(1, counts[i]) for i in score_indexes]
-
-
-def run_tournament(args: argparse.Namespace, run_dir: Path, generation: int, group: list[dict[str, Any]]) -> list[float]:
-    original_size = len(group)
-    padded_group = [copy.deepcopy(item) for item in group]
-    while len(padded_group) < 4:
-        padded_group.append(copy.deepcopy(padded_group[-1]))
-
-    rotations = max(1, min(args.slot_rotations, 4))
-    totals = [0.0 for _ in range(original_size)]
-    counts = [0 for _ in range(original_size)]
-    for rotation in range(rotations):
-        order = [(slot + rotation) % 4 for slot in range(4)]
-        candidates = [copy.deepcopy(padded_group[index]) for index in order]
-        score_indexes = [order.index(index) for index in range(original_size)]
-        rotation_scores = run_tournament_once(args, run_dir, generation, candidates, score_indexes, rotation)
-        for index, score in enumerate(rotation_scores):
-            totals[index] += score
-            counts[index] += 1
-
-    return [totals[i] / max(1, counts[i]) for i in range(original_size)]
+    return result
 
 
 def make_initial_population(size: int) -> list[dict[str, Any]]:
@@ -500,68 +595,135 @@ def make_initial_population(size: int) -> list[dict[str, Any]]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--exe", default="build/Debug/DaiBed.exe")
+    parser.add_argument("--exe", default="build/Release/DaiBed.exe")
     parser.add_argument("--cwd", default=".")
     parser.add_argument("--out", default="tuning_runs")
     parser.add_argument("--generations", type=int, default=20)
     parser.add_argument("--population", type=int, default=24)
     parser.add_argument("--elite", type=int, default=4)
     parser.add_argument("--runs-per-tournament", type=int, default=6)
-    parser.add_argument("--speed", type=int, default=32)
-    parser.add_argument("--minutes", type=int, default=12)
+    parser.add_argument("--screening-runs", type=int, default=1)
+    parser.add_argument("--finalist-count", type=int, default=8)
+    parser.add_argument("--hall-challengers", type=int, default=4)
+    parser.add_argument("--workers", type=int, default=min(4, os.cpu_count() or 1))
+    parser.add_argument("--speed", type=int, default=256)
+    parser.add_argument("--minutes", type=int, default=14)
     parser.add_argument("--mutation", type=float, default=0.045)
     parser.add_argument("--biome", default="")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--failure-penalty", type=float, default=-1000000.0)
-    parser.add_argument("--process-timeout-seconds", type=int, default=0)
-    parser.add_argument("--slot-rotations", type=int, default=1)
+    parser.add_argument("--process-timeout-seconds", type=int, default=180)
+    parser.add_argument("--screening-rotations", type=int, default=1)
+    parser.add_argument("--slot-rotations", type=int, default=4)
     args = parser.parse_args()
     args.exe_path = resolve_from_cwd(args.cwd, args.exe)
+    args.workers = max(1, args.workers)
+    args.finalist_count = max(args.elite, min(args.population, args.finalist_count))
 
     if args.seed:
         random.seed(args.seed)
+    args.evaluation_seed = args.seed or random.SystemRandom().randrange(1, 2**32)
 
-    run_dir = Path(args.out) / time.strftime("%Y%m%d_%H%M%S")
+    run_dir = resolve_from_cwd(args.cwd, args.out) / time.strftime("%Y%m%d_%H%M%S")
     run_dir.mkdir(parents=True, exist_ok=True)
     population = make_initial_population(args.population)
     hall_of_fame: list[dict[str, Any]] = []
 
-    for generation in range(args.generations):
-        random.shuffle(population)
-        scored: list[dict[str, Any]] = []
-        for start in range(0, len(population), 4):
-            group = [copy.deepcopy(item) for item in population[start:start + 4]]
-            for genome in group:
-                genome["fitness"] = 0.0
-            scores = run_tournament(args, run_dir, generation, group)
-            for genome, score in zip(group, scores):
-                genome["fitness"] = float(genome.get("fitness", 0.0)) + score
-                scored.append(genome)
+    print(
+        f"workers={args.workers} screening={args.screening_runs}x{args.screening_rotations} "
+        f"final={args.runs_per_tournament}x{args.slot_rotations} finalists={args.finalist_count}"
+    )
+    with WorkerPool(args, run_dir) as pool:
+        for generation in range(args.generations):
+            generation_started = time.monotonic()
+            random.shuffle(population)
+            scored = [copy.deepcopy(item) for item in population]
+            screening_scores = evaluate_genomes(
+                args,
+                pool,
+                run_dir,
+                generation,
+                scored,
+                args.screening_runs,
+                args.screening_rotations,
+                "screen",
+            )
+            for genome, score in zip(scored, screening_scores):
+                genome["screeningFitness"] = score
+                genome["fitness"] = score
+                genome["evaluationStage"] = "screening"
 
-        scored.sort(key=lambda item: float(item.get("fitness", 0.0)), reverse=True)
-        elites = scored[: max(1, args.elite)]
-        current_best = elites[0]
-        hall_of_fame = merge_hall_of_fame(hall_of_fame, scored)
+            screening_ranked = sorted(
+                scored,
+                key=lambda item: float(item.get("screeningFitness", 0.0)),
+                reverse=True,
+            )
+            finalists = screening_ranked[: args.finalist_count]
+            finalist_ids = {str(item.get("id", "")) for item in finalists}
+            validation = [copy.deepcopy(item) for item in finalists]
+            for champion in hall_of_fame[: max(0, args.hall_challengers)]:
+                if str(champion.get("id", "")) not in finalist_ids:
+                    validation.append(copy.deepcopy(champion))
 
-        (run_dir / f"generation_{generation:04d}.json").write_text(
-            json.dumps(scored, indent=2),
-            encoding="utf-8",
-        )
-        (run_dir / "best.json").write_text(json.dumps(hall_of_fame[0], indent=2), encoding="utf-8")
-        print(
-            f"generation {generation}: "
-            f"current_best={current_best['id']} fitness={current_best['fitness']:.2f} "
-            f"hall_best={hall_of_fame[0]['id']} mean={hall_of_fame[0]['fitnessMean']:.2f}"
-        )
+            final_scores = evaluate_genomes(
+                args,
+                pool,
+                run_dir,
+                generation,
+                validation,
+                args.runs_per_tournament,
+                args.slot_rotations,
+                "final",
+            )
+            verified_by_id: dict[str, dict[str, Any]] = {}
+            for genome, score in zip(validation, final_scores):
+                genome["fitness"] = score
+                genome["evaluationStage"] = "final"
+                verified_by_id[str(genome.get("id", ""))] = genome
 
-        next_population = [copy.deepcopy(item) for item in elites]
-        while len(next_population) < args.population:
-            if random.random() < 0.35 and len(elites) >= 2:
-                child = crossover(random.choice(elites), random.choice(elites), generation + 1)
-            else:
-                child = copy.deepcopy(random.choice(elites))
-            next_population.append(mutate(child, generation + 1, args.mutation))
-        population = next_population
+            verified_current: list[dict[str, Any]] = []
+            for genome in scored:
+                verified = verified_by_id.get(str(genome.get("id", "")))
+                if verified is not None:
+                    genome["fitness"] = verified["fitness"]
+                    genome["evaluationStage"] = "final"
+                    verified_current.append(genome)
+
+            verified_current.sort(key=lambda item: float(item.get("fitness", 0.0)), reverse=True)
+            elites = verified_current[: max(1, args.elite)]
+            current_best = elites[0]
+            hall_of_fame = merge_hall_of_fame(hall_of_fame, list(verified_by_id.values()))
+            scored.sort(
+                key=lambda item: (
+                    item.get("evaluationStage") == "final",
+                    float(item.get("fitness", 0.0)),
+                ),
+                reverse=True,
+            )
+
+            (run_dir / f"generation_{generation:04d}.json").write_text(
+                json.dumps(scored, indent=2),
+                encoding="utf-8",
+            )
+            (run_dir / "best.json").write_text(
+                json.dumps(hall_of_fame[0], indent=2), encoding="utf-8"
+            )
+            elapsed = time.monotonic() - generation_started
+            print(
+                f"generation {generation}: "
+                f"current_best={current_best['id']} fitness={current_best['fitness']:.2f} "
+                f"hall_best={hall_of_fame[0]['id']} mean={hall_of_fame[0]['fitnessMean']:.2f} "
+                f"elapsed={elapsed:.1f}s"
+            )
+
+            next_population = [copy.deepcopy(item) for item in elites]
+            while len(next_population) < args.population:
+                if random.random() < 0.35 and len(elites) >= 2:
+                    child = crossover(random.choice(elites), random.choice(elites), generation + 1)
+                else:
+                    child = copy.deepcopy(random.choice(elites))
+                next_population.append(mutate(child, generation + 1, args.mutation))
+            population = next_population
 
     return 0
 

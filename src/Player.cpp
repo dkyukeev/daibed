@@ -6,18 +6,18 @@
 
 namespace
 {
-constexpr float kMoveSpeed = 5.85f;
+constexpr float kMoveSpeed = 4.32f;
 constexpr float kGroundAcceleration = 52.0f;
 constexpr float kGroundDeceleration = 46.0f;
 constexpr float kAirAcceleration = 15.5f;
-constexpr float kJumpSpeed = 7.35f;
+constexpr float kJumpSpeed = 6.72f;
 constexpr float kGravity = 18.0f;
 constexpr float kFallGravity = 23.5f;
 constexpr float kJumpBufferSeconds = 0.12f;
 constexpr float kCoyoteSeconds = 0.09f;
 constexpr float kSprintResetSeconds = 0.46f;
 constexpr float kKnockbackControlSeconds = 0.18f;
-constexpr float kSneakSpeedMultiplier = 0.34f;
+constexpr float kSneakSpeedMultiplier = 0.30f;
 constexpr float kStepHeight = 1.02f;
 constexpr Vector3 kHalfExtents { 0.32f, 0.9f, 0.32f };
 constexpr Vector3 kGroundProbeHalfExtents { 0.28f, 0.9f, 0.28f };
@@ -527,6 +527,8 @@ void Player::ClearHeroActiveEffects()
     heroState_.active2.activeTimer = 0.0f;
     heroState_.ultimate.active = false;
     heroState_.ultimate.activeTimer = 0.0f;
+    heroState_.likhoDisguiseTeamId = -1;
+    heroState_.likhoInsideEnemyBase = false;
 }
 
 void Player::Respawn(Vector3 spawnPoint)
