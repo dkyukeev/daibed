@@ -41,8 +41,10 @@ endif()
 add_executable(DaiBed
     src/main.cpp
     src/AudioSystem.cpp
+    src/GameAutomatch.cpp
     src/BotAI.cpp
     src/CameraController.cpp
+    src/ChunkRenderer.cpp
     src/Block.cpp
     src/CombatSystem.cpp
     src/Core.cpp
@@ -51,14 +53,25 @@ add_executable(DaiBed
     src/GameBotAI.cpp
     src/GameUI.cpp
     src/GameRules.cpp
+    src/GamePlacement.cpp
+    src/GamePlayerActions.cpp
+    src/GameSetup.cpp
+    src/GameSettings.cpp
+    src/GameWorldTick.cpp
     src/Generator.cpp
     src/Hero.cpp
+    src/Hero/HeroAbilities.cpp
     src/HeroSystem.cpp
+    src/HeroVisuals.cpp
     src/InputSystem.cpp
     src/Inventory.cpp
+    src/MusicSystem.cpp
     src/Player.cpp
+    src/ParticleSystem.cpp
+    src/PostProcessor.cpp
     src/Renderer.cpp
     src/Resource.cpp
+    src/SceneShader.cpp
     src/Shop.cpp
     src/Team.cpp
     src/UiText.cpp
@@ -85,9 +98,14 @@ else()
 endif()
 
 install(TARGETS DaiBed RUNTIME DESTINATION . COMPONENT Runtime)
-install(DIRECTORY assets DESTINATION . COMPONENT Runtime)
-install(FILES README.md THIRD_PARTY_LICENSES.md DESTINATION . COMPONENT Runtime)
-install(FILES docs/RELEASE_0.1.0.md docs/FEEL_AUDIT.md DESTINATION docs COMPONENT Runtime)
+install(
+    DIRECTORY assets
+    DESTINATION .
+    COMPONENT Runtime
+    PATTERN "*.md" EXCLUDE
+    PATTERN "*.bbmodel" EXCLUDE
+    PATTERN ".gitkeep" EXCLUDE
+)
 
 set(CPACK_PACKAGE_NAME "DaiBed")
 set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")

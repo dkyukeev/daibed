@@ -2,6 +2,12 @@
 
 #include "raylib.h"
 
+constexpr int kMouseBindingOffset = 10000;
+
+constexpr int MouseBinding(int button) { return kMouseBindingOffset + button; }
+constexpr bool IsMouseBinding(int binding) { return binding >= kMouseBindingOffset && binding < kMouseBindingOffset + 32; }
+constexpr int MouseButtonFromBinding(int binding) { return binding - kMouseBindingOffset; }
+
 struct KeyBindings
 {
     int moveForward = KEY_W;
@@ -12,6 +18,8 @@ struct KeyBindings
     int sneak = KEY_LEFT_SHIFT;
     int bridgeMode = KEY_C;
     int sprint = KEY_LEFT_CONTROL;
+    int attack = MouseBinding(MOUSE_BUTTON_LEFT);
+    int place = MouseBinding(MOUSE_BUTTON_RIGHT);
     int interact = KEY_R;
     int inventory = KEY_E;
     int drop = KEY_Q;
@@ -29,6 +37,22 @@ struct KeyBindings
     int alarm = KEY_N;
 };
 
+struct GamepadBindings
+{
+    int jump = GAMEPAD_BUTTON_RIGHT_FACE_DOWN;
+    int sneak = GAMEPAD_BUTTON_RIGHT_FACE_LEFT;
+    int sprint = GAMEPAD_BUTTON_LEFT_TRIGGER_1;
+    int attack = GAMEPAD_BUTTON_RIGHT_TRIGGER_2;
+    int place = GAMEPAD_BUTTON_LEFT_TRIGGER_2;
+    int interact = GAMEPAD_BUTTON_RIGHT_FACE_RIGHT;
+    int inventory = GAMEPAD_BUTTON_MIDDLE_RIGHT;
+    int drop = GAMEPAD_BUTTON_RIGHT_FACE_UP;
+    int cameraToggle = GAMEPAD_BUTTON_LEFT_THUMB;
+    int heroActive1 = GAMEPAD_BUTTON_RIGHT_TRIGGER_1;
+    int heroActive2 = GAMEPAD_BUTTON_LEFT_FACE_LEFT;
+    int heroUltimate = GAMEPAD_BUTTON_LEFT_FACE_UP;
+};
+
 struct PlayerInput
 {
     Vector3 move {};
@@ -42,6 +66,7 @@ struct PlayerInput
     bool placeHeld = false;
     bool sneak = false;
     bool bridgeMode = false;
+    bool scopeHeld = false;
     bool cameraTogglePressed = false;
     bool sprint = false;
     bool sprintTapped = false;
@@ -76,13 +101,23 @@ public:
 
     const KeyBindings& GetBindings() const;
     KeyBindings& MutableBindings();
+    const GamepadBindings& GetGamepadBindings() const;
+    GamepadBindings& MutableGamepadBindings();
     void SetMouseSensitivity(float sensitivity);
     float GetMouseSensitivity() const;
+    void SetGamepadDeadZone(float deadZone);
+    float GetGamepadDeadZone() const;
+    void SetGamepadSensitivity(float sensitivity);
+    float GetGamepadSensitivity() const;
 
 private:
     KeyBindings bindings_ {};
+    GamepadBindings gamepadBindings_ {};
     float mouseSensitivity_ = 1.0f;
+    float gamepadDeadZone_ = 0.18f;
+    float gamepadSensitivity_ = 1.0f;
     mutable double lastForwardTapTime_ = -10.0;
     mutable bool forwardWasDown_ = false;
     mutable bool doubleTapSprintActive_ = false;
+    mutable bool sprintToggled_ = false;
 };

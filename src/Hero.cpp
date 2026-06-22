@@ -33,3 +33,28 @@ const char* HeroAbilitySlotName(HeroAbilitySlot slot)
     }
     return "Способность";
 }
+
+const char* HeroAnimationStateName(HeroAnimationState state)
+{
+    switch (state)
+    {
+    case HeroAnimationState::Idle: return "Idle";
+    case HeroAnimationState::Walk: return "Walk";
+    case HeroAnimationState::Run: return "Run";
+    case HeroAnimationState::Jump: return "Jump";
+    case HeroAnimationState::Fall: return "Fall";
+    case HeroAnimationState::Attack: return "Attack";
+    case HeroAnimationState::Hurt: return "Hurt";
+    case HeroAnimationState::Death: return "Death";
+    case HeroAnimationState::Ability1: return "Ability1";
+    case HeroAnimationState::Ability2: return "Ability2";
+    case HeroAnimationState::Ultimate: return "Ultimate";
+    case HeroAnimationState::WindUp: return "WindUp";
+    case HeroAnimationState::Cast: return "Cast";
+    case HeroAnimationState::Recovery: return "Recovery";
+    case HeroAnimationState::Overloaded: return "Overloaded";
+    case HeroAnimationState::UltPrimed: return "UltPrimed";
+    case HeroAnimationState::DeathSacrifice: return "DeathSacrifice";
+    }
+    return "Unknown";
+}

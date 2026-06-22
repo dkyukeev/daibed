@@ -26,7 +26,6 @@ DaiBed.settings
 # Runtime/generated diagnostics
 automatch_stats.json
 bot_tuning.json
-bot_tuning.example.json
 crash_*.log
 
 # Genetic tuning output
@@ -39,43 +38,15 @@ tuning_runs/
 # Python helper cache
 __pycache__/
 *.py[cod]
+
+# Local assistant/tooling state
+.agents/
+.claude/
 install-caveman.ps1
 skills-lock.json
-.agents/skills/cavecrew/README.md
-.agents/skills/cavecrew/SKILL.md
-.agents/skills/caveman/README.md
-.agents/skills/caveman/SKILL.md
-.agents/skills/caveman-commit/README.md
-.agents/skills/caveman-commit/SKILL.md
-.agents/skills/caveman-compress/README.md
-.agents/skills/caveman-compress/SECURITY.md
-.agents/skills/caveman-compress/SKILL.md
-.agents/skills/caveman-compress/scripts/__init__.py
-.agents/skills/caveman-compress/scripts/__main__.py
-.agents/skills/caveman-compress/scripts/benchmark.py
-.agents/skills/caveman-compress/scripts/cli.py
-.agents/skills/caveman-compress/scripts/compress.py
-.agents/skills/caveman-compress/scripts/detect.py
-.agents/skills/caveman-compress/scripts/validate.py
-.agents/skills/caveman-help/README.md
-.agents/skills/caveman-help/SKILL.md
-.agents/skills/caveman-review/README.md
-.agents/skills/caveman-review/SKILL.md
-.agents/skills/caveman-stats/README.md
-.agents/skills/caveman-stats/SKILL.md
-docs/CODEX_PROMPT.md
-docs/GAME_QUALITY_AUDIT.md
-docs/ROADMAP.md
-test-src/allchanges.diff
-test-src/AudioSystem.cpp
-test-src/AudioSystem.h
-test-src/BotAI.h
-test-src/Game (1).cpp
-test-src/GAME_QUALITY_AUDIT.md
-test-src/Game.cpp
-test-src/Game.h
-test-src/GameBotAI.cpp
-test-src/GameRules.cpp
-test-src/Renderer.cpp
-test-src/VISION.md
-docs/VISION.md
+
+# Local snapshots and patch exports
+*.diff
+test-src/
+
+# Project documentation and example configs are intentionally not ignored.

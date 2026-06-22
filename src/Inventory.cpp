@@ -77,6 +77,12 @@ const char* ItemDisplayName(ItemType type)
         return "Spear";
     case ItemType::Pickaxe:
         return "Pickaxe";
+    case ItemType::Bow:
+        return "Лук";
+    case ItemType::Blaster:
+        return "Бластер";
+    case ItemType::SniperRifle:
+        return "Снайперская винтовка";
     case ItemType::EnergyArrow:
         return "Energy arrow";
     case ItemType::Fireball:
@@ -132,6 +138,12 @@ const char* ItemShortName(ItemType type)
         return "Spear";
     case ItemType::Pickaxe:
         return "Pick";
+    case ItemType::Bow:
+        return "Лук";
+    case ItemType::Blaster:
+        return "Бластер";
+    case ItemType::SniperRifle:
+        return "Снайперка";
     case ItemType::EnergyArrow:
         return "Arrow";
     case ItemType::Fireball:
@@ -192,7 +204,12 @@ bool ItemIsUtility(ItemType type)
 
 bool ItemIsWeapon(ItemType type)
 {
-    return ItemToWeapon(type).has_value();
+    return ItemToWeapon(type).has_value() || type == ItemType::Bow || ItemIsBlasterWeapon(type);
+}
+
+bool ItemIsBlasterWeapon(ItemType type)
+{
+    return type == ItemType::Blaster || type == ItemType::SniperRifle;
 }
 
 bool ItemIsPickaxe(ItemType type)
@@ -495,6 +512,51 @@ int Inventory::GetToolLevel() const
 int Inventory::GetTeamUpgradeLevel() const
 {
     return teamUpgradeLevel_;
+}
+
+int Inventory::GetBlasterRapidFireLevel() const
+{
+    return blasterRapidFireLevel_;
+}
+
+int Inventory::GetBlasterDamageLevel() const
+{
+    return blasterDamageLevel_;
+}
+
+bool Inventory::UpgradeBlasterRapidFire()
+{
+    if (blasterDamageLevel_ > 0 || blasterRapidFireLevel_ >= 3)
+    {
+        return false;
+    }
+    ++blasterRapidFireLevel_;
+    return true;
+}
+
+bool Inventory::UpgradeBlasterDamage()
+{
+    if (blasterRapidFireLevel_ > 0 || blasterDamageLevel_ >= 3)
+    {
+        return false;
+    }
+    ++blasterDamageLevel_;
+    return true;
+}
+
+int Inventory::GetBowUpgradeLevel() const
+{
+    return bowUpgradeLevel_;
+}
+
+bool Inventory::UpgradeBow()
+{
+    if (bowUpgradeLevel_ >= 3)
+    {
+        return false;
+    }
+    ++bowUpgradeLevel_;
+    return true;
 }
 
 int Inventory::GetArmorDurability() const

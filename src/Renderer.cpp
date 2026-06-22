@@ -17,8 +17,6 @@ namespace
 {
 constexpr int kTextureSize = 32;
 constexpr float kPi = 3.1415926535f;
-constexpr float kWorldBlockDrawDistance = 150.0f;
-constexpr float kWorldBlockDrawDistanceSq = kWorldBlockDrawDistance * kWorldBlockDrawDistance;
 
 unsigned char BlendChannel(unsigned char a, unsigned char b, float t)
 {
@@ -515,6 +513,12 @@ std::string LevelText(const ShopItem& item, const Inventory& inventory, const Te
         return "Lv " + std::to_string(inventory.GetToolLevel()) + "/" + std::to_string(item.maxLevel);
     case 103:
         return "Lv " + std::to_string(inventory.GetArmorLevel()) + "/" + std::to_string(item.maxLevel);
+    case 109:
+        return "Ур " + std::to_string(inventory.GetBowUpgradeLevel()) + "/" + std::to_string(item.maxLevel);
+    case 402:
+        return "Ур " + std::to_string(inventory.GetBlasterRapidFireLevel()) + "/" + std::to_string(item.maxLevel);
+    case 403:
+        return "Ур " + std::to_string(inventory.GetBlasterDamageLevel()) + "/" + std::to_string(item.maxLevel);
     case 301:
         return "Lv " + std::to_string(team != nullptr ? team->forgeLevel : 0) + "/" + std::to_string(item.maxLevel);
     case 302:
@@ -543,6 +547,12 @@ bool IsAtMax(const ShopItem& item, const Inventory& inventory, const Team* team)
         return inventory.GetToolLevel() >= item.maxLevel;
     case 103:
         return inventory.GetArmorLevel() >= item.maxLevel;
+    case 109:
+        return inventory.GetBowUpgradeLevel() >= item.maxLevel;
+    case 402:
+        return inventory.GetBlasterDamageLevel() > 0 || inventory.GetBlasterRapidFireLevel() >= item.maxLevel;
+    case 403:
+        return inventory.GetBlasterRapidFireLevel() > 0 || inventory.GetBlasterDamageLevel() >= item.maxLevel;
     case 301:
         return team != nullptr && team->forgeLevel >= item.maxLevel;
     case 302:
@@ -590,6 +600,13 @@ ItemType ShopIconItem(int choice)
         return ItemType::Axe;
     case 107:
         return ItemType::Spear;
+    case 108:
+    case 109:
+        return ItemType::Bow;
+    case 401:
+    case 402:
+    case 403:
+        return ItemType::Blaster;
     case 201:
         return ItemType::DashPearl;
     case 202:
@@ -736,6 +753,14 @@ float HeroAnimationFraction(const HeroRuntimeState& state)
     return 1.0f - std::clamp(state.animationTimer / state.animationDuration, 0.0f, 1.0f);
 }
 
+bool IsAbilityCastAnimation(HeroAnimationState state)
+{
+    return state == HeroAnimationState::Cast
+        || state == HeroAnimationState::Ability1
+        || state == HeroAnimationState::Ability2
+        || state == HeroAnimationState::Ultimate;
+}
+
 void DrawRadonPresentationEffect(const WorldEffect& effect)
 {
     const float progress = std::clamp(effect.age / std::max(0.001f, effect.lifetime), 0.0f, 1.0f);
@@ -850,11 +875,13 @@ void DrawOrbitaTeleportPreview(const OrbitaTeleportPreview& preview)
     DrawSphere(Vector3 { preview.destination.x, preview.destination.y + 0.16f, preview.destination.z }, 0.12f + pulse * 0.05f, Fade(beamColor, 0.74f));
 }
 
-void DrawHeroDeviceVisual(const HeroDeviceVisual& device)
+void DrawHeroDeviceVisual(const HeroDeviceVisual& device, int localTeamId)
 {
-    const Color bromColor = HeroUiColor(HeroId::Brom);
-    const Color konvoyColor = HeroUiColor(HeroId::Konvoy);
-    const Color svidetelColor = HeroUiColor(HeroId::Svidetel);
+    const bool enemy = localTeamId >= 0 && device.teamId != localTeamId;
+    const Color relationColor = enemy ? Color { 255, 92, 92, 255 } : Color { 102, 226, 255, 255 };
+    const Color bromColor = MixColor(HeroUiColor(HeroId::Brom), relationColor, 0.42f);
+    const Color konvoyColor = MixColor(HeroUiColor(HeroId::Konvoy), relationColor, 0.42f);
+    const Color svidetelColor = MixColor(HeroUiColor(HeroId::Svidetel), relationColor, 0.42f);
     const float time = static_cast<float>(GetTime());
     const float pulse = 0.5f + 0.5f * std::sin(time * 8.0f + device.position.x * 0.7f + device.position.z * 0.4f);
     Vector3 forward = Normalize(device.direction);
@@ -986,6 +1013,12 @@ Color ItemUiColor(ItemType type)
         return Color { 180, 220, 255, 255 };
     case ItemType::Pickaxe:
         return Color { 188, 198, 210, 255 };
+    case ItemType::Bow:
+        return Color { 224, 170, 92, 255 };
+    case ItemType::Blaster:
+        return Color { 98, 245, 255, 255 };
+    case ItemType::SniperRifle:
+        return Color { 126, 220, 255, 255 };
     case ItemType::EnergyArrow:
         return Color { 112, 232, 255, 255 };
     case ItemType::Fireball:
@@ -1044,7 +1077,7 @@ ItemStack VisibleHeldItemForPlayer(const Player& player, const ItemStack& localH
     return ItemStack {};
 }
 
-void DrawHeldItemModel(const ItemStack& stack, Vector3 hand, Vector3 forward, Vector3 right, Vector3 modelUp, float scale, const Texture2D* itemTexture, const Texture2D* blockTexture, Color tint, bool firstPerson = false)
+void DrawHeldItemModel(const ItemStack& stack, Vector3 hand, Vector3 forward, Vector3 right, Vector3 modelUp, float scale, const Texture2D* itemTexture, const Texture2D* blockTexture, Color tint, bool firstPerson = false, float rangedChargeFraction = 0.0f)
 {
     if (stack.IsEmpty())
     {
@@ -1062,7 +1095,7 @@ void DrawHeldItemModel(const ItemStack& stack, Vector3 hand, Vector3 forward, Ve
         ? Normalize(Add(Add(Scale(right, -0.58f), Scale(up, 0.96f)), Scale(forward, 0.18f)))
         : Normalize(Add(Scale(forward, 0.68f), Scale(up, 0.32f)));
     const bool iconHeldItem = itemTexture != nullptr
-        && (ItemIsWeapon(stack.type)
+        && ((ItemIsWeapon(stack.type) && stack.type != ItemType::Bow && !ItemIsBlasterWeapon(stack.type))
             || ItemIsPickaxe(stack.type)
             || stack.type == ItemType::EnergyArrow
             || stack.type == ItemType::Fireball
@@ -1121,6 +1154,43 @@ void DrawHeldItemModel(const ItemStack& stack, Vector3 hand, Vector3 forward, Ve
     case ItemType::EnergyArrow:
         DrawCylinderEx(grip, Add(grip, Scale(outward, 0.70f * scale)), 0.020f * scale, 0.010f * scale, 8, Color { 112, 232, 255, 255 });
         break;
+    case ItemType::Bow:
+    {
+        const float draw = std::clamp(rangedChargeFraction, 0.0f, 1.0f);
+        const Vector3 center = Add(grip, Scale(outward, 0.28f * scale));
+        const Vector3 upper = Add(Add(center, Scale(up, 0.48f * scale)), Scale(outward, 0.10f * scale));
+        const Vector3 lower = Add(Add(center, Scale(up, -0.48f * scale)), Scale(outward, 0.10f * scale));
+        const Vector3 stringGrip = Add(center, Scale(outward, -0.34f * scale * draw));
+        DrawCylinderEx(lower, center, 0.035f * scale, 0.045f * scale, 7, Color { 155, 92, 46, 255 });
+        DrawCylinderEx(center, upper, 0.045f * scale, 0.035f * scale, 7, Color { 205, 142, 70, 255 });
+        DrawLine3D(upper, stringGrip, Color { 232, 236, 244, 255 });
+        DrawLine3D(stringGrip, lower, Color { 232, 236, 244, 255 });
+        if (draw > 0.02f)
+        {
+            const Vector3 arrowTip = Add(center, Scale(outward, (0.65f + draw * 0.20f) * scale));
+            DrawCylinderEx(stringGrip, arrowTip, 0.018f * scale, 0.009f * scale, 6, Color { 112, 232, 255, 255 });
+        }
+        break;
+    }
+    case ItemType::Blaster:
+    case ItemType::SniperRifle:
+    {
+        const bool sniper = stack.type == ItemType::SniperRifle;
+        const Vector3 muzzle = Add(grip, Scale(outward, (sniper ? 0.86f : 0.62f) * scale));
+        DrawCylinderEx(grip, muzzle, (sniper ? 0.085f : 0.10f) * scale, (sniper ? 0.052f : 0.075f) * scale, 10, Color { 50, 68, 92, 255 });
+        DrawCylinderEx(Add(grip, Scale(outward, 0.18f * scale)), muzzle, 0.060f * scale, 0.045f * scale, 10, tint);
+        DrawSphere(muzzle, (0.075f + rangedChargeFraction * 0.035f) * scale, tint);
+        DrawSphereWires(Add(grip, Scale(outward, 0.34f * scale)), 0.13f * scale, 5, 8, Fade(tint, 0.86f));
+        if (sniper)
+        {
+            const Vector3 scopeStart = Add(Add(grip, Scale(outward, 0.24f * scale)), Scale(up, 0.13f * scale));
+            const Vector3 scopeEnd = Add(scopeStart, Scale(outward, 0.38f * scale));
+            DrawCylinderEx(scopeStart, scopeEnd, 0.068f * scale, 0.068f * scale, 12, Color { 28, 38, 54, 255 });
+            DrawCylinderEx(Add(scopeStart, Scale(outward, -0.035f * scale)), scopeStart, 0.088f * scale, 0.068f * scale, 12, Color { 106, 210, 245, 255 });
+            DrawCylinderEx(scopeEnd, Add(scopeEnd, Scale(outward, 0.035f * scale)), 0.068f * scale, 0.088f * scale, 12, Color { 106, 210, 245, 255 });
+        }
+        break;
+    }
     case ItemType::Fireball:
     case ItemType::Molotov:
         DrawSphere(Add(grip, Scale(outward, 0.24f * scale)), 0.15f * scale, Color { 255, 118, 70, 255 });
@@ -1209,6 +1279,13 @@ bool Renderer::Initialize()
     ironIcon_ = LoadCustomizableTexture("iron_resource", MakeResourceIcon(Color { 188, 198, 210, 255 }, WHITE));
     goldIcon_ = LoadCustomizableTexture("gold_resource", MakeResourceIcon(Color { 246, 196, 74, 255 }, Color { 255, 246, 180, 255 }));
     crystalIcon_ = LoadCustomizableTexture("crystal_resource", MakeResourceIcon(Color { 112, 232, 255, 255 }, Color { 225, 252, 255, 255 }));
+    sceneShader_.Initialize();
+    heroVisuals_.Initialize();
+    heroPreviewTarget_ = LoadRenderTexture(384, 384);
+    if (heroPreviewTarget_.texture.id != 0)
+    {
+        SetTextureFilter(heroPreviewTarget_.texture, TEXTURE_FILTER_POINT);
+    }
 
     texturesReady_ = true;
     return true;
@@ -1221,6 +1298,8 @@ void Renderer::Shutdown()
         return;
     }
 
+    chunkRenderer_.Shutdown();
+    sceneShader_.Shutdown();
     UnloadTexture(grassTexture_);
     UnloadTexture(dirtTexture_);
     UnloadTexture(leafTexture_);
@@ -1249,7 +1328,82 @@ void Renderer::Shutdown()
     UnloadTexture(ironIcon_);
     UnloadTexture(goldIcon_);
     UnloadTexture(crystalIcon_);
+    heroVisuals_.Shutdown();
+    if (heroPreviewTarget_.id != 0)
+    {
+        UnloadRenderTexture(heroPreviewTarget_);
+        heroPreviewTarget_ = {};
+    }
     texturesReady_ = false;
+}
+
+void Renderer::SetWorldRenderDistance(float distance)
+{
+    worldRenderDistance_ = std::clamp(distance, 48.0f, 240.0f);
+}
+
+void Renderer::SetShadowQuality(int quality)
+{
+    shadowQuality_ = std::clamp(quality, 0, 2);
+}
+
+const ChunkRenderStats& Renderer::GetChunkRenderStats() const
+{
+    return chunkRenderer_.GetStats();
+}
+
+void Renderer::RenderHeroPreview(HeroId heroId, Rectangle destination, float yawDegrees) const
+{
+    const HeroVisualAsset* visual = heroVisuals_.Find(heroId);
+    if (visual == nullptr || heroPreviewTarget_.id == 0)
+    {
+        DrawRectangleRec(destination, Fade(Color { 12, 15, 22, 255 }, 0.92f));
+        DrawRectangleLinesEx(destination, 1.0f, Fade(WHITE, 0.18f));
+        const char* fallback = "model fallback";
+        DrawText(fallback,
+            static_cast<int>(destination.x + destination.width * 0.5f) - MeasureText(fallback, 14) / 2,
+            static_cast<int>(destination.y + destination.height * 0.5f) - 7,
+            14,
+            Fade(WHITE, 0.56f));
+        return;
+    }
+
+    const BoundingBox bounds = GetModelBoundingBox(visual->model);
+    const Vector3 center {
+        (bounds.min.x + bounds.max.x) * 0.5f,
+        (bounds.min.y + bounds.max.y) * 0.5f,
+        (bounds.min.z + bounds.max.z) * 0.5f
+    };
+    const float width = std::max(0.2f, bounds.max.x - bounds.min.x);
+    const float height = std::max(0.2f, bounds.max.y - bounds.min.y);
+    const float depth = std::max(0.2f, bounds.max.z - bounds.min.z);
+    const float radius = std::max({ width, height * 0.72f, depth, 1.0f });
+    const float yaw = yawDegrees * kPi / 180.0f;
+    Camera3D previewCamera {
+        Vector3 { center.x + std::sin(yaw) * radius * 2.15f, center.y + height * 0.12f, center.z + std::cos(yaw) * radius * 2.15f },
+        center,
+        Vector3 { 0.0f, 1.0f, 0.0f },
+        34.0f,
+        CAMERA_PERSPECTIVE
+    };
+
+    BeginTextureMode(heroPreviewTarget_);
+    ClearBackground(Color { 9, 12, 18, 255 });
+    BeginMode3D(previewCamera);
+    heroVisuals_.ApplyAnimation(heroId, HeroAnimationState::Idle, 0.0f, static_cast<float>(GetTime()));
+    DrawModel(visual->model, Vector3 { 0.0f, 0.0f, 0.0f }, 1.0f, WHITE);
+    DrawCylinderWires(Vector3 { center.x, bounds.min.y - 0.02f, center.z }, radius * 0.52f, radius * 0.52f, 0.025f, 32, Fade(HeroUiColor(heroId), 0.54f));
+    EndMode3D();
+    EndTextureMode();
+
+    DrawTexturePro(
+        heroPreviewTarget_.texture,
+        Rectangle { 0.0f, 0.0f, static_cast<float>(heroPreviewTarget_.texture.width), -static_cast<float>(heroPreviewTarget_.texture.height) },
+        destination,
+        Vector2 { 0.0f, 0.0f },
+        0.0f,
+        WHITE);
+    DrawRectangleLinesEx(destination, 1.0f, Fade(HeroUiColor(heroId), 0.62f));
 }
 
 void Renderer::RenderScene(
@@ -1263,7 +1417,9 @@ void Renderer::RenderScene(
         const std::vector<HeroDeviceVisual>& heroDevices,
         const OrbitaTeleportPreview& orbitaTeleportPreview,
         const PlacementPreview& placementPreview,
+    const std::vector<EnergyProjectile>& projectiles,
     const std::vector<WorldEffect>& worldEffects,
+    const ParticleSystem& particles,
     const std::vector<FloatingText>& floatingTexts,
     const Camera3D& camera,
     const ItemStack& localHeldItem,
@@ -1284,6 +1440,21 @@ void Renderer::RenderScene(
     const bool svidetelContours = localPlayer != nullptr
         && localPlayer->GetHeroId() == HeroId::Svidetel
         && localPlayer->GetHeroState().ultimate.active;
+#if DAIBED_DEVELOPER_BUILD
+    static bool showHeroDebug = false;
+    if (IsKeyPressed(KEY_F8))
+    {
+        showHeroDebug = !showHeroDebug;
+    }
+#else
+    bool showHeroDebug = false;
+#endif
+
+    chunkRenderer_.Sync(
+        world,
+        [this, &teams](const Block& block) { return GetBlockColor(block, teams); },
+        [this](BlockType type) { return GetBlockTexture(type); },
+        [](const Block& block, Color color) { return IsTransparentBlock(block.type, color); });
 
     BeginMode3D(camera);
 
@@ -1303,7 +1474,7 @@ void Renderer::RenderScene(
         camera.target.y - camera.position.y,
         camera.target.z - camera.position.z
     });
-    const auto shouldDrawWorldBlock = [&camera, cameraForward](Vector3 center)
+    const auto shouldDrawWorldBlock = [this, &camera, cameraForward](Vector3 center)
     {
         const Vector3 toBlock {
             center.x - camera.position.x,
@@ -1311,7 +1482,7 @@ void Renderer::RenderScene(
             center.z - camera.position.z
         };
         const float distanceSq = toBlock.x * toBlock.x + toBlock.y * toBlock.y + toBlock.z * toBlock.z;
-        if (distanceSq > kWorldBlockDrawDistanceSq)
+        if (distanceSq > worldRenderDistance_ * worldRenderDistance_)
         {
             return false;
         }
@@ -1334,6 +1505,8 @@ void Renderer::RenderScene(
 
     transparentBlocks_.clear();
     std::vector<TransparentBlockDraw>& transparentBlocks = transparentBlocks_;
+    sceneShader_.Begin(camera, skyColor, 0.0045f);
+    chunkRenderer_.Draw(camera, worldRenderDistance_, sceneShader_.GetShader());
     for (const auto& entry : world.GetBlocks())
     {
         const GridPos& pos = entry.first;
@@ -1350,17 +1523,16 @@ void Renderer::RenderScene(
         }
 
         const Color color = GetBlockColor(block, teams);
-        if (IsTransparentBlock(block.type, color))
+        if (!IsTransparentBlock(block.type, color))
         {
-            transparentBlocks.push_back(TransparentBlockDraw {
-                pos,
-                center,
-                block,
-                DistanceSquared(center, camera.position)
-            });
             continue;
         }
-        drawWorldBlock(center, block);
+        transparentBlocks.push_back(TransparentBlockDraw {
+            pos,
+            center,
+            block,
+            DistanceSquared(center, camera.position)
+        });
     }
 
     for (const Team& team : teams)
@@ -1374,10 +1546,6 @@ void Renderer::RenderScene(
         const Vector3 pos = generator.GetPosition();
         DrawCube(Vector3 { pos.x, pos.y + 0.18f, pos.z }, 0.85f, 0.35f, 0.85f, GetResourceColor(generator.GetType()));
         DrawSphere(Vector3 { pos.x, pos.y + 0.62f, pos.z }, 0.24f, WHITE);
-        if (svidetelContours)
-        {
-            DrawSphereWires(Vector3 { pos.x, pos.y + 0.62f, pos.z }, 0.42f, 8, 12, Fade(HeroUiColor(HeroId::Svidetel), 0.78f));
-        }
     }
 
     for (const EnergyCore& core : cores)
@@ -1408,10 +1576,6 @@ void Renderer::RenderScene(
         DrawCube(coreCenter, 0.92f * stageScale, 0.78f * stageScale, 0.92f * stageScale, Fade(teamColor, 0.70f + healthFraction * 0.22f));
         DrawSphere(Vector3 { pos.x, pos.y + 0.40f * stageScale, pos.z }, 0.18f + 0.08f * healthFraction, Color { 178, 245, 255, 255 });
         DrawCubeWires(coreCenter, 0.96f * stageScale, 0.82f * stageScale, 0.96f * stageScale, WHITE);
-        if (svidetelContours)
-        {
-            DrawSphereWires(coreCenter, 1.30f, 10, 18, Fade(HeroUiColor(HeroId::Svidetel), 0.74f));
-        }
         if (radonPrimedForCore)
         {
             const float pulse = 1.02f + 0.12f * std::sin(static_cast<float>(GetTime()) * 6.0f);
@@ -1432,7 +1596,12 @@ void Renderer::RenderScene(
 
     for (const Player& player : players)
     {
-        if (!player.IsAlive())
+        const HeroRuntimeState& renderHeroState = player.GetHeroState();
+        const bool dying = !player.IsAlive()
+            && (renderHeroState.animationState == HeroAnimationState::Death
+                || renderHeroState.animationState == HeroAnimationState::DeathSacrifice)
+            && renderHeroState.animationTimer > 0.0f;
+        if (!player.IsAlive() && !dying)
         {
             continue;
         }
@@ -1452,6 +1621,17 @@ void Renderer::RenderScene(
         Color color = baseColor;
         const bool enemy = localTeamId >= 0 && player.GetTeamId() != localTeamId;
         const Vector3 pos = player.GetPosition();
+        if (shadowQuality_ > 0 && player.IsOnGround())
+        {
+            const int segments = shadowQuality_ > 1 ? 28 : 14;
+            DrawCylinder(
+                Vector3 { pos.x, pos.y - 0.875f, pos.z },
+                0.46f,
+                0.46f,
+                0.018f,
+                segments,
+                Fade(BLACK, shadowQuality_ > 1 ? 0.25f : 0.17f));
+        }
         const bool radon = player.GetHeroId() == HeroId::Radon;
         const bool orbita = player.GetHeroId() == HeroId::Orbita;
         const float anim = HeroAnimationFraction(heroState);
@@ -1480,7 +1660,7 @@ void Renderer::RenderScene(
                 shoulderLean = -0.16f * (1.0f - anim);
                 bodyPulse += 0.07f * anim;
             }
-            else if (heroState.animationState == HeroAnimationState::Cast)
+            else if (IsAbilityCastAnimation(heroState.animationState))
             {
                 shoulderLean = 0.20f * std::sin(anim * 3.14159f);
                 bodyPulse += 0.10f * (1.0f - anim);
@@ -1494,13 +1674,13 @@ void Renderer::RenderScene(
         if (orbita)
         {
             const float pulseFraction = std::clamp(heroState.orbitaPulseTimer / 3.0f, 0.0f, 1.0f);
-            if (pulseFraction > 0.0f || heroState.animationState == HeroAnimationState::Cast)
+            if (pulseFraction > 0.0f || IsAbilityCastAnimation(heroState.animationState))
             {
                 color = MixColor(color, Color { 255, 170, 150, 255 }, 0.18f + pulseFraction * 0.18f);
                 bodyPulse += 0.04f * std::sin(static_cast<float>(GetTime()) * 12.0f) + pulseFraction * 0.06f;
                 bodyLift += 0.05f * std::sin(anim * kPi);
             }
-            if (heroState.animationState == HeroAnimationState::Cast)
+            if (IsAbilityCastAnimation(heroState.animationState))
             {
                 shoulderLean = 0.24f * std::sin(anim * kPi);
                 bodyPulse += 0.08f * (1.0f - anim * 0.5f);
@@ -1512,7 +1692,16 @@ void Renderer::RenderScene(
         }
         if (svidetelContours && enemy)
         {
-            DrawSphereWires(Vector3 { pos.x, pos.y + 0.25f, pos.z }, 1.15f, 10, 16, Fade(HeroUiColor(HeroId::Svidetel), 0.86f));
+            const bool distorted = player.GetHeroId() == HeroId::Likho && heroState.ultimate.active;
+            rlDisableDepthTest();
+            DrawSphereWires(Vector3 { pos.x, pos.y + 0.25f, pos.z }, 1.15f, 10, 16, Fade(HeroUiColor(HeroId::Svidetel), distorted ? 0.58f : 0.86f));
+            if (distorted)
+            {
+                const float jitter = 0.10f + 0.05f * std::sin(static_cast<float>(GetTime()) * 17.0f);
+                DrawSphereWires(Vector3 { pos.x + jitter, pos.y + 0.32f, pos.z - jitter }, 1.08f, 8, 13, Fade(Color { 255, 92, 210, 255 }, 0.48f));
+                DrawSphereWires(Vector3 { pos.x - jitter, pos.y + 0.18f, pos.z + jitter }, 1.22f, 7, 11, Fade(HeroUiColor(HeroId::Likho), 0.42f));
+            }
+            rlEnableDepthTest();
         }
         // Procedural character animation: walk cycle, jump stretch, sneak
         // crouch, hurt flash and attack swing, all derived from gameplay
@@ -1543,65 +1732,148 @@ void Renderer::RenderScene(
         }
 
         const Vector3 animForward = player.Forward();
-        const Vector3 animRight { -animForward.z, 0.0f, animForward.x };
-        const Color limbColor = MixColor(color, Color { 20, 22, 30, 255 }, 0.35f);
         const float torsoLift = bodyLift + bobLift - sneakDrop;
-
-        // Torso.
-        DrawCube(
-            Vector3 { pos.x, pos.y + 0.28f + torsoLift, pos.z },
-            0.60f * bodyPulse,
-            (sneaking ? 0.84f : 0.98f) * stretch * (0.98f + (bodyPulse - 1.0f) * 0.45f),
-            0.44f * bodyPulse,
-            color);
-
-        // Legs swing along the walk cycle, tucked together in the air.
-        const float legSwing = swingSin * 0.30f;
-        const float legHeight = (sneaking ? 0.66f : 0.78f) * stretch;
-        DrawCube(
-            Vector3 { pos.x + animRight.x * 0.17f + animForward.x * legSwing, pos.y - 0.46f, pos.z + animRight.z * 0.17f + animForward.z * legSwing },
-            0.20f, legHeight, 0.20f, limbColor);
-        DrawCube(
-            Vector3 { pos.x - animRight.x * 0.17f - animForward.x * legSwing, pos.y - 0.46f, pos.z - animRight.z * 0.17f - animForward.z * legSwing },
-            0.20f, legHeight, 0.20f, limbColor);
-
-        // Arms counter-swing; the weapon arm whips forward on attack.
-        const float armSwing = -swingSin * 0.26f;
-        const Vector3 leftArm {
-            pos.x - animRight.x * 0.42f - animForward.x * armSwing,
-            pos.y + 0.30f + torsoLift,
-            pos.z - animRight.z * 0.42f - animForward.z * armSwing
-        };
-        Vector3 rightArm {
-            pos.x + animRight.x * 0.42f + animForward.x * armSwing,
-            pos.y + 0.30f + torsoLift,
-            pos.z + animRight.z * 0.42f + animForward.z * armSwing
-        };
-        if (attackSwing > 0.0f)
+        const HeroId renderedHeroId = player.GetHeroId() == HeroId::Likho && heroState.ultimate.active
+            ? heroState.likhoDisguiseHeroId
+            : player.GetHeroId();
+        const HeroVisualAsset* visual = heroVisuals_.Find(renderedHeroId);
+        if (visual != nullptr)
         {
-            rightArm = Vector3 {
-                pos.x + animRight.x * 0.34f + animForward.x * (0.30f + attackSwing * 0.28f),
-                pos.y + 0.38f + attackSwing * 0.22f + torsoLift,
-                pos.z + animRight.z * 0.34f + animForward.z * (0.30f + attackSwing * 0.28f)
+            const float idleLift = horizontalSpeed < 0.1f
+                ? std::sin(static_cast<float>(GetTime()) * (player.GetHeroId() == HeroId::Likho ? 5.5f : 2.8f) + static_cast<float>(player.GetId()))
+                    * (player.GetHeroId() == HeroId::Likho || player.GetHeroId() == HeroId::Svidetel ? 0.055f : 0.015f)
+                : 0.0f;
+            Vector3 modelPosition {
+                pos.x + visual->offset.x,
+                pos.y + visual->offset.y + torsoLift + idleLift,
+                pos.z + visual->offset.z
             };
+            Vector3 modelScale {
+                visual->scale.x * bodyPulse,
+                visual->scale.y * stretch * (sneaking ? 0.92f : 1.0f),
+                visual->scale.z * bodyPulse
+            };
+            if (dying)
+            {
+                const float collapse = std::clamp(anim, 0.0f, 1.0f);
+                modelPosition.y -= collapse * 0.52f;
+                modelScale.y *= 1.0f - collapse * 0.72f;
+                modelScale.x *= 1.0f + collapse * 0.18f;
+                modelScale.z *= 1.0f + collapse * 0.18f;
+            }
+            Color modelTint = WHITE;
+            if (hurtFlash > 0.0f)
+            {
+                modelTint = MixColor(modelTint, Color { 255, 84, 84, 255 }, 0.48f * hurtFlash);
+            }
+            if (heroState.radonOverloaded)
+            {
+                modelTint = MixColor(modelTint, Color { 255, 118, 70, 255 }, 0.22f);
+            }
+            else if (heroState.ultimatePrimed)
+            {
+                modelTint = MixColor(modelTint, Color { 178, 245, 255, 255 }, 0.16f);
+            }
+            const float yaw = std::atan2(animForward.x, animForward.z) * 180.0f / kPi
+                + visual->yawOffsetDegrees
+                + swingSin * 1.8f;
+            heroVisuals_.ApplyAnimation(
+                player.GetHeroId(),
+                heroState.animationState,
+                anim,
+                static_cast<float>(GetTime()) + static_cast<float>(player.GetId()) * 0.071f);
+            DrawModelEx(visual->model, modelPosition, Vector3 { 0.0f, 1.0f, 0.0f }, yaw, modelScale, modelTint);
         }
-        DrawCube(leftArm, 0.16f, 0.60f, 0.16f, limbColor);
-        DrawCube(rightArm, 0.16f, 0.60f, 0.16f, limbColor);
+        else
+        {
+            const Vector3 animRight { -animForward.z, 0.0f, animForward.x };
+            const Color limbColor = MixColor(color, Color { 20, 22, 30, 255 }, 0.35f);
 
-        Color headColor = Color { 238, 230, 210, 255 };
-        if (radon)
-        {
-            headColor = MixColor(headColor, Color { 178, 245, 255, 255 }, heroState.ultimatePrimed ? 0.32f : 0.0f);
+            // Procedural fallback used when a runtime model is absent or invalid.
+            DrawCube(
+                Vector3 { pos.x, pos.y + 0.28f + torsoLift, pos.z },
+                0.60f * bodyPulse,
+                (sneaking ? 0.84f : 0.98f) * stretch * (0.98f + (bodyPulse - 1.0f) * 0.45f),
+                0.44f * bodyPulse,
+                color);
+
+            const float legSwing = swingSin * 0.30f;
+            const float legHeight = (sneaking ? 0.66f : 0.78f) * stretch;
+            DrawCube(
+                Vector3 { pos.x + animRight.x * 0.17f + animForward.x * legSwing, pos.y - 0.46f, pos.z + animRight.z * 0.17f + animForward.z * legSwing },
+                0.20f, legHeight, 0.20f, limbColor);
+            DrawCube(
+                Vector3 { pos.x - animRight.x * 0.17f - animForward.x * legSwing, pos.y - 0.46f, pos.z - animRight.z * 0.17f - animForward.z * legSwing },
+                0.20f, legHeight, 0.20f, limbColor);
+
+            const float armSwing = -swingSin * 0.26f;
+            const Vector3 leftArm {
+                pos.x - animRight.x * 0.42f - animForward.x * armSwing,
+                pos.y + 0.30f + torsoLift,
+                pos.z - animRight.z * 0.42f - animForward.z * armSwing
+            };
+            Vector3 rightArm {
+                pos.x + animRight.x * 0.42f + animForward.x * armSwing,
+                pos.y + 0.30f + torsoLift,
+                pos.z + animRight.z * 0.42f + animForward.z * armSwing
+            };
+            if (attackSwing > 0.0f)
+            {
+                rightArm = Vector3 {
+                    pos.x + animRight.x * 0.34f + animForward.x * (0.30f + attackSwing * 0.28f),
+                    pos.y + 0.38f + attackSwing * 0.22f + torsoLift,
+                    pos.z + animRight.z * 0.34f + animForward.z * (0.30f + attackSwing * 0.28f)
+                };
+            }
+            DrawCube(leftArm, 0.16f, 0.60f, 0.16f, limbColor);
+            DrawCube(rightArm, 0.16f, 0.60f, 0.16f, limbColor);
+
+            Color headColor = Color { 238, 230, 210, 255 };
+            if (radon)
+            {
+                headColor = MixColor(headColor, Color { 178, 245, 255, 255 }, heroState.ultimatePrimed ? 0.32f : 0.0f);
+            }
+            else if (orbita)
+            {
+                headColor = MixColor(headColor, Color { 255, 210, 202, 255 }, std::clamp(heroState.orbitaPulseTimer / 3.0f, 0.0f, 0.45f));
+            }
+            if (hurtFlash > 0.0f)
+            {
+                headColor = MixColor(headColor, Color { 255, 84, 84, 255 }, 0.45f * hurtFlash);
+            }
+            DrawSphere(Vector3 { pos.x, pos.y + 1.08f + torsoLift, pos.z }, 0.36f * ((radon || orbita) ? bodyPulse : 1.0f), headColor);
         }
-        else if (orbita)
+        if (showHeroDebug)
         {
-            headColor = MixColor(headColor, Color { 255, 210, 202, 255 }, std::clamp(heroState.orbitaPulseTimer / 3.0f, 0.0f, 0.45f));
+            const HeroHitboxProfile& hitbox = HeroSystem::GetHitboxProfile(player.GetHeroId());
+            const float bottom = pos.y + hitbox.headEnd - hitbox.bodyHeight;
+            const float top = pos.y + hitbox.headEnd;
+            DrawCylinderWiresEx(
+                Vector3 { pos.x, bottom, pos.z },
+                Vector3 { pos.x, top, pos.z },
+                hitbox.bodyRadius,
+                hitbox.bodyRadius,
+                16,
+                Color { 255, 220, 72, 230 });
+            if (visual != nullptr)
+            {
+                const BoundingBox localBounds = GetModelBoundingBox(visual->model);
+                DrawBoundingBox(BoundingBox {
+                    Vector3 {
+                        pos.x + visual->offset.x + localBounds.min.x * visual->scale.x,
+                        pos.y + visual->offset.y + localBounds.min.y * visual->scale.y,
+                        pos.z + visual->offset.z + localBounds.min.z * visual->scale.z },
+                    Vector3 {
+                        pos.x + visual->offset.x + localBounds.max.x * visual->scale.x,
+                        pos.y + visual->offset.y + localBounds.max.y * visual->scale.y,
+                        pos.z + visual->offset.z + localBounds.max.z * visual->scale.z }
+                }, Color { 104, 238, 255, 210 });
+            }
         }
-        if (hurtFlash > 0.0f)
+        if (dying)
         {
-            headColor = MixColor(headColor, Color { 255, 84, 84, 255 }, 0.45f * hurtFlash);
+            continue;
         }
-        DrawSphere(Vector3 { pos.x, pos.y + 1.08f + torsoLift, pos.z }, 0.36f * ((radon || orbita) ? bodyPulse : 1.0f), headColor);
         if (enemy)
         {
             DrawCylinderWires(Vector3 { pos.x, pos.y - 0.84f, pos.z }, 0.62f, 0.62f, 0.04f, 24, Color { 255, 118, 118, 220 });
@@ -1625,7 +1897,7 @@ void Renderer::RenderScene(
             {
                 DrawSphereWires(Vector3 { pos.x, pos.y + 0.38f, pos.z }, 0.78f + 0.08f * std::sin(static_cast<float>(GetTime()) * 12.0f), 8, 12, Fade(Color { 255, 118, 70, 255 }, 0.58f));
             }
-            if (heroState.animationState == HeroAnimationState::WindUp || heroState.animationState == HeroAnimationState::Cast)
+            if (heroState.animationState == HeroAnimationState::WindUp || IsAbilityCastAnimation(heroState.animationState))
             {
                 const float glow = heroState.animationState == HeroAnimationState::WindUp ? anim : 1.0f - anim * 0.55f;
                 const Vector3 leftHand { pos.x - right.x * 0.48f + forward.x * (0.16f + shoulderLean), pos.y + 0.26f + bodyLift, pos.z - right.z * 0.48f + forward.z * (0.16f + shoulderLean) };
@@ -1640,13 +1912,13 @@ void Renderer::RenderScene(
         {
             const Color orbitaColor = HeroUiColor(HeroId::Orbita);
             const float pulseFraction = std::clamp(heroState.orbitaPulseTimer / 3.0f, 0.0f, 1.0f);
-            if (pulseFraction > 0.0f || heroState.animationState == HeroAnimationState::Cast)
+            if (pulseFraction > 0.0f || IsAbilityCastAnimation(heroState.animationState))
             {
                 const float ringRadius = 0.78f + pulseFraction * 0.34f + 0.06f * std::sin(static_cast<float>(GetTime()) * 11.0f);
                 DrawCylinderWires(Vector3 { pos.x, pos.y - 0.70f, pos.z }, ringRadius, ringRadius, 0.055f, 36, Fade(WHITE, 0.58f + pulseFraction * 0.20f));
                 DrawSphereWires(Vector3 { pos.x, pos.y + 0.28f + bodyLift, pos.z }, 0.72f + pulseFraction * 0.20f, 8, 12, Fade(orbitaColor, 0.34f + pulseFraction * 0.34f));
             }
-            if (heroState.animationState == HeroAnimationState::Cast)
+            if (IsAbilityCastAnimation(heroState.animationState))
             {
                 const float glow = 1.0f - anim * 0.45f;
                 const Vector3 leftHand { pos.x - right.x * 0.46f + forward.x * (0.12f + shoulderLean), pos.y + 0.28f + bodyLift, pos.z - right.z * 0.46f + forward.z * (0.12f + shoulderLean) };
@@ -1663,6 +1935,21 @@ void Renderer::RenderScene(
             const std::optional<BlockType> block = ItemToBlock(heldItem.type);
             const Texture2D* blockTexture = block.has_value() ? GetBlockTexture(*block) : nullptr;
             Color itemTint = ItemUiColor(heldItem.type);
+            float rangedChargeFraction = 0.0f;
+            if (heldItem.type == ItemType::Bow)
+            {
+                rangedChargeFraction = BowDrawPower(player.GetBowDrawTimer());
+            }
+            else if (ItemIsBlasterWeapon(heldItem.type))
+            {
+                const float required = BlasterChargeSeconds(player.GetInventory().GetBlasterRapidFireLevel());
+                rangedChargeFraction = player.GetBlasterState() == CrossbowState::Loaded
+                    ? 1.0f
+                    : std::clamp(player.GetBlasterLoadTimer() / required, 0.0f, 1.0f);
+                itemTint = player.GetBlasterState() == CrossbowState::Loaded
+                    ? Color { 104, 255, 128, 255 }
+                    : (rangedChargeFraction >= 0.5f ? Color { 255, 220, 72, 255 } : Color { 255, 82, 68, 255 });
+            }
             if (block.has_value())
             {
                 itemTint = GetBlockColor(Block { *block, player.GetTeamId(), true }, teams);
@@ -1687,13 +1974,10 @@ void Renderer::RenderScene(
                 0.72f,
                 GetItemTexture(heldItem.type),
                 blockTexture,
-                itemTint);
+                itemTint,
+                false,
+                rangedChargeFraction);
         }
-        DrawLine3D(
-            Vector3 { pos.x, pos.y + 0.35f, pos.z },
-            Vector3 { pos.x + forward.x * 1.2f, pos.y + 0.35f, pos.z + forward.z * 1.2f },
-            enemy ? Color { 255, 118, 118, 255 } : WHITE);
-
         if (player.IsLocal())
         {
             const float range = CombatSystem::AttackRangeForSword(player.GetInventory().GetSwordLevel());
@@ -1720,12 +2004,27 @@ void Renderer::RenderScene(
         const std::optional<BlockType> block = ItemToBlock(localHeldItem.type);
         const Texture2D* blockTexture = block.has_value() ? GetBlockTexture(*block) : nullptr;
         Color itemTint = ItemUiColor(localHeldItem.type);
+        float rangedChargeFraction = 0.0f;
+        if (localPlayer != nullptr && localHeldItem.type == ItemType::Bow)
+        {
+            rangedChargeFraction = BowDrawPower(localPlayer->GetBowDrawTimer());
+        }
+        else if (localPlayer != nullptr && ItemIsBlasterWeapon(localHeldItem.type))
+        {
+            const float required = BlasterChargeSeconds(localPlayer->GetInventory().GetBlasterRapidFireLevel());
+            rangedChargeFraction = localPlayer->GetBlasterState() == CrossbowState::Loaded
+                ? 1.0f
+                : std::clamp(localPlayer->GetBlasterLoadTimer() / required, 0.0f, 1.0f);
+            itemTint = localPlayer->GetBlasterState() == CrossbowState::Loaded
+                ? Color { 104, 255, 128, 255 }
+                : (rangedChargeFraction >= 0.5f ? Color { 255, 220, 72, 255 } : Color { 255, 82, 68, 255 });
+        }
         if (block.has_value() && localTeamId >= 0)
         {
             itemTint = GetBlockColor(Block { *block, localTeamId, true }, teams);
         }
         const float firstPersonScale = ItemIsBlock(localHeldItem.type) ? 0.54f : 0.66f;
-        DrawHeldItemModel(localHeldItem, hand, handForward, cameraRight, cameraUp, firstPersonScale, GetItemTexture(localHeldItem.type), blockTexture, itemTint, true);
+        DrawHeldItemModel(localHeldItem, hand, handForward, cameraRight, cameraUp, firstPersonScale, GetItemTexture(localHeldItem.type), blockTexture, itemTint, true, rangedChargeFraction);
     }
     if (hideLocalPlayer
         && localPlayer != nullptr
@@ -1733,7 +2032,7 @@ void Renderer::RenderScene(
     {
         const HeroRuntimeState& heroState = localPlayer->GetHeroState();
         if (heroState.animationState == HeroAnimationState::WindUp
-            || heroState.animationState == HeroAnimationState::Cast
+            || IsAbilityCastAnimation(heroState.animationState)
             || heroState.ultimatePrimed
             || heroState.radonOverloaded)
         {
@@ -1760,7 +2059,7 @@ void Renderer::RenderScene(
         && localPlayer->GetHeroId() == HeroId::Orbita)
     {
         const HeroRuntimeState& heroState = localPlayer->GetHeroState();
-        if (heroState.animationState == HeroAnimationState::Cast || heroState.orbitaPulseTimer > 0.0f)
+        if (IsAbilityCastAnimation(heroState.animationState) || heroState.orbitaPulseTimer > 0.0f)
         {
             const Vector3 heroForward = Normalize(Vector3 {
                 camera.target.x - camera.position.x,
@@ -1783,7 +2082,7 @@ void Renderer::RenderScene(
 
     for (const HeroDeviceVisual& device : heroDevices)
     {
-        DrawHeroDeviceVisual(device);
+        DrawHeroDeviceVisual(device, localTeamId);
     }
     DrawOrbitaTeleportPreview(orbitaTeleportPreview);
 
@@ -1846,6 +2145,7 @@ void Renderer::RenderScene(
     {
         DrawRadonPresentationEffect(effect);
     }
+    particles.Draw();
 
     std::sort(
         transparentBlocks.begin(),
@@ -1868,7 +2168,83 @@ void Renderer::RenderScene(
     rlEnableDepthTest();
     DrawDistantFog(skyColor);
 
+    // Projectiles are real geometry, not only short-lived particles. This
+    // keeps fast arrows and energy bolts readable even at high frame rates.
+    for (const EnergyProjectile& projectile : projectiles)
+    {
+        const Vector3 direction = Normalize(projectile.velocity);
+        if (projectile.kind == ProjectileKind::Arrow)
+        {
+            const Vector3 tail = Add(projectile.position, Scale(direction, -2.20f));
+            DrawCylinderEx(tail, projectile.position, 0.070f, 0.025f, 8, Color { 206, 245, 255, 255 });
+            DrawSphere(projectile.position, 0.13f, Color { 230, 255, 255, 255 });
+            DrawLine3D(Add(tail, Vector3 { 0.0f, 0.12f, 0.0f }), projectile.position, Color { 112, 232, 255, 255 });
+            if (projectile.critical)
+            {
+                DrawSphereWires(projectile.position, 0.18f, 5, 7, Color { 255, 226, 96, 235 });
+            }
+        }
+        else if (projectile.kind == ProjectileKind::Blaster)
+        {
+            const Vector3 tail = Add(projectile.position, Scale(direction, -3.20f));
+            DrawCylinderEx(tail, projectile.position, 0.25f, 0.11f, 12, Color { 98, 245, 255, 255 });
+            DrawSphere(projectile.position, 0.36f, Color { 220, 255, 255, 255 });
+            DrawSphereWires(projectile.position, 0.52f, 8, 12, Fade(Color { 104, 255, 128, 255 }, 0.92f));
+            DrawLine3D(Add(tail, Vector3 { 0.06f, 0.0f, 0.0f }), projectile.position, Fade(WHITE, 0.76f));
+            DrawLine3D(Add(tail, Vector3 { -0.06f, 0.0f, 0.0f }), projectile.position, Fade(Color { 98, 245, 255, 255 }, 0.72f));
+        }
+        if (showHeroDebug)
+        {
+            DrawLine3D(projectile.previousPosition, projectile.position, Color { 255, 80, 220, 255 });
+            DrawSphereWires(projectile.position, projectile.radius + 0.08f, 6, 8, Color { 255, 80, 220, 220 });
+            Vector3 predicted = projectile.position;
+            Vector3 velocity = projectile.velocity;
+            for (int step = 0; step < 18; ++step)
+            {
+                const Vector3 next {
+                    predicted.x + velocity.x * 0.05f,
+                    predicted.y + velocity.y * 0.05f,
+                    predicted.z + velocity.z * 0.05f };
+                DrawLine3D(predicted, next, Fade(Color { 255, 226, 96, 255 }, 0.58f));
+                predicted = next;
+                velocity.y -= projectile.gravity * 0.05f;
+            }
+        }
+    }
+
+    sceneShader_.End();
     EndMode3D();
+
+    // A screen-space glow guarantees that very fast projectiles remain
+    // readable instead of shrinking below one pixel at combat distance.
+    for (const EnergyProjectile& projectile : projectiles)
+    {
+        if (projectile.kind != ProjectileKind::Arrow && projectile.kind != ProjectileKind::Blaster)
+        {
+            continue;
+        }
+        if (!IsInFrontOfCamera(projectile.position, camera))
+        {
+            continue;
+        }
+        const Vector3 direction = Normalize(projectile.velocity);
+        const Vector3 tracerTail = Add(projectile.position, Scale(
+            direction,
+            projectile.kind == ProjectileKind::Blaster ? -3.2f : -2.2f));
+        const Vector2 head = GetWorldToScreen(projectile.position, camera);
+        const Vector2 tail = GetWorldToScreen(tracerTail, camera);
+        if (head.x < -32.0f || head.x > static_cast<float>(GetScreenWidth()) + 32.0f
+            || head.y < -32.0f || head.y > static_cast<float>(GetScreenHeight()) + 32.0f)
+        {
+            continue;
+        }
+        const bool blaster = projectile.kind == ProjectileKind::Blaster;
+        const Color glow = blaster ? Color { 98, 245, 255, 255 } : Color { 178, 245, 255, 255 };
+        DrawLineEx(tail, head, blaster ? 7.0f : 4.0f, Fade(glow, 0.34f));
+        DrawLineEx(tail, head, blaster ? 3.0f : 1.7f, glow);
+        DrawCircleV(head, blaster ? 7.0f : 4.0f, Fade(WHITE, 0.92f));
+        DrawCircleLines(static_cast<int>(head.x), static_cast<int>(head.y), blaster ? 10.0f : 6.0f, glow);
+    }
 
     for (const FloatingText& text : floatingTexts)
     {
@@ -1967,6 +2343,39 @@ void Renderer::RenderScene(
             DrawText("SHIELD", x, y + 29, 10, Color { 112, 232, 255, 255 });
         }
     }
+
+    if (showHeroDebug && localPlayer != nullptr)
+    {
+        const HeroVisualAsset* visual = heroVisuals_.Find(localPlayer->GetHeroId());
+        const HeroHitboxProfile& hitbox = HeroSystem::GetHitboxProfile(localPlayer->GetHeroId());
+        const std::string path = visual != nullptr ? visual->sourcePath : "procedural fallback";
+        DrawRectangle(12, 12, 820, projectiles.empty() ? 101 : 124, Fade(BLACK, 0.76f));
+        DrawRectangleLines(12, 12, 820, projectiles.empty() ? 101 : 124, Fade(Color { 104, 238, 255, 255 }, 0.72f));
+        DrawText((std::string("F8 HERO DEBUG | state: ") + HeroAnimationStateName(localPlayer->GetHeroState().animationState)).c_str(), 22, 20, 17, WHITE);
+        DrawText((std::string("asset: ") + path).c_str(), 22, 43, 15, Color { 178, 235, 255, 255 });
+        DrawText((std::string("hitbox r=") + FormatTenths(hitbox.bodyRadius) + " h=" + FormatTenths(hitbox.bodyHeight)).c_str(), 22, 64, 14, Color { 255, 220, 72, 255 });
+        const ChunkRenderStats& chunkStats = chunkRenderer_.GetStats();
+        const std::string performanceLine = "FPS=" + std::to_string(GetFPS())
+            + " draw=" + std::to_string(chunkStats.drawCalls)
+            + " chunks=" + std::to_string(chunkStats.visibleChunks)
+            + " tris=" + std::to_string(chunkStats.triangles)
+            + " rebuild=" + FormatTenths(chunkStats.lastRebuildMilliseconds) + "ms";
+        DrawText(performanceLine.c_str(), 22, 83, 14, Color { 128, 238, 166, 255 });
+        if (!projectiles.empty())
+        {
+            const EnergyProjectile& projectile = projectiles.back();
+            const float speed = std::sqrt(
+                projectile.velocity.x * projectile.velocity.x
+                + projectile.velocity.y * projectile.velocity.y
+                + projectile.velocity.z * projectile.velocity.z);
+            const std::string projectileLine = "projectile speed=" + FormatTenths(speed)
+                + " dmg=" + std::to_string(projectile.damage)
+                + " dist=" + FormatTenths(projectile.distanceTraveled)
+                + " owner/team=" + std::to_string(projectile.ownerId) + "/" + std::to_string(projectile.ownerTeamId)
+                + (projectile.critical ? " CRIT" : "");
+            DrawText(projectileLine.c_str(), 22, 103, 14, Color { 255, 120, 220, 255 });
+        }
+    }
 }
 
 void Renderer::RenderUI(
@@ -1994,6 +2403,8 @@ void Renderer::RenderUI(
     const char* heroActive1KeyText,
     const char* heroActive2KeyText,
     const char* heroUltimateKeyText,
+    float sniperScopeBlend,
+    float sniperMagnification,
     std::optional<int> winnerTeamId) const
 {
     const Team* playerTeam = FindTeam(teams, localPlayer.GetTeamId());
@@ -2088,6 +2499,36 @@ void Renderer::RenderUI(
     const int centerY = GetScreenHeight() / 2;
     if (!shopOpen && !inventoryOpen)
     {
+        const float scopeBlend = std::clamp(sniperScopeBlend, 0.0f, 1.0f);
+        if (scopeBlend > 0.01f)
+        {
+            const float minDimension = static_cast<float>(std::min(GetScreenWidth(), GetScreenHeight()));
+            const float lensRadius = minDimension * (0.48f - scopeBlend * 0.055f);
+            const float outerRadius = static_cast<float>(std::max(GetScreenWidth(), GetScreenHeight()));
+            DrawRing(
+                Vector2 { static_cast<float>(centerX), static_cast<float>(centerY) },
+                lensRadius,
+                outerRadius,
+                0.0f,
+                360.0f,
+                128,
+                Fade(BLACK, scopeBlend * 0.96f));
+            DrawCircleLines(centerX, centerY, lensRadius, Fade(Color { 120, 232, 255, 255 }, scopeBlend * 0.76f));
+            DrawCircleLines(centerX, centerY, lensRadius - 3.0f, Fade(BLACK, scopeBlend * 0.92f));
+            const Color reticle = Fade(Color { 180, 245, 255, 255 }, scopeBlend * 0.88f);
+            DrawLine(centerX - static_cast<int>(lensRadius), centerY, centerX - 12, centerY, reticle);
+            DrawLine(centerX + 12, centerY, centerX + static_cast<int>(lensRadius), centerY, reticle);
+            DrawLine(centerX, centerY - static_cast<int>(lensRadius), centerX, centerY - 12, reticle);
+            DrawLine(centerX, centerY + 12, centerX, centerY + static_cast<int>(lensRadius), reticle);
+            DrawCircleLines(centerX, centerY, 3.0f, reticle);
+            const std::string zoomText = "x" + FormatTenths(sniperMagnification) + "  колесо мыши";
+            DrawText(
+                zoomText.c_str(),
+                centerX - MeasureText(zoomText.c_str(), 18) / 2,
+                centerY + static_cast<int>(lensRadius) - 32,
+                18,
+                Fade(Color { 180, 245, 255, 255 }, scopeBlend));
+        }
         Color crosshairColor = placementPreview.visible
             ? (placementPreview.valid ? Color { 128, 238, 166, 255 } : Color { 255, 130, 130, 255 })
             : WHITE;
@@ -2095,11 +2536,23 @@ void Renderer::RenderUI(
         {
             crosshairColor = combatPreview.ready ? Color { 255, 235, 142, 255 } : Color { 188, 198, 210, 255 };
         }
-        DrawCircleLines(centerX, centerY, 6.0f, crosshairColor);
-        DrawLine(centerX - 17, centerY, centerX - 9, centerY, Fade(crosshairColor, 0.72f));
-        DrawLine(centerX + 9, centerY, centerX + 17, centerY, Fade(crosshairColor, 0.72f));
-        DrawLine(centerX, centerY - 17, centerX, centerY - 9, Fade(crosshairColor, 0.72f));
-        DrawLine(centerX, centerY + 9, centerX, centerY + 17, Fade(crosshairColor, 0.72f));
+        const float normalCrosshairAlpha = 1.0f - scopeBlend;
+        DrawCircleLines(centerX, centerY, 6.0f, Fade(crosshairColor, normalCrosshairAlpha));
+        DrawLine(centerX - 17, centerY, centerX - 9, centerY, Fade(crosshairColor, 0.72f * normalCrosshairAlpha));
+        DrawLine(centerX + 9, centerY, centerX + 17, centerY, Fade(crosshairColor, 0.72f * normalCrosshairAlpha));
+        DrawLine(centerX, centerY - 17, centerX, centerY - 9, Fade(crosshairColor, 0.72f * normalCrosshairAlpha));
+        DrawLine(centerX, centerY + 9, centerX, centerY + 17, Fade(crosshairColor, 0.72f * normalCrosshairAlpha));
+        if (selectedHotbarSlot >= 0 && selectedHotbarSlot < kHotbarSlotCount)
+        {
+            const ItemStack& selected = inventory.GetHotbarSlots()[selectedHotbarSlot];
+            if (selected.type == ItemType::Bow && localPlayer.GetBowDrawTimer() > 0.0f)
+            {
+                const float fraction = BowDrawPower(localPlayer.GetBowDrawTimer());
+                const Color bowColor = fraction >= 0.999f ? Color { 255, 226, 96, 255 } : Color { 112, 232, 255, 255 };
+                DrawBar(Rectangle { static_cast<float>(centerX - 76), static_cast<float>(centerY + 31), 152.0f, 10.0f },
+                    fraction, bowColor, Fade(BLACK, 0.72f), Fade(bowColor, 0.92f));
+            }
+        }
         if (hitMarkerTimer > 0.0f)
         {
             const float alpha = std::min(1.0f, hitMarkerTimer * 5.0f);
@@ -2444,6 +2897,12 @@ const Texture2D* Renderer::GetItemTexture(ItemType type) const
     case ItemType::Pickaxe:
         return &pickaxeIcon_;
     case ItemType::EnergyArrow:
+        return &arrowIcon_;
+    case ItemType::Bow:
+        return &arrowIcon_;
+    case ItemType::Blaster:
+        return &arrowIcon_;
+    case ItemType::SniperRifle:
         return &arrowIcon_;
     case ItemType::Fireball:
         return &fireballIcon_;

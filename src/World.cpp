@@ -6,6 +6,13 @@
 
 namespace
 {
+int FloorDiv(int value, int divisor)
+{
+    const int quotient = value / divisor;
+    const int remainder = value % divisor;
+    return remainder < 0 ? quotient - 1 : quotient;
+}
+
 float Length(Vector3 value)
 {
     return std::sqrt(value.x * value.x + value.y * value.y + value.z * value.z);
@@ -30,7 +37,12 @@ bool Overlaps(float minA, float maxA, float minB, float maxB)
 
 void World::Clear()
 {
+    for (const auto& entry : blocks_)
+    {
+        dirtyRenderChunks_.insert(RenderChunkForBlock(entry.first));
+    }
     blocks_.clear();
+    ++renderRevision_;
 }
 
 bool World::PlaceBlock(const GridPos& pos, const Block& block, bool allowReplace)
@@ -45,7 +57,17 @@ bool World::PlaceBlock(const GridPos& pos, const Block& block, bool allowReplace
         return false;
     }
 
+    const auto existing = blocks_.find(pos);
+    if (existing != blocks_.end()
+        && existing->second.type == block.type
+        && existing->second.teamId == block.teamId
+        && existing->second.breakable == block.breakable)
+    {
+        return true;
+    }
+
     blocks_[pos] = block;
+    MarkRenderDirty(pos);
     return true;
 }
 
@@ -60,12 +82,18 @@ bool World::BreakBlock(const GridPos& pos, int attackerTeam)
     }
 
     blocks_.erase(it);
+    MarkRenderDirty(pos);
     return true;
 }
 
 bool World::RemoveBlock(const GridPos& pos)
 {
-    return blocks_.erase(pos) > 0;
+    if (blocks_.erase(pos) == 0)
+    {
+        return false;
+    }
+    MarkRenderDirty(pos);
+    return true;
 }
 
 const Block* World::GetBlock(const GridPos& pos) const
@@ -313,6 +341,51 @@ void World::AddBridge(const GridPos& from, const GridPos& to, int y)
 const World::BlockMap& World::GetBlocks() const
 {
     return blocks_;
+}
+
+std::uint64_t World::GetRenderRevision() const
+{
+    return renderRevision_;
+}
+
+std::vector<GridPos> World::TakeDirtyRenderChunks() const
+{
+    std::vector<GridPos> result;
+    result.reserve(dirtyRenderChunks_.size());
+    for (const GridPos& chunk : dirtyRenderChunks_)
+    {
+        result.push_back(chunk);
+    }
+    dirtyRenderChunks_.clear();
+    return result;
+}
+
+GridPos World::RenderChunkForBlock(const GridPos& pos)
+{
+    return GridPos {
+        FloorDiv(pos.x, kRenderChunkSize),
+        FloorDiv(pos.y, kRenderChunkSize),
+        FloorDiv(pos.z, kRenderChunkSize)
+    };
+}
+
+void World::MarkRenderDirty(const GridPos& pos)
+{
+    ++renderRevision_;
+    dirtyRenderChunks_.insert(RenderChunkForBlock(pos));
+    constexpr GridPos kNeighbors[] {
+        GridPos { 1, 0, 0 }, GridPos { -1, 0, 0 },
+        GridPos { 0, 1, 0 }, GridPos { 0, -1, 0 },
+        GridPos { 0, 0, 1 }, GridPos { 0, 0, -1 }
+    };
+    for (const GridPos& offset : kNeighbors)
+    {
+        dirtyRenderChunks_.insert(RenderChunkForBlock(GridPos {
+            pos.x + offset.x,
+            pos.y + offset.y,
+            pos.z + offset.z
+        }));
+    }
 }
 
 bool World::IsCollisionBlock(BlockType type)

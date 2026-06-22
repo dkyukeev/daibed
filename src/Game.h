@@ -10,8 +10,11 @@
 #include "Generator.h"
 #include "HeroSystem.h"
 #include "InputSystem.h"
+#include "MusicSystem.h"
 #include "Network/LocalNetworkMock.h"
 #include "Player.h"
+#include "ParticleSystem.h"
+#include "PostProcessor.h"
 #include "Renderer.h"
 #include "Shop.h"
 #include "Team.h"
@@ -75,6 +78,8 @@ public:
     void SetBotTuningPath(std::string path);
     void SetAutomatchStatsPath(std::string path);
     void SetProfilingEnabled(bool enabled);
+    void PrepareStartupSmoke();
+    void ExerciseStartupSmokeMutation(bool place);
 
     void HandleInput();
     void Update(float dt);
@@ -144,7 +149,9 @@ private:
     void UseSelectedItem(Player& player);
     void LaunchProjectile(Player& player, UtilityType type);
     void LaunchProjectileDirected(Player& player, UtilityType type, Vector3 direction, bool announce);
-    bool BotUseUtility(Player& bot, Team& team, Player* enemy, EnergyCore* enemyCore);
+    bool LaunchBlasterShot(Player& player, Vector3 direction, bool aimed, bool announce);
+    bool LaunchBowShot(Player& player, Vector3 direction, float drawPower, bool announce);
+    bool BotUseUtility(Player& bot, Team& team, Player* enemy, EnergyCore* enemyCore, float dt);
     bool BotUseHeroAbility(Player& bot, Team& team, Player* enemy, EnergyCore* enemyCore);
     bool BotCastHeroAbility(Player& bot, HeroAbilitySlot slot);
     void DetonateAt(Vector3 position, int ownerTeamId, int ownerPlayerId, float radius, int damage, bool createFireZone, bool blueFire = false);
@@ -193,6 +200,7 @@ private:
     void UpdateKonvoyDevices(float dt);
     void UpdateLikhoBleeds(float dt);
     void UpdateSvidetelEffects(float dt);
+    bool DamageHeroDeviceAlongSegment(int attackerTeamId, Vector3 start, Vector3 end, int damage, bool toolAttack);
     void UpdatePassiveRegeneration(float dt);
     void UpdateBaseHealing(float dt);
     void UpdateFeedback(float dt);
@@ -240,6 +248,7 @@ private:
         const TeamCoordinationBus* coordBus);
     Player* FindNearbyEnemyPlayer(const Player& player, float maxDistance);
     BotMemory& GetBotMemory(Player& bot);
+    void ApplyBotHitReaction(int playerId);
     std::optional<RaycastHit> RaycastFromAim(const Player& player, float maxDistance) const;
     std::optional<GridPos> FindCoreDefenseBlock(const EnergyCore& core, const Player& bot) const;
     std::optional<GridPos> FindMissingCoreDefenseBlock(const Team& team) const;
@@ -272,6 +281,7 @@ private:
     EnergyCore* FindCoreByTeam(int teamId);
     EnergyCore* FindCoreAt(const GridPos& pos);
     ItemStack GetSelectedHotbarStack(const Player& player) const;
+    bool IsSniperScopeRequested(const Player& player) const;
     std::optional<BlockType> GetSelectedBlockType(const Player& player) const;
     std::optional<WeaponType> GetSelectedWeaponType(const Player& player) const;
     int EffectiveToolLevel(const Player& player) const;
@@ -304,6 +314,37 @@ private:
         int ownerTeamId = -1;
         float timer = 0.0f;
     };
+    struct MolotovBlockBurn
+    {
+        GridPos position {};
+        BlockType blockType = BlockType::Air;
+        int ownerTeamId = -1;
+        float timer = 0.0f;
+    };
+    struct RadonBurn
+    {
+        int targetPlayerId = -1;
+        int ownerPlayerId = -1;
+        int ownerTeamId = -1;
+        float lifetime = 0.0f;
+        float tickTimer = 0.0f;
+        bool blueFire = false;
+    };
+    struct LikhoBlockCut
+    {
+        GridPos position {};
+        BlockType blockType = BlockType::Air;
+        int ownerPlayerId = -1;
+        float lifetime = 0.0f;
+    };
+    struct KonvoyIntruderMark
+    {
+        int ownerPlayerId = -1;
+        int targetPlayerId = -1;
+        float exposure = 0.0f;
+        float markedTimer = 0.0f;
+        float pulseTimer = 0.0f;
+    };
     struct BromVacuumBot
     {
         Vector3 position {};
@@ -314,6 +355,16 @@ private:
         bool temporary = false;
         float lifetime = 0.0f;
         float pulseTimer = 0.0f;
+        int health = 45;
+        float invulnerabilityTimer = 0.0f;
+        Vector3 navTarget {};
+        Vector3 navWaypoint {};
+        Vector3 lastPosition {};
+        float repathTimer = 0.0f;
+        float stuckTimer = 0.0f;
+        float targetLockTimer = 0.0f;
+        int lockedPickupIndex = -1;
+        bool hasNavWaypoint = false;
     };
     struct BromTurretDrone
     {
@@ -326,6 +377,13 @@ private:
         float pulseTimer = 0.0f;
         float shotFlashTimer = 0.0f;
         Vector3 lastShotTarget {};
+        int health = 60;
+        float invulnerabilityTimer = 0.0f;
+        Vector3 navTarget {};
+        Vector3 navWaypoint {};
+        float repathTimer = 0.0f;
+        float targetLockTimer = 0.0f;
+        int lockedTargetPlayerId = -1;
     };
     struct KonvoyTrap
     {
@@ -334,6 +392,7 @@ private:
         int ownerTeamId = -1;
         float lifetime = 0.0f;
         float flashTimer = 0.0f;
+        int health = 48;
     };
     struct KonvoyTether
     {
@@ -342,6 +401,8 @@ private:
         int ownerTeamId = -1;
         float lifetime = 0.0f;
         float flashTimer = 0.0f;
+        int ownerLastHealth = 100;
+        int accumulatedOwnerDamage = 0;
     };
     struct KonvoyDome
     {
@@ -350,6 +411,9 @@ private:
         int ownerTeamId = -1;
         float lifetime = 0.0f;
         float flashTimer = 0.0f;
+        int health = 180;
+        std::vector<int> initiallyInsideEnemyIds;
+        float chargeTimer = 0.0f;
     };
     struct LikhoBleed
     {
@@ -359,6 +423,7 @@ private:
         float lifetime = 0.0f;
         float tickTimer = 0.0f;
         int stacks = 1;
+        int successfulHits = 1;
     };
     struct SvidetelEcho
     {
@@ -370,12 +435,14 @@ private:
         bool armed = false;
         Vector3 lastTarget {};
         float flashTimer = 0.0f;
+        int health = 42;
     };
     struct SvidetelPhaseBlock
     {
         GridPos position {};
         Block block {};
         float timer = 0.0f;
+        float suffocationTimer = 0.0f;
     };
     struct AutomatchBotStats
     {
@@ -505,10 +572,12 @@ private:
     std::vector<ResourcePickup> pickups_;
 
     Renderer renderer_;
+    PostProcessor postProcessor_;
     InputSystem input_;
     Shop shop_;
     CombatSystem combat_;
     AudioSystem audio_;
+    MusicSystem music_;
     GameRules rules_;
     LocalNetworkMock network_;
 
@@ -523,11 +592,16 @@ private:
     CombatPreview combatPreview_;
     OrbitaTeleportPreview orbitaTeleportPreview_;
     std::vector<WorldEffect> worldEffects_;
+    ParticleSystem particles_;
     std::vector<TimedExplosion> timedExplosions_;
     std::vector<EnergyProjectile> projectiles_;
     std::vector<HazardZone> hazardZones_;
     std::vector<AlarmTrap> alarmTraps_;
     std::vector<HeroTemporaryBlock> heroTemporaryBlocks_;
+    std::vector<MolotovBlockBurn> molotovBlockBurns_;
+    std::vector<RadonBurn> radonBurns_;
+    std::vector<LikhoBlockCut> likhoBlockCuts_;
+    std::vector<KonvoyIntruderMark> konvoyIntruderMarks_;
     std::vector<BromVacuumBot> bromVacuumBots_;
     std::vector<BromTurretDrone> bromTurretDrones_;
     std::vector<KonvoyTrap> konvoyTraps_;
@@ -576,6 +650,8 @@ private:
     unsigned int automatchSeed_ = 0;
     int menuIndex_ = 0;
     int heroSelectIndex_ = 0;
+    float heroPreviewYaw_ = 204.0f;
+    bool heroPreviewDragging_ = false;
     int settingsIndex_ = 0;
     int controlsIndex_ = 0;
     int pauseIndex_ = 0;
@@ -593,6 +669,9 @@ private:
     bool tutorialMode_ = false;
     bool reducedCameraShake_ = false;
     bool reducedFlashes_ = false;
+    bool postProcessing_ = true;
+    bool bloomEnabled_ = true;
+    bool vsyncEnabled_ = true;
     int shopCategoryIndex_ = 0;
     int selectedHotbarSlot_ = 0;
     bool inventoryOpen_ = false;
@@ -602,12 +681,23 @@ private:
     bool personalChestOpen_ = false;
     bool attackChargeActive_ = false;
     float attackChargeTimer_ = 0.0f;
+    bool blasterCharging_ = false;
     int resolutionIndex_ = 1;
     int fpsLimitIndex_ = 1;
     int windowMode_ = 0;
+    int renderScaleIndex_ = 3;
+    int drawDistanceIndex_ = 2;
+    int shadowQuality_ = 1;
+    int effectsQuality_ = 2;
     float masterVolume_ = 0.8f;
+    float musicVolume_ = 0.65f;
+    float sfxVolume_ = 0.9f;
+    float ambientVolume_ = 0.7f;
+    float renderScale_ = 1.0f;
     float fov_ = 62.0f;
     float gameplayFov_ = 62.0f;
+    float sniperScopeBlend_ = 0.0f;
+    float sniperMagnification_ = 1.5f;
     float hitMarkerTimer_ = 0.0f;
     float damageFlashTimer_ = 0.0f;
     float hitStopTimer_ = 0.0f;

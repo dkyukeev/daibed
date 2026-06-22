@@ -2,6 +2,7 @@
 
 #include "Block.h"
 #include "Inventory.h"
+#include "RangedCombat.h"
 #include "raylib.h"
 
 #include <string>
@@ -122,13 +123,25 @@ struct TimedExplosion
 struct EnergyProjectile
 {
     Vector3 position {};
+    Vector3 previousPosition {};
+    Vector3 startPosition {};
     Vector3 velocity {};
     int ownerId = -1;
     int ownerTeamId = -1;
     int damage = 20;
+    float baseDamage = 0.0f;
     float radius = 0.18f;
     float explosionRadius = 0.0f;
     float lifetime = 2.8f;
+    float gravity = 2.35f;
+    float airDragPerTick = 1.0f;
+    float maxRange = 0.0f;
+    float distanceTraveled = 0.0f;
+    int punchLevel = 0;
+    ProjectileKind kind = ProjectileKind::Arrow;
+    bool critical = false;
+    bool speedBasedDamage = false;
+    bool affectedByDrag = false;
     bool fireZone = false;
     bool blueFire = false;
 };

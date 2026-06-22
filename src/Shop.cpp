@@ -28,10 +28,15 @@ const std::vector<ShopItem>& Items()
         ShopItem { 101, "Combat", "Blade tier", "damage, reach and knockback", ResourceType::Gold, 6, ResourceType::Iron, 0, false, 3 },
         ShopItem { 102, "Combat", "Pickaxe tier", "faster block and Core breaking", ResourceType::Iron, 8, ResourceType::Crystal, 1, true, 3 },
         ShopItem { 103, "Combat", "Armor tier", "reduces melee damage", ResourceType::Gold, 5, ResourceType::Crystal, 2, true, 3 },
-        ShopItem { 104, "Combat", "Energy arrows", "8 ranged shots", ResourceType::Iron, 10, ResourceType::Gold, 1, true, 0 },
+        ShopItem { 104, "Combat", "Energy arrows", "6 тактических выстрелов", ResourceType::Iron, 12, ResourceType::Gold, 1, true, 0 },
         ShopItem { 105, "Combat", "Fireball", "bridge-breaking projectile", ResourceType::Gold, 4, ResourceType::Crystal, 1, true, 0 },
         ShopItem { 106, "Combat", "Battle axe", "wide heavy melee weapon", ResourceType::Gold, 5, ResourceType::Iron, 0, false, 0 },
         ShopItem { 107, "Combat", "Spear", "long reach melee weapon", ResourceType::Gold, 4, ResourceType::Crystal, 1, true, 0 },
+        ShopItem { 108, "Combat", "Лук", "натяжение ЛКМ, расходует стрелы", ResourceType::Gold, 4, ResourceType::Iron, 12, true, 0 },
+        ShopItem { 109, "Combat", "Улучшение лука", "I: Сила I · II: Сила I/Отдача I · III: Сила II/Отдача II", ResourceType::Gold, 5, ResourceType::Crystal, 1, true, 3 },
+        ShopItem { 401, "Blaster", "Бластер", "заряжаемый дальнобойный бластер", ResourceType::Gold, 8, ResourceType::Crystal, 2, true, 0 },
+        ShopItem { 402, "Blaster", "Ускоренная зарядка", "ветка скорострельности, уровни I-III", ResourceType::Gold, 5, ResourceType::Crystal, 1, true, 3 },
+        ShopItem { 403, "Blaster", "Усиленный выстрел", "ветка урона, уровни I-III", ResourceType::Gold, 6, ResourceType::Crystal, 1, true, 3 },
         ShopItem { 201, "Utility", "Mobility burst", "18s speed and jump boost", ResourceType::Gold, 3, ResourceType::Crystal, 1, true, 0 },
         ShopItem { 202, "Utility", "Shield pulse", "12s incoming damage shield", ResourceType::Crystal, 3, ResourceType::Iron, 0, false, 0 },
         ShopItem { 203, "Utility", "Med kit", "instant heal charge", ResourceType::Gold, 2, ResourceType::Iron, 0, false, 0 },
@@ -59,6 +64,8 @@ const char* CategoryName(int categoryIndex)
         return "Utility";
     case 3:
         return "Team";
+    case 4:
+        return "Blaster";
     default:
         break;
     }
@@ -261,8 +268,8 @@ bool Shop::Purchase(Player& player, Team& team, int choice, std::string& message
             message = "Need " + CostText(*item) + " for arrows.";
             return false;
         }
-        inventory.AddUtility(UtilityType::Arrows, 8);
-        message = "Bought 8 energy arrows.";
+        inventory.AddUtility(UtilityType::Arrows, 6);
+        message = "Куплено 6 энергетических стрел.";
         return true;
 
     case 105:
@@ -303,6 +310,107 @@ bool Shop::Purchase(Player& player, Team& team, int choice, std::string& message
         }
         inventory.AddItem(ItemType::Spear, 1);
         message = "Bought a spear.";
+        return true;
+
+    case 108:
+        if (inventory.HasItem(ItemType::Bow))
+        {
+            message = "Лук уже куплен.";
+            return false;
+        }
+        if (!spendCost())
+        {
+            message = "Недостаточно ресурсов для лука.";
+            return false;
+        }
+        inventory.AddItem(ItemType::Bow, 1);
+        message = "Куплен лук. Удерживайте ЛКМ для натяжения.";
+        return true;
+
+    case 109:
+        if (!inventory.HasItem(ItemType::Bow))
+        {
+            message = "Сначала купите лук.";
+            return false;
+        }
+        if (inventory.GetBowUpgradeLevel() >= item->maxLevel)
+        {
+            message = "Лук улучшен до максимума.";
+            return false;
+        }
+        if (!spendCost())
+        {
+            message = "Недостаточно ресурсов для улучшения лука.";
+            return false;
+        }
+        inventory.UpgradeBow();
+        if (inventory.GetBowUpgradeLevel() == 1)
+        {
+            message = "Лук: Сила I.";
+        }
+        else if (inventory.GetBowUpgradeLevel() == 2)
+        {
+            message = "Лук: Сила I, Отдача I.";
+        }
+        else
+        {
+            message = "Лук: Сила II, Отдача II.";
+        }
+        return true;
+
+    case 401:
+        if (inventory.HasItem(ItemType::Blaster) || inventory.HasItem(ItemType::SniperRifle))
+        {
+            message = "Бластер уже куплен.";
+            return false;
+        }
+        if (!spendCost())
+        {
+            message = "Недостаточно ресурсов для бластера.";
+            return false;
+        }
+        inventory.AddItem(ItemType::Blaster, 1);
+        message = "Куплен бластер. Удерживайте ЛКМ для заряда, ПКМ — точное прицеливание.";
+        return true;
+
+    case 402:
+        if (!inventory.HasItem(ItemType::Blaster) && !inventory.HasItem(ItemType::SniperRifle))
+        {
+            message = "Сначала купите бластер.";
+            return false;
+        }
+        if (inventory.GetBlasterDamageLevel() > 0 || inventory.GetBlasterRapidFireLevel() >= 3)
+        {
+            message = inventory.GetBlasterDamageLevel() > 0 ? "Уже выбрана ветка урона." : "Скорострельность максимальна.";
+            return false;
+        }
+        if (!spendCost())
+        {
+            message = "Недостаточно ресурсов для ускорения зарядки.";
+            return false;
+        }
+        inventory.UpgradeBlasterRapidFire();
+        message = inventory.GetBlasterRapidFireLevel() == 3 ? "Максимальная скорострельность." : "Ускоренная зарядка улучшена.";
+        return true;
+
+    case 403:
+        if (!inventory.HasItem(ItemType::Blaster) && !inventory.HasItem(ItemType::SniperRifle))
+        {
+            message = "Сначала купите бластер.";
+            return false;
+        }
+        if (inventory.GetBlasterRapidFireLevel() > 0 || inventory.GetBlasterDamageLevel() >= 3)
+        {
+            message = inventory.GetBlasterRapidFireLevel() > 0 ? "Уже выбрана ветка скорострельности." : "Урон максимален.";
+            return false;
+        }
+        if (!spendCost())
+        {
+            message = "Недостаточно ресурсов для усиления выстрела.";
+            return false;
+        }
+        inventory.UpgradeBlasterDamage();
+        message = inventory.GetBlasterDamageLevel() == 3 ? "Максимальный урон." : "Усиленный выстрел улучшен.";
         return true;
 
     case 201:
@@ -464,7 +572,7 @@ std::vector<ShopItem> Shop::GetItemsForCategory(int categoryIndex) const
 
 int Shop::GetCategoryCount() const
 {
-    return 4;
+    return 5;
 }
 
 const char* Shop::GetCategoryName(int categoryIndex) const

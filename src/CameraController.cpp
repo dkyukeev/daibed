@@ -12,6 +12,9 @@ constexpr float kCameraDistance = 6.8f;
 constexpr float kFocusHeight = 1.05f;
 constexpr float kEyeHeight = 0.78f;
 constexpr float kCameraLift = 1.15f;
+// Minecraft-style sneak: the eye dips noticeably so crouch is felt.
+constexpr float kCrouchEyeDrop = 0.34f;
+constexpr float kCrouchBlendSharpness = 14.0f;
 
 float Length2D(Vector3 value)
 {
@@ -57,10 +60,13 @@ void CameraController::AddShake(float intensity, float duration)
 
 void CameraController::Update(Vector3 focus, float dt)
 {
+    const float crouchTarget = crouching_ ? 1.0f : 0.0f;
+    crouchBlend_ += (crouchTarget - crouchBlend_) * std::min(1.0f, kCrouchBlendSharpness * dt);
+
     const Vector3 look = LookDirection();
     const Vector3 targetBase {
         focus.x,
-        focus.y + (mode_ == ViewMode::FirstPerson ? kEyeHeight : kFocusHeight),
+        focus.y + (mode_ == ViewMode::FirstPerson ? kEyeHeight : kFocusHeight) - crouchBlend_ * kCrouchEyeDrop,
         focus.z
     };
     Vector3 desiredTarget {
@@ -127,8 +133,13 @@ void CameraController::SetMode(ViewMode mode)
 
 void CameraController::SetFov(float fov)
 {
-    fov_ = std::clamp(fov, 45.0f, 95.0f);
+    fov_ = std::clamp(fov, 18.0f, 95.0f);
     camera_.fovy = fov_;
+}
+
+void CameraController::SetCrouching(bool crouching)
+{
+    crouching_ = crouching;
 }
 
 const Camera3D& CameraController::GetCamera() const

@@ -1,9 +1,13 @@
 #pragma once
 
 #include "Core.h"
+#include "ChunkRenderer.h"
 #include "Feedback.h"
 #include "Generator.h"
+#include "HeroVisuals.h"
 #include "Player.h"
+#include "ParticleSystem.h"
+#include "SceneShader.h"
 #include "Shop.h"
 #include "Team.h"
 #include "World.h"
@@ -29,7 +33,9 @@ public:
         const std::vector<HeroDeviceVisual>& heroDevices,
         const OrbitaTeleportPreview& orbitaTeleportPreview,
         const PlacementPreview& placementPreview,
+        const std::vector<EnergyProjectile>& projectiles,
         const std::vector<WorldEffect>& worldEffects,
+        const ParticleSystem& particles,
         const std::vector<FloatingText>& floatingTexts,
         const Camera3D& camera,
         const ItemStack& localHeldItem,
@@ -61,7 +67,14 @@ public:
         const char* heroActive1KeyText,
         const char* heroActive2KeyText,
         const char* heroUltimateKeyText,
+        float sniperScopeBlend,
+        float sniperMagnification,
         std::optional<int> winnerTeamId) const;
+
+    void RenderHeroPreview(HeroId heroId, Rectangle destination, float yawDegrees) const;
+    void SetWorldRenderDistance(float distance);
+    void SetShadowQuality(int quality);
+    const ChunkRenderStats& GetChunkRenderStats() const;
 
 private:
     struct TransparentBlockDraw
@@ -109,4 +122,10 @@ private:
     Texture2D goldIcon_ {};
     Texture2D crystalIcon_ {};
     mutable std::vector<TransparentBlockDraw> transparentBlocks_;
+    mutable ChunkRenderer chunkRenderer_;
+    float worldRenderDistance_ = 150.0f;
+    int shadowQuality_ = 1;
+    SceneShader sceneShader_;
+    HeroVisualLibrary heroVisuals_;
+    RenderTexture2D heroPreviewTarget_ {};
 };

@@ -57,6 +57,7 @@ Player::Player(int id, std::string name, int teamId, Vector3 spawnPoint, bool lo
     : id_(id),
       name_(std::move(name)),
       teamId_(teamId),
+      homeSpawnPoint_(spawnPoint),
       position_(spawnPoint),
       local_(local)
 {
@@ -75,6 +76,11 @@ const std::string& Player::GetName() const
 int Player::GetTeamId() const
 {
     return teamId_;
+}
+
+Vector3 Player::GetHomeSpawnPoint() const
+{
+    return homeSpawnPoint_;
 }
 
 Vector3 Player::GetPosition() const
@@ -238,6 +244,13 @@ void Player::Move(
         sneaking_ = false;
         return;
     }
+    if (heroId_ == HeroId::Orbita && heroState_.orbitaDashRemaining > 0.0f)
+    {
+        velocity_ = Vector3 { 0.0f, 0.0f, 0.0f };
+        sprinting_ = false;
+        sneaking_ = false;
+        return;
+    }
 
     const Vector3 normalizedWish = NormalizeOrZero(wishDirection);
     const bool wantsMovement = std::fabs(normalizedWish.x) > 0.0001f || std::fabs(normalizedWish.z) > 0.0001f;
@@ -251,7 +264,8 @@ void Player::Move(
 
     const float speedMultiplier = ((speedBoostTimer_ > 0.0f ? 1.22f : 1.0f) + (sprinting_ ? 0.28f : 0.0f))
         * (sneaking_ ? kSneakSpeedMultiplier : 1.0f)
-        * std::clamp(terrainSpeedMultiplier, 0.35f, 1.45f);
+        * std::clamp(terrainSpeedMultiplier, 0.35f, 1.45f)
+        * (controlDebuffTimer_ > 0.0f ? controlMoveMultiplier_ : 1.0f);
     const Vector3 targetVelocity {
         normalizedWish.x * kMoveSpeed * speedMultiplier,
         0.0f,
@@ -287,7 +301,9 @@ void Player::Move(
 
     if (jumpBufferTimer_ > 0.0f && coyoteTimer_ > 0.0f)
     {
-        velocity_.y = (kJumpSpeed + (jumpBoostTimer_ > 0.0f ? 1.45f : 0.0f)) * std::clamp(jumpMultiplier, 0.65f, 1.45f);
+        velocity_.y = (kJumpSpeed + (jumpBoostTimer_ > 0.0f ? 1.45f : 0.0f))
+            * std::clamp(jumpMultiplier, 0.65f, 1.45f)
+            * (controlDebuffTimer_ > 0.0f ? controlJumpMultiplier_ : 1.0f);
         onGround_ = false;
         coyoteTimer_ = 0.0f;
         jumpBufferTimer_ = 0.0f;
@@ -309,13 +325,21 @@ void Player::Move(
 
 void Player::UpdateTimers(float dt)
 {
-    attackCooldown_ = std::max(0.0f, attackCooldown_ - dt);
+    attackCooldown_ = std::max(0.0f, attackCooldown_ - dt
+        * (controlDebuffTimer_ > 0.0f ? controlAttackRecoveryMultiplier_ : 1.0f));
     sprintResetTimer_ = std::max(0.0f, sprintResetTimer_ - dt);
     knockbackControlTimer_ = std::max(0.0f, knockbackControlTimer_ - dt);
     speedBoostTimer_ = std::max(0.0f, speedBoostTimer_ - dt);
     jumpBoostTimer_ = std::max(0.0f, jumpBoostTimer_ - dt);
     shieldTimer_ = std::max(0.0f, shieldTimer_ - dt);
     invulnerabilityTimer_ = std::max(0.0f, invulnerabilityTimer_ - dt);
+    controlDebuffTimer_ = std::max(0.0f, controlDebuffTimer_ - dt);
+    if (controlDebuffTimer_ <= 0.0f)
+    {
+        controlMoveMultiplier_ = 1.0f;
+        controlJumpMultiplier_ = 1.0f;
+        controlAttackRecoveryMultiplier_ = 1.0f;
+    }
 
     auto updateHeroAbility = [dt](HeroAbilityState& ability)
     {
@@ -328,11 +352,36 @@ void Player::UpdateTimers(float dt)
     updateHeroAbility(heroState_.ultimate);
     heroState_.animationTimer = std::max(0.0f, heroState_.animationTimer - dt);
     heroState_.orbitaPulseTimer = std::max(0.0f, heroState_.orbitaPulseTimer - dt);
+    heroState_.orbitaTeleportPreviewTimer = std::max(0.0f, heroState_.orbitaTeleportPreviewTimer - dt);
+    if (heroState_.orbitaTeleportPreviewTimer <= 0.0f)
+    {
+        heroState_.orbitaTeleportPrimed = false;
+    }
     if (heroState_.animationTimer <= 0.0f
         && heroState_.animationState != HeroAnimationState::UltPrimed
         && heroState_.animationState != HeroAnimationState::Overloaded)
     {
-        heroState_.animationState = HeroAnimationState::Idle;
+        const float horizontalSpeed = std::sqrt(velocity_.x * velocity_.x + velocity_.z * velocity_.z);
+        if (!alive_)
+        {
+            heroState_.animationState = HeroAnimationState::Death;
+        }
+        else if (!onGround_)
+        {
+            heroState_.animationState = velocity_.y >= 0.0f ? HeroAnimationState::Jump : HeroAnimationState::Fall;
+        }
+        else if (horizontalSpeed > kMoveSpeed * 1.12f)
+        {
+            heroState_.animationState = HeroAnimationState::Run;
+        }
+        else if (horizontalSpeed > 0.12f)
+        {
+            heroState_.animationState = HeroAnimationState::Walk;
+        }
+        else
+        {
+            heroState_.animationState = HeroAnimationState::Idle;
+        }
         heroState_.animationDuration = 0.0f;
     }
     heroState_.ultimateCharge = std::clamp(heroState_.ultimateCharge, 0.0f, 100.0f);
@@ -354,9 +403,23 @@ void Player::Damage(int amount)
     const int adjusted = static_cast<int>(static_cast<float>(std::max(0, amount)) * heroIncomingDamageMultiplier_ + 0.5f);
     const int mitigated = shieldTimer_ > 0.0f ? std::max(1, adjusted / 2) : adjusted;
     health_ = std::max(0, health_ - std::max(0, mitigated));
+    if (mitigated > 0 && health_ > 0)
+    {
+        heroState_.animationState = HeroAnimationState::Hurt;
+        heroState_.animationTimer = 0.22f;
+        heroState_.animationDuration = 0.22f;
+    }
     if (heroId_ == HeroId::Radon && mitigated > 0)
     {
         AddHeroUltimateCharge(static_cast<float>(mitigated));
+    }
+    if (heroId_ == HeroId::Likho && mitigated > 0)
+    {
+        heroState_.ultimate.active = false;
+        heroState_.ultimate.activeTimer = 0.0f;
+        heroState_.likhoDisguiseTeamId = -1;
+        heroState_.likhoDisguisePlayerId = -1;
+        heroState_.likhoDisguiseHeroId = HeroId::Likho;
     }
     if (inventory_.GetArmorLevel() > 0)
     {
@@ -374,7 +437,7 @@ void Player::Heal(int amount)
     health_ = std::min(maxHealth_, health_ + std::max(0, amount));
 }
 
-void Player::ApplyKnockback(Vector3 impulse)
+void Player::ApplyKnockback(Vector3 impulse, float controlLossSeconds)
 {
     if (!alive_ || eliminated_)
     {
@@ -384,7 +447,79 @@ void Player::ApplyKnockback(Vector3 impulse)
     velocity_.x += impulse.x;
     velocity_.y = std::max(velocity_.y, impulse.y);
     velocity_.z += impulse.z;
-    knockbackControlTimer_ = std::max(knockbackControlTimer_, kKnockbackControlSeconds);
+    knockbackControlTimer_ = std::max(
+        knockbackControlTimer_,
+        controlLossSeconds > 0.0f ? controlLossSeconds : kKnockbackControlSeconds);
+}
+
+CrossbowState Player::GetBlasterState() const
+{
+    return blasterState_;
+}
+
+float Player::GetBlasterLoadTimer() const
+{
+    return blasterLoadTimer_;
+}
+
+void Player::StartBlasterLoading()
+{
+    if (blasterState_ == CrossbowState::Unloaded)
+    {
+        blasterState_ = CrossbowState::Loading;
+        blasterLoadTimer_ = 0.0f;
+    }
+}
+
+bool Player::AdvanceBlasterLoading(float dt, float requiredSeconds)
+{
+    if (blasterState_ != CrossbowState::Loading)
+    {
+        return false;
+    }
+    blasterLoadTimer_ = std::min(std::max(0.05f, requiredSeconds), blasterLoadTimer_ + std::max(0.0f, dt));
+    if (blasterLoadTimer_ + 0.0001f >= requiredSeconds)
+    {
+        blasterLoadTimer_ = requiredSeconds;
+        blasterState_ = CrossbowState::Loaded;
+        return true;
+    }
+    return false;
+}
+
+void Player::CancelBlasterLoading()
+{
+    if (blasterState_ == CrossbowState::Loading)
+    {
+        blasterState_ = CrossbowState::Unloaded;
+        blasterLoadTimer_ = 0.0f;
+    }
+}
+
+bool Player::ConsumeLoadedBlaster()
+{
+    if (blasterState_ != CrossbowState::Loaded)
+    {
+        return false;
+    }
+    blasterState_ = CrossbowState::Unloaded;
+    blasterLoadTimer_ = 0.0f;
+    return true;
+}
+
+float Player::GetBowDrawTimer() const
+{
+    return bowDrawTimer_;
+}
+
+void Player::AdvanceBowDraw(float dt)
+{
+    bowDrawTimer_ = std::min(kBowTuning.fullDrawTime, bowDrawTimer_ + std::max(0.0f, dt));
+}
+
+void Player::ResetBowDraw()
+{
+    bowDrawTimer_ = 0.0f;
 }
 
 void Player::ActivateHitInvulnerability(float seconds)
@@ -527,13 +662,24 @@ void Player::ClearHeroActiveEffects()
     heroState_.active2.activeTimer = 0.0f;
     heroState_.ultimate.active = false;
     heroState_.ultimate.activeTimer = 0.0f;
+    heroState_.ultimatePrimed = false;
+    heroState_.orbitaTeleportPrimed = false;
+    heroState_.orbitaTeleportPreviewTimer = 0.0f;
+    heroState_.orbitaDashRemaining = 0.0f;
+    heroState_.orbitaDashLiftRemaining = 0.0f;
     heroState_.likhoDisguiseTeamId = -1;
+    heroState_.likhoDisguisePlayerId = -1;
+    heroState_.likhoDisguiseHeroId = HeroId::Likho;
     heroState_.likhoInsideEnemyBase = false;
+    controlDebuffTimer_ = 0.0f;
+    controlMoveMultiplier_ = 1.0f;
+    controlJumpMultiplier_ = 1.0f;
+    controlAttackRecoveryMultiplier_ = 1.0f;
 }
 
-void Player::Respawn(Vector3 spawnPoint)
+void Player::RespawnAtHome()
 {
-    position_ = spawnPoint;
+    position_ = homeSpawnPoint_;
     velocity_ = Vector3 { 0.0f, 0.0f, 0.0f };
     health_ = maxHealth_;
     alive_ = true;
@@ -552,7 +698,13 @@ void Player::Respawn(Vector3 spawnPoint)
     jumpBoostTimer_ = 0.0f;
     shieldTimer_ = 0.0f;
     invulnerabilityTimer_ = 1.65f;
+    blasterState_ = CrossbowState::Unloaded;
+    blasterLoadTimer_ = 0.0f;
+    bowDrawTimer_ = 0.0f;
     ClearHeroActiveEffects();
+    heroState_.animationState = HeroAnimationState::Idle;
+    heroState_.animationTimer = 0.0f;
+    heroState_.animationDuration = 0.0f;
 }
 
 void Player::Kill(bool finalDeath)
@@ -568,7 +720,16 @@ void Player::Kill(bool finalDeath)
     sprintResetTimer_ = 0.0f;
     knockbackControlTimer_ = 0.0f;
     invulnerabilityTimer_ = 0.0f;
+    blasterState_ = CrossbowState::Unloaded;
+    blasterLoadTimer_ = 0.0f;
+    bowDrawTimer_ = 0.0f;
     ClearHeroActiveEffects();
+    if (heroState_.animationState != HeroAnimationState::DeathSacrifice)
+    {
+        heroState_.animationState = HeroAnimationState::Death;
+    }
+    heroState_.animationTimer = 0.65f;
+    heroState_.animationDuration = 0.65f;
 }
 
 void Player::KillWithRespawn(float seconds)
@@ -586,6 +747,21 @@ void Player::ResetAttackCooldown(float seconds)
 {
     attackCooldown_ = std::max(0.0f, seconds);
     attackCooldownDuration_ = attackCooldown_;
+    heroState_.animationState = HeroAnimationState::Attack;
+    heroState_.animationTimer = std::min(0.32f, attackCooldown_);
+    heroState_.animationDuration = heroState_.animationTimer;
+}
+
+void Player::ApplyControlDebuff(float seconds, float moveMultiplier, float jumpMultiplier, float attackRecoveryMultiplier)
+{
+    if (!alive_ || eliminated_)
+    {
+        return;
+    }
+    controlDebuffTimer_ = std::max(controlDebuffTimer_, std::max(0.0f, seconds));
+    controlMoveMultiplier_ = std::min(controlMoveMultiplier_, std::clamp(moveMultiplier, 0.2f, 1.0f));
+    controlJumpMultiplier_ = std::min(controlJumpMultiplier_, std::clamp(jumpMultiplier, 0.2f, 1.0f));
+    controlAttackRecoveryMultiplier_ = std::min(controlAttackRecoveryMultiplier_, std::clamp(attackRecoveryMultiplier, 0.2f, 1.0f));
 }
 
 void Player::RefreshSprintReset()

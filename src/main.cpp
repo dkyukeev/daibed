@@ -246,8 +246,11 @@ int main(int argc, char** argv)
 
         if (cliStartupSmoke)
         {
+            game.PrepareStartupSmoke();
             for (int frame = 0; frame < 8; ++frame)
             {
+                if (frame == 3) game.ExerciseStartupSmokeMutation(true);
+                if (frame == 5) game.ExerciseStartupSmokeMutation(false);
                 CrashLogger::Heartbeat("startup-smoke");
                 game.HandleInput();
                 game.Update(1.0f / 60.0f);

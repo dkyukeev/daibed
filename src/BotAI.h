@@ -274,6 +274,7 @@ struct BotMemory
     float chaseLastDistance = -1.0f;
     float heroAbilityTimer = 0.0f;
     float repairPlaceCooldown = 0.0f;
+    float reactionDelayTimer = 0.0f;
     float resourcePlanTimer = 0.0f;
     Vector3 cachedResourceTarget {};
     int cachedResourceType = 0;

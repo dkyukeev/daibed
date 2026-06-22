@@ -206,7 +206,18 @@ std::vector<GridPos> CoreDefensePositions(GridPos corePos)
         GridPos { corePos.x + 1, corePos.y, corePos.z + 1 },
         GridPos { corePos.x + 1, corePos.y, corePos.z - 1 },
         GridPos { corePos.x - 1, corePos.y, corePos.z + 1 },
-        GridPos { corePos.x - 1, corePos.y, corePos.z - 1 }
+        GridPos { corePos.x - 1, corePos.y, corePos.z - 1 },
+        // A paced outer firing wall and compact roof turn repairs into a
+        // readable fort without sealing the shop or primary approaches.
+        GridPos { corePos.x + 2, corePos.y + 1, corePos.z },
+        GridPos { corePos.x - 2, corePos.y + 1, corePos.z },
+        GridPos { corePos.x, corePos.y + 1, corePos.z + 2 },
+        GridPos { corePos.x, corePos.y + 1, corePos.z - 2 },
+        GridPos { corePos.x + 1, corePos.y + 2, corePos.z },
+        GridPos { corePos.x - 1, corePos.y + 2, corePos.z },
+        GridPos { corePos.x, corePos.y + 2, corePos.z + 1 },
+        GridPos { corePos.x, corePos.y + 2, corePos.z - 1 },
+        GridPos { corePos.x, corePos.y + 2, corePos.z }
     };
     return positions;
 }
@@ -289,6 +300,23 @@ float BotBridgeCooldown(BotDifficulty difficulty)
         break;
     }
     return 0.22f;
+}
+
+// Human-like reaction time after taking a hit: until it expires the bot cannot
+// place a save block, so knockback displaces bots instead of being negated by a
+// same-frame block under the feet.
+float BotHitReactionSeconds(BotDifficulty difficulty)
+{
+    switch (difficulty)
+    {
+    case BotDifficulty::Easy:
+        return 0.60f;
+    case BotDifficulty::Hard:
+        return 0.22f;
+    case BotDifficulty::Normal:
+        break;
+    }
+    return 0.38f;
 }
 
 BotRole RoleForBotId(int id)
@@ -1008,6 +1036,7 @@ void TickBotMemory(BotMemory& memory, float dt)
     memory.chaseBanTimer = std::max(0.0f, memory.chaseBanTimer - dt);
     memory.heroAbilityTimer = std::max(0.0f, memory.heroAbilityTimer - dt);
     memory.repairPlaceCooldown = std::max(0.0f, memory.repairPlaceCooldown - dt);
+    memory.reactionDelayTimer = std::max(0.0f, memory.reactionDelayTimer - dt);
     memory.resourcePlanTimer = std::max(0.0f, memory.resourcePlanTimer - dt);
     memory.tacticalCheckTimer = std::max(0.0f, memory.tacticalCheckTimer - dt);
 }
@@ -2812,7 +2841,7 @@ struct Game::BotFrameContext
     std::unordered_map<int, BotTeamFrameContext> teamContexts;
 };
 
-bool Game::BotUseUtility(Player& bot, Team& team, Player* enemy, EnergyCore* enemyCore)
+bool Game::BotUseUtility(Player& bot, Team& team, Player* enemy, EnergyCore* enemyCore, float dt)
 {
     BotMemory& memory = GetBotMemory(bot);
     const BotTuningGenome& botTuning = BotTuningForTeam(team.id);
@@ -2855,11 +2884,11 @@ bool Game::BotUseUtility(Player& bot, Team& team, Player* enemy, EnergyCore* ene
         && DistanceSquared(bot.GetPosition(), team.spawnPoint) > 260.0f
         && SpendUtilityItem(bot, UtilityType::HomeTeleport))
     {
-        bot.Respawn(team.spawnPoint);
+        bot.RespawnAtHome();
         memory.hasNavWaypoint = false;
         memory.stuckTimer = 0.0f;
-        AddWorldEffect(team.spawnPoint, GetTeamColor(team.color), 0.38f, 0.42f);
-        AddFloatingText("home", team.spawnPoint, GetTeamColor(team.color));
+        AddWorldEffect(bot.GetHomeSpawnPoint(), GetTeamColor(team.color), 0.38f, 0.42f);
+        AddFloatingText("home", bot.GetHomeSpawnPoint(), GetTeamColor(team.color));
         armUtilityCooldown(2.6f);
         return true;
     }
@@ -2891,16 +2920,48 @@ bool Game::BotUseUtility(Player& bot, Team& team, Player* enemy, EnergyCore* ene
         };
         const float distance = std::sqrt(DistanceSquared(bot.GetPosition(), enemy->GetPosition()));
 
+        if (distance > 5.0f
+            && distance < 19.0f
+            && (bot.GetInventory().HasItem(ItemType::Blaster)
+                || bot.GetInventory().HasItem(ItemType::SniperRifle))
+            && (memory.role == BotRole::Fighter
+                || memory.role == BotRole::Defender
+                || memory.intent == BotIntent::DefendCore))
+        {
+            const bool aimed = distance > 8.0f;
+            const float loadTime = BlasterChargeSeconds(bot.GetInventory().GetBlasterRapidFireLevel());
+            if (bot.GetBlasterState() == CrossbowState::Unloaded)
+            {
+                bot.StartBlasterLoading();
+                AddFloatingText("бластер: зарядка", bot.GetPosition(), Color { 255, 96, 72, 255 });
+                return true;
+            }
+            if (bot.GetBlasterState() == CrossbowState::Loading)
+            {
+                if (bot.AdvanceBlasterLoading(dt, loadTime))
+                {
+                    AddFloatingText("бластер: готов", bot.GetPosition(), Color { 104, 255, 128, 255 });
+                }
+                return true;
+            }
+            if (LaunchBlasterShot(bot, toEnemy, aimed, false))
+            {
+                AddFloatingText(aimed ? "бластер: прицел" : "бластер", bot.GetPosition(), Color { 98, 245, 255, 255 });
+                return true;
+            }
+        }
+
         if (distance > 4.2f
             && distance < 11.0f
+            && bot.GetInventory().HasItem(ItemType::Bow)
             && bot.GetInventory().GetUtility(UtilityType::Arrows) > 0
             && (memory.role == BotRole::Fighter || memory.role == BotRole::Rusher || botDifficulty_ == BotDifficulty::Hard))
         {
-            if (SpendUtilityItem(bot, UtilityType::Arrows))
+            const float drawPower = distance > 7.0f ? 1.0f : 0.72f;
+            if (LaunchBowShot(bot, toEnemy, drawPower, false))
             {
-                LaunchProjectileDirected(bot, UtilityType::Arrows, toEnemy, false);
-                AddFloatingText("shot", bot.GetPosition(), Color { 112, 232, 255, 255 });
-                armUtilityCooldown(1.0f);
+                AddFloatingText(drawPower >= 1.0f ? "лук: полный" : "лук", bot.GetPosition(), Color { 112, 232, 255, 255 });
+                armUtilityCooldown(kBowTuning.fullDrawTime * drawPower + 0.25f);
                 return true;
             }
         }
@@ -2913,6 +2974,7 @@ bool Game::BotUseUtility(Player& bot, Team& team, Player* enemy, EnergyCore* ene
         if (fireballDuel
             && distance > 4.5f
             && distance < 14.0f
+            && bot.CanAttack()
             && bot.GetInventory().GetUtility(UtilityType::Fireball) > 0)
         {
             if (SpendUtilityItem(bot, UtilityType::Fireball))
@@ -2958,6 +3020,7 @@ bool Game::BotUseUtility(Player& bot, Team& team, Player* enemy, EnergyCore* ene
         && offensiveUtilities
         && enemyCore->IsAlive()
         && memory.role == BotRole::Rusher
+        && bot.CanAttack()
         && bot.GetInventory().GetUtility(UtilityType::Fireball) > 0)
     {
         const Vector3 corePos = world_.GridToWorld(enemyCore->GetBlockPosition());
@@ -3020,12 +3083,10 @@ void FaceBotTowards(Player& bot, Vector3 target)
 
 bool Game::BotCastHeroAbility(Player& bot, HeroAbilitySlot slot)
 {
-    // Hero abilities share the local player's feedback pipeline; mute it so a
-    // bot casting across the map does not spam the HUD and speakers.
+    // Keep local HUD messages quiet, but preserve world VFX and cast SFX so
+    // opponents can read and react to a bot's ability.
     suppressLocalFeedback_ = true;
-    audio_.SetMuted(true);
     const bool used = UseHeroAbility(bot, slot);
-    audio_.SetMuted(false);
     suppressLocalFeedback_ = false;
     return used;
 }
@@ -4323,7 +4384,7 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
     }
 
     BotUseHeroAbility(bot, team, fightTarget, enemyCore);
-    BotUseUtility(bot, team, fightTarget, enemyCore);
+    BotUseUtility(bot, team, fightTarget, enemyCore, dt);
 
     TryPerformBotMeleeAttack(
         bot,
@@ -4931,6 +4992,10 @@ bool Game::TryBotBridgeBlock(Player& bot, Vector3 target)
     }
 
     BotMemory& memory = GetBotMemory(bot);
+    if (memory.reactionDelayTimer > 0.0f)
+    {
+        return false;
+    }
     const GridPos underFeet = world_.WorldToGrid(Vector3 { botPos.x, botPos.y - 1.08f, botPos.z });
     const GridPos targetSupport = world_.WorldToGrid(Vector3 { target.x, target.y - 1.08f, target.z });
     const int bridgeY = std::min(underFeet.y, targetSupport.y);
@@ -5186,7 +5251,7 @@ bool Game::TryBotBreakBlockingBlock(Player& bot, Vector3 wish, Vector3 targetPos
     {
         AddWorldEffect(targetPos, Color { 210, 220, 235, 255 }, 0.24f, 0.22f);
         AddFloatingText("break", targetPos, Color { 210, 220, 235, 255 });
-        audio_.PlayBreakBlock();
+        audio_.PlayBreakBlockAt(targetPos);
         bot.GetInventory().DamageTool(1);
     }
 
@@ -5248,6 +5313,22 @@ void Game::BotTryShop(Player& bot, Team& team)
         {
             priorities.push_back(207);
         }
+        if (!inventory.HasItem(ItemType::Blaster) && !inventory.HasItem(ItemType::SniperRifle))
+        {
+            priorities.push_back(401);
+        }
+        else if (inventory.GetBlasterDamageLevel() == 0 && inventory.GetBlasterRapidFireLevel() < 2)
+        {
+            priorities.push_back(402);
+        }
+        if (!inventory.HasItem(ItemType::Bow))
+        {
+            priorities.push_back(108);
+        }
+        else if (inventory.GetBowUpgradeLevel() < 2)
+        {
+            priorities.push_back(109);
+        }
         break;
 
     case BotRole::Rusher:
@@ -5275,13 +5356,25 @@ void Game::BotTryShop(Player& bot, Team& team)
         {
             priorities.push_back(206);
         }
-        if (inventory.GetUtility(UtilityType::Arrows) < 8)
+        if (inventory.GetUtility(UtilityType::Arrows) < 6)
         {
             priorities.push_back(104);
+        }
+        if (!inventory.HasItem(ItemType::Bow))
+        {
+            priorities.push_back(108);
+        }
+        else if (inventory.GetBowUpgradeLevel() < 1)
+        {
+            priorities.push_back(109);
         }
         if (inventory.GetUtility(UtilityType::Dash) < 1)
         {
             priorities.push_back(205);
+        }
+        if (!inventory.HasItem(ItemType::Blaster) && !inventory.HasItem(ItemType::SniperRifle))
+        {
+            priorities.push_back(401);
         }
         break;
 
@@ -5309,6 +5402,14 @@ void Game::BotTryShop(Player& bot, Team& team)
         if (!inventory.HasItem(ItemType::Spear))
         {
             priorities.push_back(107);
+        }
+        if (!inventory.HasItem(ItemType::Blaster) && !inventory.HasItem(ItemType::SniperRifle))
+        {
+            priorities.push_back(401);
+        }
+        if (!inventory.HasItem(ItemType::Bow))
+        {
+            priorities.push_back(108);
         }
         break;
 
@@ -5344,6 +5445,22 @@ void Game::BotTryShop(Player& bot, Team& team)
         if (inventory.GetUtility(UtilityType::Dash) < 1)
         {
             priorities.push_back(205);
+        }
+        if (!inventory.HasItem(ItemType::Blaster) && !inventory.HasItem(ItemType::SniperRifle))
+        {
+            priorities.push_back(401);
+        }
+        else if (inventory.GetBlasterRapidFireLevel() == 0 && inventory.GetBlasterDamageLevel() < 3)
+        {
+            priorities.push_back(403);
+        }
+        if (!inventory.HasItem(ItemType::Bow))
+        {
+            priorities.push_back(108);
+        }
+        else if (inventory.GetBowUpgradeLevel() < 3)
+        {
+            priorities.push_back(109);
         }
         break;
     }
@@ -5527,6 +5644,22 @@ BotMemory& Game::GetBotMemory(Player& bot)
     botMemories_.push_back(memory);
     botMemoryIndexByPlayerId_[playerId] = index;
     return botMemories_[index];
+}
+
+void Game::ApplyBotHitReaction(int playerId)
+{
+    // Only existing bot memories are touched: the human player has none and
+    // must not get one created here.
+    for (BotMemory& memory : botMemories_)
+    {
+        if (memory.playerId == playerId)
+        {
+            memory.reactionDelayTimer = std::max(
+                memory.reactionDelayTimer,
+                BotHitReactionSeconds(botDifficulty_));
+            return;
+        }
+    }
 }
 
 std::optional<RaycastHit> Game::RaycastFromAim(const Player& player, float maxDistance) const
@@ -5723,7 +5856,7 @@ bool Game::TryBotUpgradeCoreDefense(Player& bot, Team& team, float dt)
         AddWorldEffect(targetPos, GetTeamColor(team.color), 0.26f, 0.24f);
         AddFloatingText("upgrade", targetPos, GetTeamColor(team.color));
         AddEventMessage(bot.GetName() + " upgraded Core defense", GetTeamColor(team.color), 1.5f);
-        audio_.PlayBreakBlock();
+        audio_.PlayBreakBlockAt(targetPos);
         bot.GetInventory().DamageTool(1);
     }
     memory.hasBreakTarget = false;
@@ -5739,6 +5872,25 @@ bool Game::TryBotRepairCoreDefense(Player& bot, Team& team, float dt)
     }
 
     std::optional<GridPos> missing;
+    Vector3 threatDirection {};
+    float nearestThreatSq = std::numeric_limits<float>::max();
+    for (const Player& candidate : players_)
+    {
+        if (!candidate.IsAlive() || candidate.GetTeamId() == team.id)
+        {
+            continue;
+        }
+        const float distanceSq = DistanceSquared(candidate.GetPosition(), world_.GridToWorld(team.coreBlock));
+        if (distanceSq < nearestThreatSq)
+        {
+            nearestThreatSq = distanceSq;
+            threatDirection = Normalize2D(Vector3 {
+                candidate.GetPosition().x - static_cast<float>(team.coreBlock.x),
+                0.0f,
+                candidate.GetPosition().z - static_cast<float>(team.coreBlock.z) });
+        }
+    }
+    float bestMissingScore = std::numeric_limits<float>::max();
     for (const GridPos& candidate : CoreDefensePositions(team.coreBlock))
     {
         if (!world_.IsAir(candidate))
@@ -5749,8 +5901,19 @@ bool Game::TryBotRepairCoreDefense(Player& bot, Team& team, float dt)
         std::string reason;
         if (CanPlaceBlockAt(candidate, bot, &reason))
         {
-            missing = candidate;
-            break;
+            const Vector3 offset = Normalize2D(Vector3 {
+                static_cast<float>(candidate.x - team.coreBlock.x),
+                0.0f,
+                static_cast<float>(candidate.z - team.coreBlock.z) });
+            const float facesThreat = offset.x * threatDirection.x + offset.z * threatDirection.z;
+            const float score = DistanceSquared(bot.GetPosition(), world_.GridToWorld(candidate)) * 0.08f
+                - facesThreat * (nearestThreatSq < 625.0f ? 12.0f : 2.0f)
+                + static_cast<float>(candidate.y - team.coreBlock.y) * 1.5f;
+            if (score < bestMissingScore)
+            {
+                bestMissingScore = score;
+                missing = candidate;
+            }
         }
     }
     if (!missing.has_value())

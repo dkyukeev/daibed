@@ -18,6 +18,7 @@ public:
     void ToggleMode();
     void SetMode(ViewMode mode);
     void SetFov(float fov);
+    void SetCrouching(bool crouching);
 
     const Camera3D& GetCamera() const;
     Vector3 GetAimOrigin() const;
@@ -41,4 +42,6 @@ private:
     float shakeIntensity_ = 0.0f;
     ViewMode mode_ = ViewMode::FirstPerson;
     float fov_ = 62.0f;
+    bool crouching_ = false;
+    float crouchBlend_ = 0.0f;
 };

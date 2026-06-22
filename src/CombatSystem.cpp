@@ -1,5 +1,7 @@
 #include "CombatSystem.h"
 
+#include "HeroSystem.h"
+
 #include <algorithm>
 #include <cmath>
 #include <sstream>
@@ -10,9 +12,6 @@ constexpr float kAttackConeDot = 0.38f;
 constexpr float kMaxAttackHeightDelta = 1.9f;
 constexpr float kHitInvulnerabilitySeconds = 0.18f;
 constexpr float kEyeHeight = 0.78f;
-constexpr float kTargetCapsuleBottom = -0.84f;
-constexpr float kTargetCapsuleTop = 1.42f;
-constexpr float kTargetCapsuleRadius = 0.36f;
 constexpr float kMeleeRayRadius = 0.16f;
 
 struct MeleeRayHit
@@ -154,9 +153,10 @@ std::optional<MeleeRayHit> IntersectMeleeRayWithTarget(const Player& attacker, c
     };
     const Vector3 direction = NormalizeOrFallback(aimDirection, attacker.Forward());
     const Vector3 targetPosition = target.GetPosition();
-    const float bottomY = targetPosition.y + kTargetCapsuleBottom;
-    const float topY = targetPosition.y + kTargetCapsuleTop;
-    const float radius = kTargetCapsuleRadius + kMeleeRayRadius;
+    const HeroHitboxProfile& hitbox = HeroSystem::GetHitboxProfile(target.GetHeroId());
+    const float bottomY = targetPosition.y + hitbox.headEnd - hitbox.bodyHeight;
+    const float topY = targetPosition.y + hitbox.headEnd;
+    const float radius = hitbox.bodyRadius + kMeleeRayRadius;
     float bestDistance = maxDistance + 0.001f;
 
     const float dx = origin.x - targetPosition.x;
@@ -209,7 +209,7 @@ std::optional<MeleeRayHit> IntersectMeleeRayWithTarget(const Player& attacker, c
     return MeleeRayHit {
         bestDistance,
         point,
-        point.y >= targetPosition.y + 1.03f ? HitZone::Head : HitZone::Body
+        point.y >= targetPosition.y + hitbox.headStart ? HitZone::Head : HitZone::Body
     };
 }
 

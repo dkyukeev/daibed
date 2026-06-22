@@ -34,6 +34,9 @@ enum class ItemType
     Axe,
     Spear,
     Pickaxe,
+    Bow,
+    Blaster,
+    SniperRifle,
     EnergyArrow,
     Fireball,
     MedKit,
@@ -64,6 +67,7 @@ int ItemMaxStack(ItemType type);
 bool ItemIsBlock(ItemType type);
 bool ItemIsUtility(ItemType type);
 bool ItemIsWeapon(ItemType type);
+bool ItemIsBlasterWeapon(ItemType type);
 bool ItemIsPickaxe(ItemType type);
 bool ItemIsResource(ItemType type);
 std::optional<BlockType> ItemToBlock(ItemType type);
@@ -98,6 +102,12 @@ public:
     int GetArmorLevel() const;
     int GetToolLevel() const;
     int GetTeamUpgradeLevel() const;
+    int GetBlasterRapidFireLevel() const;
+    int GetBlasterDamageLevel() const;
+    bool UpgradeBlasterRapidFire();
+    bool UpgradeBlasterDamage();
+    int GetBowUpgradeLevel() const;
+    bool UpgradeBow();
     int GetArmorDurability() const;
     int GetMaxArmorDurability() const;
     int GetToolDurability() const;
@@ -140,6 +150,9 @@ private:
     int armorLevel_ = 0;
     int toolLevel_ = 0;
     int teamUpgradeLevel_ = 0;
+    int blasterRapidFireLevel_ = 0;
+    int blasterDamageLevel_ = 0;
+    int bowUpgradeLevel_ = 0;
     int armorDurability_ = 0;
     int maxArmorDurability_ = 0;
     int toolDurability_ = 0;

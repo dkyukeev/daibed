@@ -17,7 +17,8 @@
 
 namespace
 {
-constexpr float kCoreCollapseSeconds = 30.0f * 60.0f;
+// Must match Game.cpp's kCoreCollapseSeconds (sudden death at the 12th minute).
+constexpr float kCoreCollapseSeconds = 12.0f * 60.0f;
 
 struct WindowResolution
 {
@@ -46,8 +47,11 @@ constexpr FpsLimitOption kFpsLimits[] {
     { 120, "120 FPS" },
     { 144, "144 FPS" },
     { 240, "240 FPS" },
-    { 0, "Unlimited" }
+    { 0, "Без ограничений" }
 };
+
+constexpr float kRenderScales[] { 0.60f, 0.75f, 0.85f, 1.00f };
+constexpr float kDrawDistances[] { 64.0f, 96.0f, 150.0f, 220.0f };
 
 float DistanceSquared(Vector3 a, Vector3 b)
 {
@@ -76,6 +80,60 @@ Vector3 Normalize2D(Vector3 value)
 void DrawCenteredText(const std::string& text, int y, int fontSize, Color color)
 {
     DrawText(text.c_str(), GetScreenWidth() / 2 - MeasureText(text.c_str(), fontSize) / 2, y, fontSize, color);
+}
+
+const char* GamepadButtonLabel(int button)
+{
+    switch (button)
+    {
+    case GAMEPAD_BUTTON_LEFT_FACE_UP: return "D-Up";
+    case GAMEPAD_BUTTON_LEFT_FACE_RIGHT: return "D-Right";
+    case GAMEPAD_BUTTON_LEFT_FACE_DOWN: return "D-Down";
+    case GAMEPAD_BUTTON_LEFT_FACE_LEFT: return "D-Left";
+    case GAMEPAD_BUTTON_RIGHT_FACE_UP: return "Y";
+    case GAMEPAD_BUTTON_RIGHT_FACE_RIGHT: return "B";
+    case GAMEPAD_BUTTON_RIGHT_FACE_DOWN: return "A";
+    case GAMEPAD_BUTTON_RIGHT_FACE_LEFT: return "X";
+    case GAMEPAD_BUTTON_LEFT_TRIGGER_1: return "LB";
+    case GAMEPAD_BUTTON_LEFT_TRIGGER_2: return "LT";
+    case GAMEPAD_BUTTON_RIGHT_TRIGGER_1: return "RB";
+    case GAMEPAD_BUTTON_RIGHT_TRIGGER_2: return "RT";
+    case GAMEPAD_BUTTON_MIDDLE_LEFT: return "Back";
+    case GAMEPAD_BUTTON_MIDDLE: return "Guide";
+    case GAMEPAD_BUTTON_MIDDLE_RIGHT: return "Start";
+    case GAMEPAD_BUTTON_LEFT_THUMB: return "L3";
+    case GAMEPAD_BUTTON_RIGHT_THUMB: return "R3";
+    default: return "-";
+    }
+}
+
+void DrawTeamMarker(Vector2 position, int teamId, float radius, Color color)
+{
+    switch ((teamId % 4 + 4) % 4)
+    {
+    case 0:
+        DrawCircleV(position, radius, color);
+        break;
+    case 1:
+        DrawRectangle(
+            static_cast<int>(position.x - radius),
+            static_cast<int>(position.y - radius),
+            static_cast<int>(radius * 2.0f),
+            static_cast<int>(radius * 2.0f),
+            color);
+        break;
+    case 2:
+        DrawTriangle(
+            Vector2 { position.x, position.y - radius * 1.25f },
+            Vector2 { position.x - radius, position.y + radius },
+            Vector2 { position.x + radius, position.y + radius },
+            color);
+        break;
+    default:
+        DrawCircleLines(static_cast<int>(position.x), static_cast<int>(position.y), radius, color);
+        DrawCircleV(position, std::max(1.0f, radius * 0.38f), color);
+        break;
+    }
 }
 
 int DrawWrappedText(const std::string& text, int x, int y, int fontSize, int maxWidth, Color color)
@@ -180,7 +238,69 @@ void Game::HandleMenuInput()
         menuIndex_ = (menuIndex_ + kMenuRows - 1) % kMenuRows;
     }
 
-    const int delta = (IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_D)) ? 1 : ((IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_A)) ? -1 : 0);
+    const int panelWidth = 640;
+    const int panelX = GetScreenWidth() / 2 - panelWidth / 2;
+    const int panelY = 116;
+    const Vector2 mouse = GetMousePosition();
+    const Vector2 mouseMove = GetMouseDelta();
+    int hoveredRow = -1;
+    for (int i = 0; i < kMenuRows; ++i)
+    {
+        const Rectangle row {
+            static_cast<float>(panelX + 18),
+            static_cast<float>(panelY + 24 + i * 42 - 7),
+            static_cast<float>(panelWidth - 36),
+            30.0f
+        };
+        if (CheckCollisionPointRec(mouse, row))
+        {
+            hoveredRow = i;
+            break;
+        }
+    }
+    if (hoveredRow >= 0 && (std::fabs(mouseMove.x) > 0.5f || std::fabs(mouseMove.y) > 0.5f))
+    {
+        menuIndex_ = hoveredRow;
+    }
+    const float wheel = GetMouseWheelMove();
+    if (wheel < -0.01f)
+    {
+        menuIndex_ = (menuIndex_ + 1) % kMenuRows;
+    }
+    else if (wheel > 0.01f)
+    {
+        menuIndex_ = (menuIndex_ + kMenuRows - 1) % kMenuRows;
+    }
+
+    const auto isActionRow = [](int row)
+    {
+#if DAIBED_DEVELOPER_BUILD
+        return row == 0 || row == 8 || row == 12 || row == 13 || row == 14;
+#else
+        return row == 0 || row == 1 || row == 3 || row == 4 || row == 5;
+#endif
+    };
+
+    int delta = (IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_D)) ? 1 : ((IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_A)) ? -1 : 0);
+    bool activate = IsKeyPressed(KEY_ENTER);
+    if (hoveredRow >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+    {
+        menuIndex_ = hoveredRow;
+        if (isActionRow(hoveredRow))
+        {
+            activate = true;
+        }
+        else
+        {
+            delta = 1;
+        }
+    }
+    if (hoveredRow >= 0 && !isActionRow(hoveredRow) && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))
+    {
+        menuIndex_ = hoveredRow;
+        delta = -1;
+    }
+
     if (delta != 0)
     {
 #if DAIBED_DEVELOPER_BUILD
@@ -243,7 +363,7 @@ void Game::HandleMenuInput()
         SaveSettings();
     }
 
-    if (IsKeyPressed(KEY_ENTER))
+    if (activate)
     {
 #if DAIBED_DEVELOPER_BUILD
         if (menuIndex_ == 0)
@@ -306,7 +426,6 @@ void Game::HandleMenuInput()
         exitRequested_ = true;
     }
 }
-
 void Game::HandleHeroSelectInput()
 {
     constexpr int heroCount = HeroSystem::kHeroCount;
@@ -335,6 +454,24 @@ void Game::HandleHeroSelectInput()
     const int listX = panelX + 22;
     const int listY = panelY + 56;
     const int rowHeight = 54;
+    const Rectangle previewRect {
+        static_cast<float>(panelX + panelWidth - 214),
+        static_cast<float>(panelY + 18),
+        184.0f,
+        184.0f
+    };
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), previewRect))
+    {
+        heroPreviewDragging_ = true;
+    }
+    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
+    {
+        heroPreviewDragging_ = false;
+    }
+    if (heroPreviewDragging_)
+    {
+        heroPreviewYaw_ += GetMouseDelta().x * 0.85f;
+    }
     const Rectangle startButton {
         static_cast<float>(panelX + panelWidth - 276),
         static_cast<float>(panelY + panelHeight - 60),
@@ -394,106 +531,135 @@ void Game::HandleHeroSelectInput()
 
 void Game::HandleSettingsInput()
 {
-    constexpr int kSettingsRows = 12;
-    if (IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_S))
+    constexpr int kSettingsRows = 24;
+    constexpr int kVisibleRows = 12;
+    const bool pad = IsGamepadAvailable(0);
+    const bool down = IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_S)
+        || (pad && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_DOWN));
+    const bool up = IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_W)
+        || (pad && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_UP));
+    if (down) settingsIndex_ = (settingsIndex_ + 1) % kSettingsRows;
+    if (up) settingsIndex_ = (settingsIndex_ + kSettingsRows - 1) % kSettingsRows;
+
+    const int firstVisible = std::clamp(settingsIndex_ - kVisibleRows / 2, 0, kSettingsRows - kVisibleRows);
+    const int panelWidth = 680;
+    const int panelX = GetScreenWidth() / 2 - panelWidth / 2;
+    const int panelY = 118;
+    const Vector2 mouse = GetMousePosition();
+    const Vector2 mouseMove = GetMouseDelta();
+    int hoveredRow = -1;
+    for (int visible = 0; visible < kVisibleRows; ++visible)
     {
-        settingsIndex_ = (settingsIndex_ + 1) % kSettingsRows;
+        const int index = firstVisible + visible;
+        const Rectangle row {
+            static_cast<float>(panelX + 20),
+            static_cast<float>(panelY + 22 + visible * 38 - 8),
+            static_cast<float>(panelWidth - 40),
+            31.0f
+        };
+        if (CheckCollisionPointRec(mouse, row))
+        {
+            hoveredRow = index;
+            break;
+        }
     }
-    if (IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_W))
+    if (hoveredRow >= 0 && (std::fabs(mouseMove.x) > 0.5f || std::fabs(mouseMove.y) > 0.5f))
     {
-        settingsIndex_ = (settingsIndex_ + kSettingsRows - 1) % kSettingsRows;
+        settingsIndex_ = hoveredRow;
+    }
+    const float wheel = GetMouseWheelMove();
+    if (wheel < -0.01f) settingsIndex_ = (settingsIndex_ + 1) % kSettingsRows;
+    else if (wheel > 0.01f) settingsIndex_ = (settingsIndex_ + kSettingsRows - 1) % kSettingsRows;
+
+    int delta = (IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_D)
+        || (pad && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_RIGHT))) ? 1
+        : ((IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_A)
+            || (pad && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_LEFT))) ? -1 : 0);
+    bool activate = IsKeyPressed(KEY_ENTER)
+        || (pad && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN));
+    if (hoveredRow >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+    {
+        settingsIndex_ = hoveredRow;
+        if (hoveredRow == 22 || hoveredRow == 23) activate = true;
+        else delta = 1;
+    }
+    if (hoveredRow >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))
+    {
+        settingsIndex_ = hoveredRow;
+        delta = -1;
     }
 
-    const int delta = (IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_D)) ? 1 : ((IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_A)) ? -1 : 0);
+    if (activate && settingsIndex_ < 22)
+    {
+        delta = 1;
+    }
+
     if (delta != 0)
     {
-        if (settingsIndex_ == 0)
+        switch (settingsIndex_)
         {
-            const float sensitivity = std::clamp(input_.GetMouseSensitivity() + delta * 0.1f, 0.3f, 2.5f);
-            input_.SetMouseSensitivity(sensitivity);
-        }
-        else if (settingsIndex_ == 1)
-        {
+        case 0: input_.SetMouseSensitivity(input_.GetMouseSensitivity() + delta * 0.1f); break;
+        case 1: input_.SetGamepadSensitivity(input_.GetGamepadSensitivity() + delta * 0.1f); break;
+        case 2: input_.SetGamepadDeadZone(input_.GetGamepadDeadZone() + delta * 0.02f); break;
+        case 3:
             fov_ = std::clamp(fov_ + delta * 2.0f, 50.0f, 90.0f);
             gameplayFov_ = fov_;
             cameraController_.SetFov(gameplayFov_);
-        }
-        else if (settingsIndex_ == 2)
-        {
+            break;
+        case 4:
             resolutionIndex_ = (resolutionIndex_ + delta + static_cast<int>(std::size(kWindowResolutions))) % static_cast<int>(std::size(kWindowResolutions));
             ApplyWindowSettings();
-        }
-        else if (settingsIndex_ == 3)
-        {
-            windowMode_ = (windowMode_ + delta + 3) % 3;
-            ApplyWindowSettings();
-        }
-        else if (settingsIndex_ == 4)
-        {
+            break;
+        case 5: windowMode_ = (windowMode_ + delta + 3) % 3; ApplyWindowSettings(); break;
+        case 6:
+            vsyncEnabled_ = !vsyncEnabled_;
+            if (vsyncEnabled_) SetWindowState(FLAG_VSYNC_HINT); else ClearWindowState(FLAG_VSYNC_HINT);
+            break;
+        case 7:
             fpsLimitIndex_ = (fpsLimitIndex_ + delta + static_cast<int>(std::size(kFpsLimits))) % static_cast<int>(std::size(kFpsLimits));
             ApplyFrameRateLimit();
+            break;
+        case 8:
+            renderScaleIndex_ = (renderScaleIndex_ + delta + static_cast<int>(std::size(kRenderScales))) % static_cast<int>(std::size(kRenderScales));
+            renderScale_ = kRenderScales[renderScaleIndex_];
+            break;
+        case 9:
+            drawDistanceIndex_ = (drawDistanceIndex_ + delta + static_cast<int>(std::size(kDrawDistances))) % static_cast<int>(std::size(kDrawDistances));
+            renderer_.SetWorldRenderDistance(kDrawDistances[drawDistanceIndex_]);
+            break;
+        case 10: shadowQuality_ = (shadowQuality_ + delta + 3) % 3; renderer_.SetShadowQuality(shadowQuality_); break;
+        case 11: effectsQuality_ = (effectsQuality_ + delta + 3) % 3; break;
+        case 12: postProcessing_ = !postProcessing_; break;
+        case 13: bloomEnabled_ = !bloomEnabled_; break;
+        case 14: masterVolume_ = std::clamp(masterVolume_ + delta * 0.1f, 0.0f, 1.0f); break;
+        case 15: musicVolume_ = std::clamp(musicVolume_ + delta * 0.1f, 0.0f, 1.0f); break;
+        case 16: sfxVolume_ = std::clamp(sfxVolume_ + delta * 0.1f, 0.0f, 1.0f); break;
+        case 17: ambientVolume_ = std::clamp(ambientVolume_ + delta * 0.1f, 0.0f, 1.0f); break;
+        case 18: showControlHints_ = !showControlHints_; break;
+        case 19: showMinimap_ = !showMinimap_; break;
+        case 20: reducedCameraShake_ = !reducedCameraShake_; break;
+        case 21: reducedFlashes_ = !reducedFlashes_; break;
+        default: break;
         }
-        else if (settingsIndex_ == 5)
-        {
-            masterVolume_ = std::clamp(masterVolume_ + delta * 0.1f, 0.0f, 1.0f);
-            audio_.SetVolume(masterVolume_);
-        }
-        else if (settingsIndex_ == 6)
-        {
-            showControlHints_ = !showControlHints_;
-        }
-        else if (settingsIndex_ == 7)
-        {
-            showMinimap_ = !showMinimap_;
-        }
-        else if (settingsIndex_ == 8)
-        {
-            reducedCameraShake_ = !reducedCameraShake_;
-        }
-        else if (settingsIndex_ == 9)
-        {
-            reducedFlashes_ = !reducedFlashes_;
-        }
+        audio_.SetVolume(masterVolume_);
+        audio_.SetCategoryVolumes(sfxVolume_, ambientVolume_);
+        music_.SetVolume(masterVolume_, musicVolume_);
         SaveSettings();
     }
 
-    if (IsKeyPressed(KEY_ENTER))
+    if (activate)
     {
-        if (settingsIndex_ == 3)
-        {
-            windowMode_ = (windowMode_ + 1) % 3;
-            ApplyWindowSettings();
-        }
-        else if (settingsIndex_ == 6)
-        {
-            showControlHints_ = !showControlHints_;
-        }
-        else if (settingsIndex_ == 7)
-        {
-            showMinimap_ = !showMinimap_;
-        }
-        else if (settingsIndex_ == 8)
-        {
-            reducedCameraShake_ = !reducedCameraShake_;
-        }
-        else if (settingsIndex_ == 9)
-        {
-            reducedFlashes_ = !reducedFlashes_;
-        }
-        else if (settingsIndex_ == 10)
+        if (settingsIndex_ == 22)
         {
             controlsReturnScreen_ = GameScreen::Settings;
             screen_ = GameScreen::Controls;
             waitingForKey_ = false;
         }
-        else if (settingsIndex_ == 11)
+        else if (settingsIndex_ == 23)
         {
             SaveSettings();
             screen_ = returnScreen_;
-            if (screen_ == GameScreen::Playing)
-            {
-                DisableCursor();
-            }
+            if (screen_ == GameScreen::Playing) DisableCursor();
         }
     }
 
@@ -511,16 +677,59 @@ void Game::HandleSettingsInput()
 void Game::HandleControlsInput()
 {
 #if DAIBED_DEVELOPER_BUILD
-    constexpr int kActionCount = 23;
+    constexpr int kActionCount = 25;
 #else
-    constexpr int kActionCount = 22;
+    constexpr int kActionCount = 16;
 #endif
     constexpr int kControlRows = kActionCount + 1;
     constexpr int kRowsPerColumn = 12;
     KeyBindings& bindings = input_.MutableBindings();
+    GamepadBindings& padBindings = input_.MutableGamepadBindings();
 
     const auto setBinding = [&bindings](int index, int key)
     {
+        if (key != KEY_NULL)
+        {
+            int* values[] {
+                &bindings.moveForward,
+                &bindings.moveBackward,
+                &bindings.moveLeft,
+                &bindings.moveRight,
+                &bindings.jump,
+                &bindings.sneak,
+#if DAIBED_DEVELOPER_BUILD
+                &bindings.bridgeMode,
+#endif
+                &bindings.sprint,
+                &bindings.attack,
+                &bindings.place,
+                &bindings.interact,
+                &bindings.inventory,
+                &bindings.drop,
+                &bindings.cameraToggle,
+#if DAIBED_DEVELOPER_BUILD
+                &bindings.debugRespawn,
+#endif
+                &bindings.heroActive1,
+                &bindings.heroActive2,
+                &bindings.heroUltimate,
+                &bindings.shoot,
+                &bindings.fireball,
+                &bindings.heal,
+                &bindings.teleport,
+                &bindings.dash,
+                &bindings.molotov,
+                &bindings.alarm
+            };
+            for (int* value : values)
+            {
+                if (*value == key)
+                {
+                    *value = KEY_NULL;
+                }
+            }
+        }
+
         switch (index)
         {
         case 0:
@@ -542,100 +751,155 @@ void Game::HandleControlsInput()
             bindings.sneak = key;
             break;
         case 6:
+#if DAIBED_DEVELOPER_BUILD
             bindings.bridgeMode = key;
+#else
+            bindings.sprint = key;
+#endif
             break;
         case 7:
+#if DAIBED_DEVELOPER_BUILD
             bindings.sprint = key;
+#else
+            bindings.attack = key;
+#endif
             break;
         case 8:
-            bindings.interact = key;
+#if DAIBED_DEVELOPER_BUILD
+            bindings.attack = key;
+#else
+            bindings.place = key;
+#endif
             break;
         case 9:
-            bindings.inventory = key;
+#if DAIBED_DEVELOPER_BUILD
+            bindings.place = key;
+#else
+            bindings.interact = key;
+#endif
             break;
         case 10:
-            bindings.drop = key;
+#if DAIBED_DEVELOPER_BUILD
+            bindings.interact = key;
+#else
+            bindings.inventory = key;
+#endif
             break;
         case 11:
-            bindings.cameraToggle = key;
+#if DAIBED_DEVELOPER_BUILD
+            bindings.inventory = key;
+#else
+            bindings.drop = key;
+#endif
             break;
         case 12:
 #if DAIBED_DEVELOPER_BUILD
-            bindings.debugRespawn = key;
+            bindings.drop = key;
 #else
-            bindings.heroActive1 = key;
+            bindings.cameraToggle = key;
 #endif
             break;
         case 13:
 #if DAIBED_DEVELOPER_BUILD
-            bindings.heroActive1 = key;
+            bindings.cameraToggle = key;
 #else
-            bindings.heroActive2 = key;
+            bindings.heroActive1 = key;
 #endif
             break;
         case 14:
 #if DAIBED_DEVELOPER_BUILD
-            bindings.heroActive2 = key;
+            bindings.debugRespawn = key;
 #else
-            bindings.heroUltimate = key;
+            bindings.heroActive2 = key;
 #endif
             break;
         case 15:
 #if DAIBED_DEVELOPER_BUILD
-            bindings.heroUltimate = key;
+            bindings.heroActive1 = key;
 #else
-            bindings.shoot = key;
+            bindings.heroUltimate = key;
 #endif
             break;
         case 16:
 #if DAIBED_DEVELOPER_BUILD
-            bindings.shoot = key;
-#else
-            bindings.fireball = key;
+            bindings.heroActive2 = key;
 #endif
             break;
         case 17:
 #if DAIBED_DEVELOPER_BUILD
-            bindings.fireball = key;
-#else
-            bindings.heal = key;
+            bindings.heroUltimate = key;
 #endif
             break;
         case 18:
 #if DAIBED_DEVELOPER_BUILD
-            bindings.heal = key;
-#else
-            bindings.teleport = key;
+            bindings.shoot = key;
 #endif
             break;
         case 19:
 #if DAIBED_DEVELOPER_BUILD
-            bindings.teleport = key;
-#else
-            bindings.dash = key;
+            bindings.fireball = key;
 #endif
             break;
         case 20:
 #if DAIBED_DEVELOPER_BUILD
-            bindings.dash = key;
-#else
-            bindings.molotov = key;
+            bindings.heal = key;
 #endif
             break;
         case 21:
 #if DAIBED_DEVELOPER_BUILD
+            bindings.teleport = key;
+#endif
+            break;
+        case 22:
+#if DAIBED_DEVELOPER_BUILD
+            bindings.dash = key;
+#endif
+            break;
+        case 23:
+#if DAIBED_DEVELOPER_BUILD
             bindings.molotov = key;
-#else
-            bindings.alarm = key;
 #endif
             break;
 #if DAIBED_DEVELOPER_BUILD
-        case 22:
+        case 24:
             bindings.alarm = key;
             break;
 #endif
         default:
             break;
+        }
+    };
+
+    const auto setPadBinding = [&padBindings](int index, int button)
+    {
+        switch (index)
+        {
+        case 4: padBindings.jump = button; break;
+        case 5: padBindings.sneak = button; break;
+#if DAIBED_DEVELOPER_BUILD
+        case 7: padBindings.sprint = button; break;
+        case 8: padBindings.attack = button; break;
+        case 9: padBindings.place = button; break;
+        case 10: padBindings.interact = button; break;
+        case 11: padBindings.inventory = button; break;
+        case 12: padBindings.drop = button; break;
+        case 13: padBindings.cameraToggle = button; break;
+        case 15: padBindings.heroActive1 = button; break;
+        case 16: padBindings.heroActive2 = button; break;
+        case 17: padBindings.heroUltimate = button; break;
+#else
+        case 6: padBindings.sprint = button; break;
+        case 7: padBindings.attack = button; break;
+        case 8: padBindings.place = button; break;
+        case 9: padBindings.interact = button; break;
+        case 10: padBindings.inventory = button; break;
+        case 11: padBindings.drop = button; break;
+        case 12: padBindings.cameraToggle = button; break;
+        case 13: padBindings.heroActive1 = button; break;
+        case 14: padBindings.heroActive2 = button; break;
+        case 15: padBindings.heroUltimate = button; break;
+#endif
+        default: break;
         }
     };
 
@@ -653,6 +917,40 @@ void Game::HandleControlsInput()
             setBinding(controlsIndex_, key);
             waitingForKey_ = false;
             SaveSettings();
+            return;
+        }
+
+        const int mouseButtons[] {
+            MOUSE_BUTTON_LEFT,
+            MOUSE_BUTTON_RIGHT,
+            MOUSE_BUTTON_MIDDLE,
+            MOUSE_BUTTON_SIDE,
+            MOUSE_BUTTON_EXTRA,
+            MOUSE_BUTTON_FORWARD,
+            MOUSE_BUTTON_BACK
+        };
+        for (int button : mouseButtons)
+        {
+            if (IsMouseButtonPressed(button))
+            {
+                setBinding(controlsIndex_, MouseBinding(button));
+                waitingForKey_ = false;
+                SaveSettings();
+                return;
+            }
+        }
+        if (IsGamepadAvailable(0))
+        {
+            for (int button = GAMEPAD_BUTTON_LEFT_FACE_UP; button <= GAMEPAD_BUTTON_RIGHT_THUMB; ++button)
+            {
+                if (IsGamepadButtonPressed(0, button))
+                {
+                    setPadBinding(controlsIndex_, button);
+                    waitingForKey_ = false;
+                    SaveSettings();
+                    return;
+                }
+            }
         }
         return;
     }
@@ -673,8 +971,50 @@ void Game::HandleControlsInput()
     {
         controlsIndex_ = std::max(controlsIndex_ - kRowsPerColumn, 0);
     }
-    if (IsKeyPressed(KEY_ENTER))
+    const int panelWidth = 900;
+    const int panelX = GetScreenWidth() / 2 - panelWidth / 2;
+    const int panelY = 142;
+    const int kColumnWidth = 440;
+    const Vector2 mouse = GetMousePosition();
+    const Vector2 mouseMove = GetMouseDelta();
+    int hoveredRow = -1;
+    for (int i = 0; i < kControlRows; ++i)
     {
+        const int column = i / kRowsPerColumn;
+        const int row = i % kRowsPerColumn;
+        const Rectangle bounds {
+            static_cast<float>(panelX + 20 + column * kColumnWidth),
+            static_cast<float>(panelY + 18 + row * 35 - 7),
+            static_cast<float>(kColumnWidth - 28),
+            28.0f
+        };
+        if (CheckCollisionPointRec(mouse, bounds))
+        {
+            hoveredRow = i;
+            break;
+        }
+    }
+    if (hoveredRow >= 0 && (std::fabs(mouseMove.x) > 0.5f || std::fabs(mouseMove.y) > 0.5f))
+    {
+        controlsIndex_ = hoveredRow;
+    }
+    const float wheel = GetMouseWheelMove();
+    if (wheel < -0.01f)
+    {
+        controlsIndex_ = (controlsIndex_ + 1) % kControlRows;
+    }
+    else if (wheel > 0.01f)
+    {
+        controlsIndex_ = (controlsIndex_ + kControlRows - 1) % kControlRows;
+    }
+
+    const bool activate = IsKeyPressed(KEY_ENTER) || (hoveredRow >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT));
+    if (activate)
+    {
+        if (hoveredRow >= 0)
+        {
+            controlsIndex_ = hoveredRow;
+        }
         if (controlsIndex_ == kActionCount)
         {
             screen_ = controlsReturnScreen_;
@@ -709,13 +1049,51 @@ void Game::HandlePauseInput()
     {
         pauseIndex_ = (pauseIndex_ + kPauseRows - 1) % kPauseRows;
     }
+    const int panelWidth = 430;
+    const int panelX = GetScreenWidth() / 2 - panelWidth / 2;
+    const int panelY = GetScreenHeight() / 2 - 130;
+    const Vector2 mouse = GetMousePosition();
+    const Vector2 mouseMove = GetMouseDelta();
+    int hoveredRow = -1;
+    for (int i = 0; i < kPauseRows; ++i)
+    {
+        const Rectangle row {
+            static_cast<float>(panelX + 18),
+            static_cast<float>(panelY + 24 + i * 39 - 7),
+            static_cast<float>(panelWidth - 36),
+            29.0f
+        };
+        if (CheckCollisionPointRec(mouse, row))
+        {
+            hoveredRow = i;
+            break;
+        }
+    }
+    if (hoveredRow >= 0 && (std::fabs(mouseMove.x) > 0.5f || std::fabs(mouseMove.y) > 0.5f))
+    {
+        pauseIndex_ = hoveredRow;
+    }
+    const float wheel = GetMouseWheelMove();
+    if (wheel < -0.01f)
+    {
+        pauseIndex_ = (pauseIndex_ + 1) % kPauseRows;
+    }
+    else if (wheel > 0.01f)
+    {
+        pauseIndex_ = (pauseIndex_ + kPauseRows - 1) % kPauseRows;
+    }
     if (IsKeyPressed(KEY_ESCAPE))
     {
         screen_ = GameScreen::Playing;
         DisableCursor();
         return;
     }
-    if (!IsKeyPressed(KEY_ENTER))
+    const bool activate = IsKeyPressed(KEY_ENTER) || (hoveredRow >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT));
+    if (hoveredRow >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+    {
+        pauseIndex_ = hoveredRow;
+    }
+    if (!activate)
     {
         return;
     }
@@ -887,10 +1265,19 @@ void Game::RenderHeroSelect() const
     }
 
     DrawText(selected.name.c_str(), detailX, panelY + 22, 30, Color { 255, 235, 142, 255 });
+    const Rectangle previewRect {
+        static_cast<float>(panelX + panelWidth - 214),
+        static_cast<float>(panelY + 18),
+        184.0f,
+        184.0f
+    };
+
+    renderer_.RenderHeroPreview(selected.id, previewRect, heroPreviewYaw_);
+    DrawText("Тяните мышью для вращения", static_cast<int>(previewRect.x) + 43, static_cast<int>(previewRect.y + previewRect.height) - 20, 12, Fade(WHITE, 0.58f));
 
     int y = panelY + 64;
     const int contentBottom = panelY + panelHeight - 78;
-    const auto drawSection = [&y, detailX, detailWidth, contentBottom](const std::string& title, const std::string& description, const std::string& meta, int maxLines)
+    const auto drawSection = [&y, detailX, detailWidth, contentBottom, previewRect](const std::string& title, const std::string& description, const std::string& meta, int maxLines)
     {
         if (y >= contentBottom)
         {
@@ -903,7 +1290,10 @@ void Game::RenderHeroSelect() const
             DrawText(meta.c_str(), detailX, y, 14, Color { 255, 235, 142, 255 });
             y += 19;
         }
-        y = DrawWrappedTextLimited(description, detailX, y, 13, detailWidth, maxLines, Fade(WHITE, 0.76f));
+        const int availableWidth = y < static_cast<int>(previewRect.y + previewRect.height)
+            ? detailWidth - static_cast<int>(previewRect.width) - 18
+            : detailWidth;
+        y = DrawWrappedTextLimited(description, detailX, y, 13, availableWidth, maxLines, Fade(WHITE, 0.76f));
         y += 10;
     };
 
@@ -941,68 +1331,84 @@ void Game::RenderHeroSelect() const
 
 void Game::RenderSettings() const
 {
-    const std::string labels[] {
-        "Mouse sensitivity",
-        "FOV",
-        "Resolution",
-        "Window mode",
-        "FPS limit",
-        "Master volume",
-        "Control hints",
-        "Minimap",
-        "Reduced camera shake",
-        "Reduced flashes",
-        "Open controls",
-        "Back"
+    constexpr int kSettingsRows = 24;
+    constexpr int kVisibleRows = 12;
+    const char* labels[kSettingsRows] {
+        "Чувствительность мыши", "Чувствительность геймпада", "Мёртвая зона стиков", "Угол обзора",
+        "Разрешение", "Режим окна", "VSync", "Ограничение FPS", "Масштаб рендера", "Дальность прорисовки",
+        "Качество теней", "Качество эффектов", "Post-processing", "Bloom", "Общая громкость", "Музыка",
+        "Эффекты", "Окружение", "Подсказки управления", "Мини-карта", "Ослабить тряску камеры",
+        "Ослабить вспышки", "Настроить управление", "Назад"
     };
-    const std::string values[] {
-        FormatTenths(input_.GetMouseSensitivity()),
-        std::to_string(static_cast<int>(fov_)),
-        ResolutionName(),
-        windowMode_ == 0 ? "Windowed" : (windowMode_ == 1 ? "Borderless" : "Fullscreen"),
-        FpsLimitName(),
-        std::to_string(static_cast<int>(masterVolume_ * 100.0f + 0.5f)) + "%",
-        showControlHints_ ? "On" : "Off",
-        showMinimap_ ? "On" : "Off",
-        reducedCameraShake_ ? "On" : "Off",
-        reducedFlashes_ ? "On" : "Off",
-        "",
-        ""
+    const auto percent = [](float value)
+    {
+        return std::to_string(static_cast<int>(value * 100.0f + 0.5f)) + "%";
+    };
+    const auto quality = [](int value)
+    {
+        return value == 0 ? std::string("Низкое") : (value == 1 ? std::string("Среднее") : std::string("Высокое"));
+    };
+    const auto toggle = [](bool value) { return value ? std::string("Вкл.") : std::string("Выкл."); };
+    std::array<std::string, kSettingsRows> values {
+        FormatTenths(input_.GetMouseSensitivity()), FormatTenths(input_.GetGamepadSensitivity()),
+        percent(input_.GetGamepadDeadZone()), std::to_string(static_cast<int>(fov_)), ResolutionName(),
+        windowMode_ == 0 ? "Оконный" : (windowMode_ == 1 ? "Без рамки" : "Полноэкранный"),
+        toggle(vsyncEnabled_), FpsLimitName(), percent(kRenderScales[renderScaleIndex_]),
+        std::to_string(static_cast<int>(kDrawDistances[drawDistanceIndex_])) + " м", quality(shadowQuality_),
+        quality(effectsQuality_), toggle(postProcessing_), toggle(bloomEnabled_), percent(masterVolume_),
+        percent(musicVolume_), percent(sfxVolume_), percent(ambientVolume_), toggle(showControlHints_),
+        toggle(showMinimap_), toggle(reducedCameraShake_), toggle(reducedFlashes_), "", ""
     };
 
-    DrawCenteredText("Settings", 86, 40, WHITE);
-    const int panelWidth = 620;
+    DrawCenteredText("Настройки", 60, 40, WHITE);
+    const int panelWidth = 680;
     const int panelX = GetScreenWidth() / 2 - panelWidth / 2;
-    const int panelY = 132;
-    DrawRectangle(panelX, panelY, panelWidth, 510, Fade(Color { 8, 10, 14, 255 }, 0.86f));
-    DrawRectangleLines(panelX, panelY, panelWidth, 510, Fade(WHITE, 0.20f));
-    for (int i = 0; i < 12; ++i)
+    const int panelY = 118;
+    const int panelHeight = kVisibleRows * 38 + 24;
+    const int firstVisible = std::clamp(settingsIndex_ - kVisibleRows / 2, 0, kSettingsRows - kVisibleRows);
+    DrawRectangle(panelX, panelY, panelWidth, panelHeight, Fade(Color { 8, 10, 14, 255 }, 0.86f));
+    DrawRectangleLines(panelX, panelY, panelWidth, panelHeight, Fade(WHITE, 0.20f));
+    BeginScissorMode(panelX + 12, panelY + 8, panelWidth - 24, panelHeight - 16);
+    for (int visible = 0; visible < kVisibleRows; ++visible)
     {
-        const int y = panelY + 24 + i * 38;
+        const int i = firstVisible + visible;
+        const int y = panelY + 22 + visible * 38;
         const bool selected = i == settingsIndex_;
         const Color color = selected ? Color { 255, 235, 142, 255 } : Fade(WHITE, 0.78f);
         DrawRectangle(panelX + 20, y - 8, panelWidth - 40, 31, selected ? Fade(Color { 42, 52, 62, 255 }, 0.92f) : Fade(Color { 18, 21, 29, 255 }, 0.44f));
-        DrawText(labels[i].c_str(), panelX + 38, y, 20, color);
+        DrawText(labels[i], panelX + 38, y, 18, color);
         if (!values[i].empty())
         {
-            DrawText(("< " + values[i] + " >").c_str(), panelX + 340, y, 20, color);
+            const std::string valueText = "< " + values[i] + " >";
+            DrawText(valueText.c_str(), panelX + panelWidth - 46 - MeasureText(valueText.c_str(), 18), y, 18, color);
         }
     }
-    DrawCenteredText("Left/Right change values | Enter toggles/selects | Esc back", GetScreenHeight() - 56, 18, Fade(WHITE, 0.62f));
+    EndScissorMode();
+    const float scrollFraction = static_cast<float>(firstVisible) / static_cast<float>(kSettingsRows - kVisibleRows);
+    const int trackHeight = panelHeight - 28;
+    const int thumbHeight = std::max(48, trackHeight * kVisibleRows / kSettingsRows);
+    DrawRectangle(panelX + panelWidth - 12, panelY + 14, 4, trackHeight, Fade(WHITE, 0.12f));
+    DrawRectangle(panelX + panelWidth - 12, panelY + 14 + static_cast<int>((trackHeight - thumbHeight) * scrollFraction), 4, thumbHeight, Fade(WHITE, 0.52f));
+    DrawCenteredText("Стрелки/WASD или геймпад — изменить | Enter/A — выбрать | Esc — назад", GetScreenHeight() - 46, 17, Fade(WHITE, 0.62f));
 }
 
 void Game::RenderControls() const
 {
     const KeyBindings& bindings = input_.GetBindings();
+    const GamepadBindings& padBindings = input_.GetGamepadBindings();
     const char* labels[] {
         "Вперед",
         "Назад",
         "Влево",
         "Вправо",
         "Прыжок",
-        "Скрытность",
+        "Присесть",
+#if DAIBED_DEVELOPER_BUILD
         "Мост",
+#endif
         "Спринт",
+        "Атака / ломать",
+        "Использовать / ставить",
         "Магазин / действие",
         "Инвентарь",
         "Выбросить",
@@ -1013,6 +1419,7 @@ void Game::RenderControls() const
         "Активка 1",
         "Активка 2",
         "Ульта",
+#if DAIBED_DEVELOPER_BUILD
         "Огненный шар",
         "Быстрый огонь",
         "Лечение",
@@ -1020,6 +1427,7 @@ void Game::RenderControls() const
         "Рывок",
         "Молотов",
         "Сигнал",
+#endif
         "Назад"
     };
     const int keys[] {
@@ -1029,8 +1437,12 @@ void Game::RenderControls() const
         bindings.moveRight,
         bindings.jump,
         bindings.sneak,
+#if DAIBED_DEVELOPER_BUILD
         bindings.bridgeMode,
+#endif
         bindings.sprint,
+        bindings.attack,
+        bindings.place,
         bindings.interact,
         bindings.inventory,
         bindings.drop,
@@ -1041,6 +1453,7 @@ void Game::RenderControls() const
         bindings.heroActive1,
         bindings.heroActive2,
         bindings.heroUltimate,
+#if DAIBED_DEVELOPER_BUILD
         bindings.shoot,
         bindings.fireball,
         bindings.heal,
@@ -1048,19 +1461,54 @@ void Game::RenderControls() const
         bindings.dash,
         bindings.molotov,
         bindings.alarm,
+#endif
         KEY_NULL
     };
+    const int padButtons[] {
+        GAMEPAD_BUTTON_UNKNOWN,
+        GAMEPAD_BUTTON_UNKNOWN,
+        GAMEPAD_BUTTON_UNKNOWN,
+        GAMEPAD_BUTTON_UNKNOWN,
+        padBindings.jump,
+        padBindings.sneak,
 #if DAIBED_DEVELOPER_BUILD
-    constexpr int kActionCount = 23;
+        GAMEPAD_BUTTON_UNKNOWN,
+#endif
+        padBindings.sprint,
+        padBindings.attack,
+        padBindings.place,
+        padBindings.interact,
+        padBindings.inventory,
+        padBindings.drop,
+        padBindings.cameraToggle,
+#if DAIBED_DEVELOPER_BUILD
+        GAMEPAD_BUTTON_UNKNOWN,
+#endif
+        padBindings.heroActive1,
+        padBindings.heroActive2,
+        padBindings.heroUltimate,
+#if DAIBED_DEVELOPER_BUILD
+        GAMEPAD_BUTTON_UNKNOWN,
+        GAMEPAD_BUTTON_UNKNOWN,
+        GAMEPAD_BUTTON_UNKNOWN,
+        GAMEPAD_BUTTON_UNKNOWN,
+        GAMEPAD_BUTTON_UNKNOWN,
+        GAMEPAD_BUTTON_UNKNOWN,
+        GAMEPAD_BUTTON_UNKNOWN,
+#endif
+        GAMEPAD_BUTTON_UNKNOWN
+    };
+#if DAIBED_DEVELOPER_BUILD
+    constexpr int kActionCount = 25;
 #else
-    constexpr int kActionCount = 22;
+    constexpr int kActionCount = 16;
 #endif
     constexpr int kControlRows = kActionCount + 1;
     constexpr int kRowsPerColumn = 12;
     constexpr int kColumnWidth = 440;
 
     DrawCenteredText("Управление", 60, 40, WHITE);
-    DrawCenteredText(waitingForKey_ ? "Нажмите клавишу для выбранного действия. Esc отменяет." : "Enter меняет выбранную клавишу.", 106, 18, Fade(WHITE, 0.64f));
+    DrawCenteredText(waitingForKey_ ? "Нажмите клавишу или кнопку мыши. Esc отменяет." : "Enter/ЛКМ меняет выбранную клавишу или кнопку мыши.", 106, 18, Fade(WHITE, 0.64f));
 
     const int panelWidth = 900;
     const int panelX = GetScreenWidth() / 2 - panelWidth / 2;
@@ -1081,16 +1529,18 @@ void Game::RenderControls() const
         DrawText(labels[i], x + 18, y, 18, color);
         if (i < kActionCount)
         {
-            DrawText(KeyLabel(keys[i]), x + 306, y, 18, color);
+            const std::string bindingText = std::string(KeyLabel(keys[i])) + " / "
+                + (i < 4 ? "LS" : GamepadButtonLabel(padButtons[i]));
+            DrawText(bindingText.c_str(), x + 276, y, 16, color);
         }
     }
 }
 
 void Game::RenderPauseOverlay() const
 {
-    const char* labels[] { "Resume", "Restart match", "Settings", "Main menu", "Quit" };
+    const char* labels[] { "Продолжить", "Перезапустить матч", "Настройки", "Главное меню", "Выйти из игры" };
     DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Fade(BLACK, 0.52f));
-    DrawCenteredText("Paused", GetScreenHeight() / 2 - 154, 42, WHITE);
+    DrawCenteredText("Пауза", GetScreenHeight() / 2 - 154, 42, WHITE);
 
     const int panelWidth = 360;
     const int panelX = GetScreenWidth() / 2 - panelWidth / 2;
@@ -1110,8 +1560,10 @@ void Game::RenderGameHints(const Player& localPlayer) const
 {
     const KeyBindings& bindings = input_.GetBindings();
     const std::string mainHints = std::string(KeyLabel(bindings.interact)) + " магазин"
-        + " | " + KeyLabel(bindings.sneak) + " скрытность"
+        + " | " + KeyLabel(bindings.sneak) + " присесть"
+#if DAIBED_DEVELOPER_BUILD
         + " | " + KeyLabel(bindings.bridgeMode) + " мост"
+#endif
         + " | " + KeyLabel(bindings.sprint) + " / двойной " + KeyLabel(bindings.moveForward) + " спринт"
         + " | " + KeyLabel(bindings.cameraToggle) + " камера"
         + " | Tab таблица";
@@ -1160,6 +1612,10 @@ void Game::RenderOnboarding(const Player& localPlayer) const
     else if (matchTime_ < 48.0f)
     {
         instruction = "RMB ставит блок. Удерживайте Shift у края для безопасного моста.";
+    }
+    else if (matchTime_ < 60.0f)
+    {
+        instruction = "Удерживайте ЛКМ для зарядки лука и бластера. ПКМ включает оптику снайперской винтовки; колесо меняет увеличение.";
     }
     else
     {
@@ -1226,7 +1682,7 @@ void Game::RenderMinimap(const Player& localPlayer) const
         }
         const Team* team = FindTeam(core.GetTeamId());
         const Vector2 p = project(world_.GridToWorld(core.GetBlockPosition()));
-        DrawCircle(static_cast<int>(p.x), static_cast<int>(p.y), 5.0f, team != nullptr ? GetTeamColor(team->color) : WHITE);
+        DrawTeamMarker(p, core.GetTeamId(), 5.0f, team != nullptr ? GetTeamColor(team->color) : WHITE);
     }
 
     for (const Player& player : players_)
@@ -1240,7 +1696,7 @@ void Game::RenderMinimap(const Player& localPlayer) const
         const Color color = player.GetId() == localPlayer.GetId()
             ? WHITE
             : (team != nullptr ? GetTeamColor(team->color) : ORANGE);
-        DrawCircle(static_cast<int>(p.x), static_cast<int>(p.y), player.GetId() == localPlayer.GetId() ? 4.5f : 3.5f, color);
+        DrawTeamMarker(p, player.GetTeamId(), player.GetId() == localPlayer.GetId() ? 4.5f : 3.5f, color);
     }
 }
 
@@ -1263,7 +1719,9 @@ void Game::RenderCoreCollapseTimer() const
     text += std::to_string(seconds);
 
     const Color color = remaining <= 60.0f ? Color { 255, 118, 118, 255 } : Fade(WHITE, 0.72f);
-    DrawText(text.c_str(), GetScreenWidth() / 2 - MeasureText(text.c_str(), 18) / 2, 52, 18, color);
+    // Top-left corner: the centered event feed occupies the top-center column, so a
+    // centered timer here collided with it. Left-align to keep both readable.
+    DrawText(text.c_str(), 18, 18, 18, color);
 }
 
 void Game::RenderKillFeed() const

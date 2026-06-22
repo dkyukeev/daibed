@@ -4,7 +4,10 @@
 #include "raylib.h"
 
 #include <optional>
+#include <cstdint>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 struct RaycastHit
 {
@@ -40,9 +43,17 @@ public:
     void AddBridge(const GridPos& from, const GridPos& to, int y);
 
     const BlockMap& GetBlocks() const;
+    std::uint64_t GetRenderRevision() const;
+    std::vector<GridPos> TakeDirtyRenderChunks() const;
+
+    static constexpr int kRenderChunkSize = 16;
+    static GridPos RenderChunkForBlock(const GridPos& pos);
 
 private:
     static bool IsCollisionBlock(BlockType type);
+    void MarkRenderDirty(const GridPos& pos);
 
     BlockMap blocks_;
+    std::uint64_t renderRevision_ = 1;
+    mutable std::unordered_set<GridPos, GridPosHash> dirtyRenderChunks_;
 };

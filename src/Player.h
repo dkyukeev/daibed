@@ -2,6 +2,7 @@
 
 #include "Hero.h"
 #include "Inventory.h"
+#include "RangedCombat.h"
 #include "World.h"
 #include "raylib.h"
 
@@ -16,6 +17,7 @@ public:
     int GetId() const;
     const std::string& GetName() const;
     int GetTeamId() const;
+    Vector3 GetHomeSpawnPoint() const;
     Vector3 GetPosition() const;
     Vector3 GetVelocity() const;
     float GetYaw() const;
@@ -67,11 +69,12 @@ public:
 
     void Damage(int amount);
     void Heal(int amount);
-    void ApplyKnockback(Vector3 impulse);
+    void ApplyKnockback(Vector3 impulse, float controlLossSeconds = -1.0f);
     void ActivateHitInvulnerability(float seconds);
     void ActivateSpeedBoost(float seconds);
     void ActivateJumpBoost(float seconds);
     void ActivateShield(float seconds);
+    void ApplyControlDebuff(float seconds, float moveMultiplier, float jumpMultiplier, float attackRecoveryMultiplier);
     void Teleport(Vector3 position, bool clearVelocity = true);
     void SetHeroId(HeroId heroId);
     void SetHeroDamageMultipliers(float incomingMultiplier, float outgoingMultiplier);
@@ -80,7 +83,7 @@ public:
     bool IsHeroAbilityReady(HeroAbilitySlot slot) const;
     void StartHeroAbilityCooldown(HeroAbilitySlot slot, float cooldownSeconds, float durationSeconds = 0.0f);
     void ClearHeroActiveEffects();
-    void Respawn(Vector3 spawnPoint);
+    void RespawnAtHome();
     void Kill(bool finalDeath);
     void KillWithRespawn(float seconds);
 
@@ -88,6 +91,15 @@ public:
     void ResetAttackCooldown(float seconds);
     void RefreshSprintReset();
     bool ConsumeSprintReset();
+    CrossbowState GetBlasterState() const;
+    float GetBlasterLoadTimer() const;
+    void StartBlasterLoading();
+    bool AdvanceBlasterLoading(float dt, float requiredSeconds);
+    void CancelBlasterLoading();
+    bool ConsumeLoadedBlaster();
+    float GetBowDrawTimer() const;
+    void AdvanceBowDraw(float dt);
+    void ResetBowDraw();
 
 private:
     bool HasGroundSupportAt(Vector3 position, const World& world) const;
@@ -96,6 +108,7 @@ private:
     int id_ = -1;
     std::string name_;
     int teamId_ = -1;
+    Vector3 homeSpawnPoint_ {};
     Vector3 position_ {};
     Vector3 velocity_ {};
     float yaw_ = 0.0f;
@@ -118,6 +131,13 @@ private:
     float jumpBoostTimer_ = 0.0f;
     float shieldTimer_ = 0.0f;
     float invulnerabilityTimer_ = 0.0f;
+    float controlDebuffTimer_ = 0.0f;
+    float controlMoveMultiplier_ = 1.0f;
+    float controlJumpMultiplier_ = 1.0f;
+    float controlAttackRecoveryMultiplier_ = 1.0f;
+    CrossbowState blasterState_ = CrossbowState::Unloaded;
+    float blasterLoadTimer_ = 0.0f;
+    float bowDrawTimer_ = 0.0f;
     HeroId heroId_ = HeroId::Radon;
     HeroRuntimeState heroState_ {};
     float heroIncomingDamageMultiplier_ = 1.0f;
