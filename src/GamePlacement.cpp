@@ -31,7 +31,7 @@ std::string FormatTenths(float value)
 void Game::UpdatePlacementPreview()
 {
     const Player* player = GetLocalPlayer();
-    if (player == nullptr || !player->IsAlive() || winnerTeamId_.has_value() || shopOpen_ || inventoryOpen_)
+    if (player == nullptr || !player->IsAlive() || matchSimulation_.HasWinner() || shopOpen_ || inventoryOpen_)
     {
         placementPreview_ = PlacementPreview {};
         return;
@@ -45,7 +45,7 @@ void Game::UpdateCombatPreview()
     combatPreview_ = CombatPreview {};
 
     const Player* player = GetLocalPlayer();
-    if (player == nullptr || !player->IsAlive() || shopOpen_ || inventoryOpen_ || winnerTeamId_.has_value())
+    if (player == nullptr || !player->IsAlive() || shopOpen_ || inventoryOpen_ || matchSimulation_.HasWinner())
     {
         return;
     }
@@ -80,7 +80,7 @@ void Game::UpdateCombatPreview()
         {
             const bool sniper = selectedRangedItem == ItemType::SniperRifle;
             const std::string weaponName = sniper ? "Снайперская винтовка" : "Бластер";
-            combatPreview_.label = sniper && currentInput_.scopeHeld
+            combatPreview_.label = sniper && BuildLocalPlayerCommand().scopeHeld
                 ? weaponName + " · ЗАРЯЖЕН · ПКМ/колесо: x" + FormatTenths(sniperMagnification_) + " · ЛКМ: огонь"
                 : weaponName + (sniper ? " · ЗАРЯЖЕН · ПКМ: оптика · ЛКМ: огонь" : " · ЗАРЯЖЕН · ЛКМ: огонь");
         }
@@ -102,7 +102,7 @@ void Game::UpdateCombatPreview()
     {
         combatPreview_.visible = true;
         combatPreview_.ready = false;
-        combatPreview_.label = "Select a weapon to fight";
+        combatPreview_.label = "Выберите оружие для боя";
         return;
     }
 
@@ -169,7 +169,8 @@ void Game::UpdateCombatPreview()
 
 void Game::UpdateFastPlacement(float dt)
 {
-    if (!currentInput_.placeHeld || winnerTeamId_.has_value() || shopOpen_ || inventoryOpen_)
+    const PlayerCommand command = BuildLocalPlayerCommand();
+    if (!command.placeHeld || matchSimulation_.HasWinner() || shopOpen_ || inventoryOpen_)
     {
         fastPlaceTimer_ = 0.0f;
         return;
@@ -191,13 +192,13 @@ void Game::UpdateFastPlacement(float dt)
     {
         HandlePlaceBlock();
     }
-    fastPlaceTimer_ = currentInput_.bridgeMode ? 0.16f : 0.22f;
+    fastPlaceTimer_ = command.bridgeMode ? 0.16f : 0.22f;
 }
 
 void Game::UpdateAttackOrBreak(float dt)
 {
     Player* player = GetLocalPlayer();
-    if (player == nullptr || !player->IsAlive() || shopOpen_ || inventoryOpen_ || winnerTeamId_.has_value())
+    if (player == nullptr || !player->IsAlive() || shopOpen_ || inventoryOpen_ || matchSimulation_.HasWinner())
     {
         if (player != nullptr)
         {
@@ -210,6 +211,7 @@ void Game::UpdateAttackOrBreak(float dt)
         return;
     }
 
+    const PlayerCommand command = BuildLocalPlayerCommand();
     const ItemType rangedItem = GetSelectedHotbarStack(*player).type;
     const bool bowSelected = rangedItem == ItemType::Bow;
     const bool blasterSelected = ItemIsBlasterWeapon(rangedItem);
@@ -223,7 +225,7 @@ void Game::UpdateAttackOrBreak(float dt)
     }
     if (bowSelected)
     {
-        if (currentInput_.attackHeld)
+        if (command.attackHeld)
         {
             const float previousPower = BowDrawPower(player->GetBowDrawTimer());
             player->AdvanceBowDraw(dt);
@@ -238,7 +240,7 @@ void Game::UpdateAttackOrBreak(float dt)
             ResetBreakProgress();
             return;
         }
-        if (currentInput_.attackReleased && player->GetBowDrawTimer() > 0.0f)
+        if (command.attackReleased && player->GetBowDrawTimer() > 0.0f)
         {
             LaunchBowShot(*player, cameraController_.GetAimDirection(), BowDrawPower(player->GetBowDrawTimer()), true);
         }
@@ -251,19 +253,19 @@ void Game::UpdateAttackOrBreak(float dt)
     if (blasterSelected)
     {
         const float fullCharge = BlasterChargeSeconds(player->GetInventory().GetBlasterRapidFireLevel());
-        if (player->GetBlasterState() == CrossbowState::Loaded && currentInput_.attackPressed)
+        if (player->GetBlasterState() == CrossbowState::Loaded && command.attackPressed)
         {
-            const bool aimed = rangedItem == ItemType::SniperRifle ? currentInput_.scopeHeld : currentInput_.placeHeld;
+            const bool aimed = rangedItem == ItemType::SniperRifle ? command.scopeHeld : command.placeHeld;
             LaunchBlasterShot(*player, cameraController_.GetAimDirection(), aimed, true);
             ResetBreakProgress();
             return;
         }
-        if (player->GetBlasterState() == CrossbowState::Unloaded && currentInput_.attackHeld)
+        if (player->GetBlasterState() == CrossbowState::Unloaded && command.attackHeld)
         {
             player->StartBlasterLoading();
             audio_.PlayPickup();
         }
-        if (player->GetBlasterState() == CrossbowState::Loading && currentInput_.attackHeld)
+        if (player->GetBlasterState() == CrossbowState::Loading && command.attackHeld)
         {
             blasterCharging_ = true;
             attackChargeActive_ = true;
@@ -278,7 +280,7 @@ void Game::UpdateAttackOrBreak(float dt)
             ResetBreakProgress();
             return;
         }
-        if (currentInput_.attackReleased && player->GetBlasterState() == CrossbowState::Loading)
+        if (command.attackReleased && player->GetBlasterState() == CrossbowState::Loading)
         {
             player->CancelBlasterLoading();
             SetMessage("Зарядка бластера отменена.");
@@ -305,7 +307,7 @@ void Game::UpdateAttackOrBreak(float dt)
         }
     }
 
-    if (selectedWeapon.has_value() && currentInput_.attackPressed)
+    if (selectedWeapon.has_value() && command.attackPressed)
     {
         std::string combatMessage;
         CombatEvent combatEvent;
@@ -319,7 +321,7 @@ void Game::UpdateAttackOrBreak(float dt)
         }
     }
 
-    if (currentInput_.attackPressed)
+    if (command.attackPressed)
     {
         const Vector3 origin = cameraController_.GetAimOrigin();
         const Vector3 direction = cameraController_.GetAimDirection();
@@ -339,7 +341,7 @@ void Game::UpdateAttackOrBreak(float dt)
         }
     }
 
-    if (!currentInput_.attackHeld)
+    if (!command.attackHeld)
     {
         ResetBreakProgress();
         attackChargeActive_ = false;
@@ -380,7 +382,7 @@ void Game::UpdateAttackOrBreak(float dt)
         }
 
         isCore = true;
-        label = "Enemy EnergyCore";
+        label = "Вражеский Кор";
     }
     else if (!hit->blockData.breakable || !IsBreakableByPlayers(hit->blockData.type))
     {
@@ -444,7 +446,8 @@ void Game::UpdateAttackOrBreak(float dt)
 
     if (breakProgress_.fraction >= 1.0f)
     {
-        CompleteBreakProgress(*player);
+        CompleteBreakProgress(*player, breakProgress_);
+        ResetBreakProgress();
     }
 }
 
@@ -453,15 +456,15 @@ void Game::ResetBreakProgress()
     breakProgress_ = BreakProgress {};
 }
 
-void Game::CompleteBreakProgress(Player& player)
+void Game::CompleteBreakProgress(Player& player, const BreakProgress& progress)
 {
-    if (!breakProgress_.visible)
+    if (!progress.visible)
     {
         return;
     }
 
-    const GridPos target = breakProgress_.target;
-    if (breakProgress_.isCore)
+    const GridPos target = progress.target;
+    if (progress.isCore)
     {
         EnergyCore* core = FindCoreAt(target);
         if (core != nullptr)
@@ -477,11 +480,11 @@ void Game::CompleteBreakProgress(Player& player)
                     if (radonSacrifice)
                     {
                         coreEvent.coreDestroyed = false;
-                        coreMessage = "Радон принял разрушение Кора на себя. Core остался на 20 HP.";
+                        coreMessage = "Радон принял разрушение Кора на себя. Кор остался на 20 HP.";
                     }
                     else
                     {
-                        world_.RemoveBlock(core->GetBlockPosition());
+                        RemoveWorldBlock(core->GetBlockPosition(), BlockDeltaReason::CoreDestroyed, player.GetId());
                         Team* team = FindTeam(core->GetTeamId());
                         if (team != nullptr)
                         {
@@ -493,7 +496,6 @@ void Game::CompleteBreakProgress(Player& player)
                 player.GetInventory().DamageTool(2);
             }
         }
-        ResetBreakProgress();
         return;
     }
 
@@ -501,10 +503,10 @@ void Game::CompleteBreakProgress(Player& player)
     const std::optional<Block> brokenBlock = blockBeforeBreak != nullptr
         ? std::optional<Block>(*blockBeforeBreak)
         : std::nullopt;
-    if (world_.BreakBlock(target, player.GetTeamId()))
+    if (BreakWorldBlock(target, player.GetTeamId(), BlockDeltaReason::PlayerBreak, player.GetId()))
     {
         const Vector3 center = world_.GridToWorld(target);
-        SetMessage(std::string(DisplayName(breakProgress_.targetType)) + " broken.");
+        SetMessage(std::string(DisplayName(progress.targetType)) + " сломан.");
         AddWorldEffect(center, Color { 210, 220, 235, 255 }, 0.28f, 0.25f);
         AddFloatingText("break", center, Color { 210, 220, 235, 255 });
         audio_.PlayBreakBlockAt(center);
@@ -520,11 +522,9 @@ void Game::CompleteBreakProgress(Player& player)
     }
     else
     {
-        SetMessage("This block is protected.");
+        SetMessage("Этот блок защищен.");
         audio_.PlayDenied();
     }
-
-    ResetBreakProgress();
 }
 
 void Game::HandlePlaceBlock()
@@ -538,14 +538,14 @@ void Game::HandlePlaceBlock()
     const std::optional<BlockType> selectedBlock = GetSelectedBlockType(*player);
     if (!selectedBlock.has_value())
     {
-        SetMessage("Select a block in the hotbar to place it.");
+        SetMessage("Выберите блок на панели, чтобы поставить его.");
         audio_.PlayDenied();
         return;
     }
 
     if (player->GetInventory().GetHotbarSlots()[selectedHotbarSlot_].count <= 0)
     {
-        SetMessage(std::string("No ") + DisplayName(*selectedBlock) + "s in selected slot.");
+        SetMessage(std::string("В выбранном слоте нет блоков: ") + DisplayName(*selectedBlock) + ".");
         audio_.PlayDenied();
         return;
     }
@@ -553,7 +553,7 @@ void Game::HandlePlaceBlock()
     const PlacementPreview preview = BuildPlacementPreview(*player);
     if (!preview.visible || !preview.valid)
     {
-        SetMessage(preview.reason.empty() ? "Cannot place block there." : preview.reason);
+        SetMessage(preview.reason.empty() ? "Здесь нельзя поставить блок." : preview.reason);
         audio_.PlayDenied();
         return;
     }
@@ -571,6 +571,7 @@ PlacementPreview Game::BuildPlacementPreview(const Player& player) const
     {
         return preview;
     }
+    const PlayerCommand command = BuildLocalPlayerCommand();
 
     const std::optional<BlockType> selectedBlock = GetSelectedBlockType(player);
     if (!selectedBlock.has_value())
@@ -583,7 +584,7 @@ PlacementPreview Game::BuildPlacementPreview(const Player& player) const
     GridPos placePos {};
     preview.selectedType = *selectedBlock;
 
-    if (currentInput_.bridgeMode)
+    if (command.bridgeMode)
     {
         const float forwardDistance = aimDirection.y < -0.45f ? 0.55f : 0.92f;
         placePos = world_.WorldToGrid(Vector3 {
@@ -604,7 +605,7 @@ PlacementPreview Game::BuildPlacementPreview(const Player& player) const
         }
         else
         {
-            preview.reason = "Aim at a block face";
+            preview.reason = "Наведитесь на грань блока";
             return preview;
         }
     }
@@ -617,9 +618,9 @@ PlacementPreview Game::BuildPlacementPreview(const Player& player) const
     {
         if (preview.reason.empty())
         {
-            preview.reason = currentInput_.bridgeMode
-                ? std::string("Bridge: ") + DisplayName(*selectedBlock)
-                : std::string("Place: ") + DisplayName(*selectedBlock);
+            preview.reason = command.bridgeMode
+                ? std::string("Мост: ") + DisplayName(*selectedBlock)
+                : std::string("Поставить: ") + DisplayName(*selectedBlock);
         }
     }
     else
@@ -645,44 +646,44 @@ bool Game::CanPlaceBlockAt(const GridPos& pos, const Player& player, std::string
 
     if (!IsBuildableBlock(requestedType))
     {
-        return fail("Select a block first");
+        return fail("Сначала выберите блок");
     }
     if (player.GetInventory().GetBlockCount(requestedType) <= 0)
     {
-        return fail(std::string("No ") + DisplayName(requestedType) + "s available");
+        return fail(std::string("Нет доступных блоков: ") + DisplayName(requestedType));
     }
     if (pos.y < kBuildMinY || pos.y > kBuildMaxY)
     {
-        return fail("Build height blocked");
+        return fail("Высота строительства заблокирована");
     }
     if (std::abs(pos.x) > kBuildMapRadius || std::abs(pos.z) > kBuildMapRadius)
     {
-        return fail("Outside build map");
+        return fail("За пределами зоны строительства");
     }
     if (!world_.IsAir(pos))
     {
-        return fail("Space occupied");
+        return fail("Место занято");
     }
     if (!HasAdjacentAnchorBlock(pos))
     {
-        return fail("Needs adjacent block");
+        return fail("Нужен соседний блок");
     }
 
     const Vector3 blockCenter = world_.GridToWorld(pos);
     if (DistanceSquared(player.GetPosition(), blockCenter) > 38.0f)
     {
-        return fail("Too far away");
+        return fail("Слишком далеко");
     }
     if (WouldBlockOverlapPlayer(pos, player.GetId()))
     {
-        return fail("Blocked by player");
+        return fail("Мешает игрок");
     }
 
-    for (const EnergyCore& core : cores_)
+    for (const EnergyCore& core : matchSimulation_.Cores())
     {
         if (core.IsAlive() && core.GetBlockPosition() == pos)
         {
-            return fail("EnergyCore protected");
+            return fail("Кор защищен");
         }
     }
 
@@ -712,7 +713,9 @@ bool Game::HasAdjacentAnchorBlock(const GridPos& pos) const
 
 std::optional<BlockType> Game::SelectPlacementBlockForPlayer(const Player& player, const GridPos& pos) const
 {
-    if (player.IsLocal())
+    // The local player and network-controlled players place their selected block;
+    // only bots fall back to the priority auto-pick (they have no selected slot).
+    if (player.IsLocal() || IsNetworkControlledPlayer(player.GetId()))
     {
         return GetSelectedBlockType(player);
     }
@@ -770,7 +773,7 @@ bool Game::TryPlaceBlockForPlayer(Player& player, const GridPos& pos, bool annou
     {
         if (announce)
         {
-            SetMessage("Select a block first.");
+            SetMessage("Сначала выберите блок.");
         }
         return false;
     }
@@ -778,16 +781,16 @@ bool Game::TryPlaceBlockForPlayer(Player& player, const GridPos& pos, bool annou
     {
         if (announce)
         {
-            SetMessage(std::string("No ") + DisplayName(blockType) + "s available.");
+            SetMessage(std::string("Нет доступных блоков: ") + DisplayName(blockType) + ".");
         }
         return false;
     }
 
-    if (!world_.PlaceBlock(pos, Block { blockType, player.GetTeamId(), true }))
+    if (!PlaceWorldBlock(pos, Block { blockType, player.GetTeamId(), true }, false, BlockDeltaReason::PlayerPlace, player.GetId()))
     {
         if (announce)
         {
-            SetMessage("Space already occupied.");
+            SetMessage("Место уже занято.");
         }
         return false;
     }
@@ -812,16 +815,16 @@ bool Game::TryPlaceBlockForPlayer(Player& player, const GridPos& pos, bool annou
     if (blockType == BlockType::ExplosiveBlock)
     {
         timedExplosions_.push_back(TimedExplosion { pos, player.GetTeamId(), player.GetId(), 2.6f, 2.7f });
-        AddEventMessage("TNT armed: 2.6s", Color { 255, 224, 122, 255 }, 1.8f);
+        AddEventMessage("TNT активирован: 2.6 с", Color { 255, 224, 122, 255 }, 1.8f);
     }
     if (player.IsLocal())
     {
         ++stats_.blocksPlaced;
-        SetMessage((currentInput_.bridgeMode ? "Bridge " : "") + std::string(DisplayName(blockType)) + " placed.");
+        SetMessage((BuildLocalPlayerCommand().bridgeMode ? "Мост: " : "") + std::string(DisplayName(blockType)) + " поставлен.");
     }
     else if (announce)
     {
-        SetMessage(player.GetName() + " placed a block.");
+        SetMessage(player.GetName() + " поставил блок.");
     }
 
     return true;

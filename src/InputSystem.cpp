@@ -231,6 +231,27 @@ PlayerInput InputSystem::Poll() const
         input.yawDelta += lookX * 0.055f * gamepadSensitivity_;
         input.pitchDelta -= lookY * 0.045f * gamepadSensitivity_;
     }
+
+    if (devKeyboard_)
+    {
+        // Developer kit: keyboard equivalents for the mouse-only actions so the
+        // game is fully playable without a mouse (manual testing / automation).
+        // Additive — OR'd onto whatever the mouse already produced.
+        // J = attack/break (press = swing/charge, hold = mine/hold), K = place,
+        // L = aim-down-sight (scope), arrow keys = look.
+        if (IsKeyPressed(KEY_J)) { input.attackPressed = true; }
+        if (IsKeyDown(KEY_J)) { input.attackHeld = true; }
+        if (IsKeyReleased(KEY_J)) { input.attackReleased = true; }
+        if (IsKeyPressed(KEY_K)) { input.placePressed = true; }
+        if (IsKeyDown(KEY_K)) { input.placeHeld = true; }
+        if (IsKeyDown(KEY_L)) { input.scopeHeld = true; }
+        constexpr float kKeyYaw = 0.035f;   // ~120°/s at 60 FPS
+        constexpr float kKeyPitch = 0.025f;
+        if (IsKeyDown(KEY_RIGHT)) { input.yawDelta += kKeyYaw; }
+        if (IsKeyDown(KEY_LEFT)) { input.yawDelta -= kKeyYaw; }
+        if (IsKeyDown(KEY_UP)) { input.pitchDelta += kKeyPitch; }
+        if (IsKeyDown(KEY_DOWN)) { input.pitchDelta -= kKeyPitch; }
+    }
     return input;
 }
 
@@ -262,6 +283,16 @@ void InputSystem::SetMouseSensitivity(float sensitivity)
 float InputSystem::GetMouseSensitivity() const
 {
     return mouseSensitivity_;
+}
+
+void InputSystem::SetDevKeyboard(bool enabled)
+{
+    devKeyboard_ = enabled;
+}
+
+bool InputSystem::IsDevKeyboard() const
+{
+    return devKeyboard_;
 }
 
 void InputSystem::SetGamepadDeadZone(float deadZone)

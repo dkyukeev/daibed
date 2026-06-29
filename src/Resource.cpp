@@ -5,13 +5,13 @@ const char* ToString(ResourceType type)
     switch (type)
     {
     case ResourceType::Iron:
-        return "Iron";
+        return "Железо";
     case ResourceType::Gold:
-        return "Gold";
+        return "Золото";
     case ResourceType::Crystal:
-        return "Crystal";
+        return "Кристалл";
     }
 
-    return "Unknown";
+    return "Неизвестно";
 }
 

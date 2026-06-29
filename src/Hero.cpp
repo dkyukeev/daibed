@@ -38,23 +38,23 @@ const char* HeroAnimationStateName(HeroAnimationState state)
 {
     switch (state)
     {
-    case HeroAnimationState::Idle: return "Idle";
-    case HeroAnimationState::Walk: return "Walk";
-    case HeroAnimationState::Run: return "Run";
-    case HeroAnimationState::Jump: return "Jump";
-    case HeroAnimationState::Fall: return "Fall";
-    case HeroAnimationState::Attack: return "Attack";
-    case HeroAnimationState::Hurt: return "Hurt";
-    case HeroAnimationState::Death: return "Death";
-    case HeroAnimationState::Ability1: return "Ability1";
-    case HeroAnimationState::Ability2: return "Ability2";
-    case HeroAnimationState::Ultimate: return "Ultimate";
-    case HeroAnimationState::WindUp: return "WindUp";
-    case HeroAnimationState::Cast: return "Cast";
-    case HeroAnimationState::Recovery: return "Recovery";
-    case HeroAnimationState::Overloaded: return "Overloaded";
-    case HeroAnimationState::UltPrimed: return "UltPrimed";
-    case HeroAnimationState::DeathSacrifice: return "DeathSacrifice";
+    case HeroAnimationState::Idle: return "Покой";
+    case HeroAnimationState::Walk: return "Ходьба";
+    case HeroAnimationState::Run: return "Бег";
+    case HeroAnimationState::Jump: return "Прыжок";
+    case HeroAnimationState::Fall: return "Падение";
+    case HeroAnimationState::Attack: return "Атака";
+    case HeroAnimationState::Hurt: return "Урон";
+    case HeroAnimationState::Death: return "Смерть";
+    case HeroAnimationState::Ability1: return "Способность 1";
+    case HeroAnimationState::Ability2: return "Способность 2";
+    case HeroAnimationState::Ultimate: return "Ульта";
+    case HeroAnimationState::WindUp: return "Замах";
+    case HeroAnimationState::Cast: return "Каст";
+    case HeroAnimationState::Recovery: return "Восстановление";
+    case HeroAnimationState::Overloaded: return "Перегрузка";
+    case HeroAnimationState::UltPrimed: return "Ульта готова";
+    case HeroAnimationState::DeathSacrifice: return "Жертва";
     }
-    return "Unknown";
+    return "Неизвестно";
 }

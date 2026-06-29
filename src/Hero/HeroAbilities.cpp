@@ -1,6 +1,7 @@
 #include "Game.h"
 #include "HeroSystem.h"
 #include "RangedCombat.h"
+#include "VecConvert.h"
 
 #include "raylib.h"
 
@@ -148,32 +149,45 @@ std::string FormatTenths(float value)
 
 void Game::UseHeroAbilityInputs(Player& player)
 {
-    if (shopOpen_ || inventoryOpen_)
+    // Local input -> PlayerCommand -> action application. The command carries
+    // the same flags currentInput_ would, so behaviour is unchanged.
+    ApplyPlayerActionCommand(player, BuildLocalPlayerCommand());
+}
+
+// Applies the per-tick action intents of a command (hero abilities) to a
+// player. The single entry point the network smoke and the local input path
+// share. Other actions (attack/break/place/utility) still live in their own
+// command-driven methods — see docs/NETWORK_PREP_PLAN.md.
+bool Game::ApplyPlayerActionCommand(Player& player, const PlayerCommand& command)
+{
+    if (player.IsLocal() && (shopOpen_ || inventoryOpen_))
     {
-        return;
+        return false;
     }
 
-    if (currentInput_.heroActive1Pressed)
+    bool used = false;
+    if (command.useAbility1)
     {
-        UseHeroAbility(player, HeroAbilitySlot::Active1);
+        used = UseHeroAbility(player, HeroAbilitySlot::Active1) || used;
     }
-    if (currentInput_.heroActive2Pressed)
+    if (command.useAbility2)
     {
-        UseHeroAbility(player, HeroAbilitySlot::Active2);
+        used = UseHeroAbility(player, HeroAbilitySlot::Active2) || used;
     }
-    if (currentInput_.heroUltimatePressed)
+    if (command.useUltimate)
     {
-        if (player.GetHeroId() == HeroId::Orbita)
+        if (player.IsLocal() && player.GetHeroId() == HeroId::Orbita)
         {
             orbitaTeleportPreview_ = BuildOrbitaTeleportPreview(player);
             orbitaTeleportPreviewTimer_ = orbitaTeleportPreview_.visible ? 0.28f : 0.0f;
         }
-        else
+        else if (player.IsLocal())
         {
             orbitaTeleportPreviewTimer_ = 0.0f;
         }
-        UseHeroAbility(player, HeroAbilitySlot::Ultimate);
+        used = UseHeroAbility(player, HeroAbilitySlot::Ultimate) || used;
     }
+    return used;
 }
 
 bool Game::UseHeroAbility(Player& player, HeroAbilitySlot slot)
@@ -309,7 +323,7 @@ bool Game::UseLikhoAbility(Player& player, HeroAbilitySlot slot)
         }
         if (disguiseTarget == nullptr)
         {
-            SetMessage("Likho: aim at a visible enemy to copy their appearance.", 2.0f);
+            SetMessage("Лихо: наведитесь на видимого врага, чтобы скопировать облик.", 2.0f);
             audio_.PlayDenied();
             return false;
         }
@@ -364,7 +378,7 @@ bool Game::UseSvidetelAbility(Player& player, HeroAbilitySlot slot)
         const std::optional<RaycastHit> hit = world_.Raycast(origin, direction, 5.5f);
         if (!hit.has_value() || hit->blockData.type == BlockType::EnergyCoreBlock)
         {
-            SetMessage("Свидетель: наведитесь на обычные блоки вдали от Core.", 2.0f);
+            SetMessage("Свидетель: наведитесь на обычные блоки вдали от Кора.", 2.0f);
             audio_.PlayDenied();
             return false;
         }
@@ -397,7 +411,7 @@ bool Game::UseSvidetelAbility(Player& player, HeroAbilitySlot slot)
                 }
                 bool nearCore = false;
                 const Vector3 center = world_.GridToWorld(pos);
-                for (const EnergyCore& core : cores_)
+                for (const EnergyCore& core : matchSimulation_.Cores())
                 {
                     if (DistanceSquared(center, world_.GridToWorld(core.GetBlockPosition())) < 12.0f)
                     {
@@ -410,14 +424,14 @@ bool Game::UseSvidetelAbility(Player& player, HeroAbilitySlot slot)
                     continue;
                 }
                 svidetelPhaseBlocks_.push_back(SvidetelPhaseBlock { pos, *block, ability.durationSeconds });
-                world_.RemoveBlock(pos);
+                RemoveWorldBlock(pos, BlockDeltaReason::PhaseRemove, player.GetId());
                 AddWorldEffect(center, HeroAccentColor(HeroId::Svidetel), 0.30f, 0.42f);
                 ++phased;
             }
         }
         if (phased == 0)
         {
-            SetMessage("Свидетель: участок защищен или слишком близко к Core.", 2.0f);
+            SetMessage("Свидетель: участок защищен или слишком близко к Кору.", 2.0f);
             audio_.PlayDenied();
             return false;
         }
@@ -435,7 +449,7 @@ bool Game::UseSvidetelAbility(Player& player, HeroAbilitySlot slot)
         }
         else
         {
-            SetMessage("Свидетель видит контуры врагов, ресурсов и Core.", 2.6f);
+            SetMessage("Свидетель видит контуры врагов, ресурсов и Коров.", 2.6f);
         }
     }
 
@@ -688,7 +702,7 @@ bool Game::TryRadonCoreSacrifice(EnergyCore& core)
         EmitRadonCoreWave(corePosition, player.GetTeamId(), player.GetId(), 7.2f, 0.0f, 9.4f);
         AddWorldEffect(corePosition, player.Forward(), HeroAccentColor(HeroId::Radon), 1.8f, 1.05f, WorldEffectKind::Sacrifice);
         AddEventMessage("Радон принял разрушение Кора на себя. Кор оставлен на 20 HP.", HeroAccentColor(HeroId::Radon), 5.0f);
-        AddKillFeed("Радон спас Core ценой жизни", HeroAccentColor(HeroId::Radon), 6.0f);
+        AddKillFeed("Радон спас Кор ценой жизни", HeroAccentColor(HeroId::Radon), 6.0f);
         return true;
     }
     return false;
@@ -800,8 +814,8 @@ bool Game::UseOrbitaAbility(Player& player, HeroAbilitySlot slot)
         heroState.orbitaTeleportDistance = preview.travelDistance;
         heroState.orbitaTeleportHealthCost = preview.healthCost;
         AddWorldEffect(preview.destination, preview.direction, HeroAccentColor(HeroId::Orbita), 0.82f, 4.0f, WorldEffectKind::Ring);
-        AddFloatingText("TELEPORT?", preview.destination, HeroAccentColor(HeroId::Orbita));
-        SetMessage("Orbita: destination marked. Press ultimate again within 4 seconds.", 3.0f);
+        AddFloatingText("ТЕЛЕПОРТ?", preview.destination, HeroAccentColor(HeroId::Orbita));
+        SetMessage("Орбита: точка отмечена. Нажмите ульту еще раз в течение 4 секунд.", 3.0f);
         audio_.PlayPickup();
         return true;
     }
@@ -879,7 +893,7 @@ bool Game::UseOrbitaPhantomBlocks(Player& player)
             continue;
         }
 
-        if (world_.PlaceBlock(pos, Block { BlockType::EnergyGlassBlock, player.GetTeamId(), true }))
+        if (PlaceWorldBlock(pos, Block { BlockType::EnergyGlassBlock, player.GetTeamId(), true }, false, BlockDeltaReason::TemporaryPlace, player.GetId()))
         {
             placedPositions.push_back(pos);
             heroTemporaryBlocks_.push_back(HeroTemporaryBlock {
@@ -1032,7 +1046,7 @@ bool Game::UseOrbitaTeleport(Player& player)
     {
         state.orbitaTeleportPrimed = false;
         state.orbitaTeleportPreviewTimer = 0.0f;
-        SetMessage("Orbita: teleport cancelled. " + reason, 2.0f);
+        SetMessage("Орбита: телепорт отменен. " + reason, 2.0f);
         return false;
     }
 
@@ -1060,7 +1074,7 @@ bool Game::UseOrbitaTeleport(Player& player)
 
 bool Game::IsOrbitaCoreRestrictedPosition(Vector3 position, int teamId) const
 {
-    for (const EnergyCore& core : cores_)
+    for (const EnergyCore& core : matchSimulation_.Cores())
     {
         if (!core.IsAlive() || core.GetTeamId() == teamId)
         {
@@ -1412,9 +1426,10 @@ bool Game::UseBromUltimate(Player& player)
 {
     constexpr float absorbRadiusSq = 7.0f * 7.0f;
     int absorbed = 0;
-    for (ResourcePickup& pickup : pickups_)
+    for (ResourcePickup& pickup : matchSimulation_.Pickups())
     {
-        if (pickup.collected || DistanceSquared(pickup.position, player.GetPosition()) > absorbRadiusSq)
+        const Vector3 pickupPos = ToVector3(pickup.position);
+        if (pickup.collected || DistanceSquared(pickupPos, player.GetPosition()) > absorbRadiusSq)
         {
             continue;
         }
@@ -1422,7 +1437,7 @@ bool Game::UseBromUltimate(Player& player)
         player.GetInventory().AddResource(pickup.type, pickup.amount);
         absorbed += pickup.amount;
         pickup.collected = true;
-        AddWorldEffect(pickup.position, HeroAccentColor(HeroId::Brom), 0.18f, 0.18f);
+        AddWorldEffect(pickupPos, HeroAccentColor(HeroId::Brom), 0.18f, 0.18f);
     }
 
     const int turretCount = std::min(5, player.GetInventory().GetResource(ResourceType::Gold) / kBromTurretGoldCost);

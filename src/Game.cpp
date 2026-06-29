@@ -89,6 +89,72 @@ constexpr FpsLimitOption kFpsLimits[] {
     { 0, "Без ограничений" }
 };
 
+// --- Fixed-step input buffering ---------------------------------------------
+// With a fixed-step simulation, a render frame may run zero, one or several
+// simulation ticks. To keep one-shot (edge) inputs from being lost on a frame
+// that runs zero ticks, or fired twice on a frame that runs several, the local
+// input is accumulated into a pending buffer: continuous fields take the latest
+// value while one-shot edges are OR-accumulated and cleared once a tick reads
+// them. At the default 60 FPS (one tick per frame) this is behaviour-identical
+// to consuming the frame input directly.
+void ClearOneShotEdges(PlayerInput& in)
+{
+    in.jump = false;
+    in.attackPressed = false;
+    in.attackReleased = false;
+    in.middlePressed = false;
+    in.placePressed = false;
+    in.cameraTogglePressed = false;
+    in.sprintTapped = false;
+    in.interactPressed = false;
+    in.inventoryPressed = false;
+    in.debugRespawnPressed = false;
+    in.restartPressed = false;
+    in.exitPressed = false;
+    in.shootPressed = false;
+    in.fireballPressed = false;
+    in.healPressed = false;
+    in.teleportPressed = false;
+    in.dashPressed = false;
+    in.molotovPressed = false;
+    in.alarmPressed = false;
+    in.heroActive1Pressed = false;
+    in.heroActive2Pressed = false;
+    in.heroUltimatePressed = false;
+    in.dropPressed = false;
+    in.botDebugPressed = false;
+}
+
+PlayerInput MergePendingInput(const PlayerInput& pending, const PlayerInput& frame)
+{
+    PlayerInput merged = frame; // continuous: move / held / aim / wheel / slot = latest
+    merged.jump |= pending.jump;
+    merged.attackPressed |= pending.attackPressed;
+    merged.attackReleased |= pending.attackReleased;
+    merged.middlePressed |= pending.middlePressed;
+    merged.placePressed |= pending.placePressed;
+    merged.cameraTogglePressed |= pending.cameraTogglePressed;
+    merged.sprintTapped |= pending.sprintTapped;
+    merged.interactPressed |= pending.interactPressed;
+    merged.inventoryPressed |= pending.inventoryPressed;
+    merged.debugRespawnPressed |= pending.debugRespawnPressed;
+    merged.restartPressed |= pending.restartPressed;
+    merged.exitPressed |= pending.exitPressed;
+    merged.shootPressed |= pending.shootPressed;
+    merged.fireballPressed |= pending.fireballPressed;
+    merged.healPressed |= pending.healPressed;
+    merged.teleportPressed |= pending.teleportPressed;
+    merged.dashPressed |= pending.dashPressed;
+    merged.molotovPressed |= pending.molotovPressed;
+    merged.alarmPressed |= pending.alarmPressed;
+    merged.heroActive1Pressed |= pending.heroActive1Pressed;
+    merged.heroActive2Pressed |= pending.heroActive2Pressed;
+    merged.heroUltimatePressed |= pending.heroUltimatePressed;
+    merged.dropPressed |= pending.dropPressed;
+    merged.botDebugPressed |= pending.botDebugPressed;
+    return merged;
+}
+
 float DistanceSquared(Vector3 a, Vector3 b)
 {
     const float dx = a.x - b.x;
@@ -106,6 +172,13 @@ float Length2D(Vector3 value)
 float Dot2D(Vector3 a, Vector3 b)
 {
     return a.x * b.x + a.z * b.z;
+}
+
+bool SameBlock(const Block& a, const Block& b)
+{
+    return a.type == b.type
+        && a.teamId == b.teamId
+        && a.breakable == b.breakable;
 }
 
 Vector3 Normalize2D(Vector3 value)
@@ -142,7 +215,7 @@ float YawFromDirection(Vector3 direction)
 
 std::string BoolCoreState(bool alive)
 {
-    return alive ? "Core online." : "Core destroyed. Final Life!";
+    return alive ? "Кор работает." : "Кор уничтожен. Последняя жизнь!";
 }
 
 Color HeroAccentColor(HeroId id)
@@ -178,6 +251,11 @@ bool Game::Initialize(bool headless)
 {
     headless_ = headless;
     suppressLocalFeedback_ = headless_;
+    // MatchSimulation is the authoritative access point for players (Phase 6A).
+    // Storage stays in Game's players_ for now (Player isn't raylib-free yet);
+    // the pointer is stable across push_back since it points at the vector.
+    matchSimulation_.SetPlayers(&players_);
+    CrashLogger::Heartbeat("initialize-settings");
     LoadSettings();
     LoadBotTuning();
     gameplayFov_ = fov_;
@@ -196,12 +274,14 @@ bool Game::Initialize(bool headless)
     SetConfigFlags(windowFlags);
     resolutionIndex_ = std::clamp(resolutionIndex_, 0, static_cast<int>(std::size(kWindowResolutions)) - 1);
     const WindowResolution& resolution = kWindowResolutions[resolutionIndex_];
+    CrashLogger::Heartbeat("initialize-window");
     InitWindow(resolution.width, resolution.height, "DaiBed " DAIBED_VERSION);
     if (!IsWindowReady())
     {
         return false;
     }
 
+    CrashLogger::Heartbeat("initialize-audio");
     ApplyWindowSettings();
     ApplyFrameRateLimit();
     SetExitKey(KEY_NULL);
@@ -211,14 +291,17 @@ bool Game::Initialize(bool headless)
     audio_.SetCategoryVolumes(sfxVolume_, ambientVolume_);
     music_.Initialize(audioReady);
     music_.SetVolume(masterVolume_, musicVolume_);
+    CrashLogger::Heartbeat("initialize-renderer");
     renderer_.Initialize();
     renderer_.SetWorldRenderDistance(kDrawDistances[drawDistanceIndex_]);
     renderer_.SetShadowQuality(shadowQuality_);
+    CrashLogger::Heartbeat("initialize-post");
     postProcessor_.Initialize();
 
+    CrashLogger::Heartbeat("initialize-network");
     network_.Start();
     network_.Connect();
-    SetMessage("Choose a mode and start the match.", 4.0f);
+    SetMessage("Выберите режим и начните матч.", 4.0f);
     return true;
 }
 
@@ -247,6 +330,24 @@ bool Game::ShouldClose() const
 void Game::SetSelectedBiome(ArenaBiome biome)
 {
     arenaBiome_ = biome;
+}
+
+void Game::SetSelectedMode(MatchMode mode)
+{
+    selectedMode_ = mode;
+    selectedTeamId_ = std::clamp(selectedTeamId_, 0, TeamCountForMode() - 1);
+    selectedBotCount_ = std::clamp(selectedBotCount_, 0, MaxBotCountForSelection());
+}
+
+void Game::SetSelectedTeamSize(int teamSize)
+{
+    selectedTeamSize_ = std::clamp(teamSize, 1, 4);
+    selectedBotCount_ = std::clamp(selectedBotCount_, 0, MaxBotCountForSelection());
+}
+
+void Game::SetArenaLayout(ArenaLayout layout)
+{
+    arenaLayout_ = layout;
 }
 
 void Game::SetBotDifficulty(BotDifficulty difficulty)
@@ -278,11 +379,21 @@ void Game::SetProfilingEnabled(bool enabled)
     profilingEnabled_ = enabled;
 }
 
+void Game::SetDevKeyboard(bool enabled)
+{
+    input_.SetDevKeyboard(enabled);
+}
+
 void Game::HandleInput()
 {
     if (screen_ == GameScreen::MainMenu)
     {
         HandleMenuInput();
+        return;
+    }
+    if (screen_ == GameScreen::Multiplayer)
+    {
+        HandleMultiplayerInput();
         return;
     }
     if (screen_ == GameScreen::HeroSelect)
@@ -315,13 +426,13 @@ void Game::HandleInput()
         return;
     }
 
-    if (winnerTeamId_.has_value())
+    if (matchSimulation_.HasWinner())
     {
         if (currentInput_.restartPressed)
         {
             SetupMatch();
             UpdateCamera(0.016f);
-            SetMessage("New match started. Protect your EnergyCore.", 3.0f);
+            SetMessage("Новый матч начался. Защищайте Кор.", 3.0f);
         }
         else if (currentInput_.exitPressed)
         {
@@ -349,13 +460,13 @@ void Game::HandleInput()
         if (currentInput_.cameraTogglePressed)
         {
             cameraController_.ToggleMode();
-            SetMessage(std::string("Spectator camera: ") + cameraController_.GetModeName(), 1.6f);
+            SetMessage(std::string("Камера наблюдателя: ") + cameraController_.GetModeName(), 1.6f);
         }
 #if DAIBED_DEVELOPER_BUILD
         if (currentInput_.botDebugPressed)
         {
             showBotDebug_ = !showBotDebug_;
-            SetMessage(std::string("Bot debug: ") + (showBotDebug_ ? "on" : "off"), 1.4f);
+            SetMessage(std::string("Отладка ботов: ") + (showBotDebug_ ? "вкл." : "выкл."), 1.4f);
         }
 #endif
         currentInput_ = PlayerInput {};
@@ -439,13 +550,13 @@ void Game::HandleInput()
     if (!shopOpen_ && currentInput_.cameraTogglePressed)
     {
         cameraController_.ToggleMode();
-        SetMessage(std::string("Camera: ") + cameraController_.GetModeName(), 1.6f);
+        SetMessage(std::string("Камера: ") + cameraController_.GetModeName(), 1.6f);
     }
 #if DAIBED_DEVELOPER_BUILD
     if (currentInput_.botDebugPressed)
     {
         showBotDebug_ = !showBotDebug_;
-        SetMessage(std::string("Bot debug: ") + (showBotDebug_ ? "on" : "off"), 1.4f);
+        SetMessage(std::string("Отладка ботов: ") + (showBotDebug_ ? "вкл." : "выкл."), 1.4f);
     }
 #endif
 
@@ -546,7 +657,7 @@ void Game::HandleInput()
                 : false;
             if (purchaseMessage.empty())
             {
-                purchaseMessage = "No shop item in that row.";
+                purchaseMessage = "В этой строке магазина нет товара.";
             }
             SetMessage(purchaseMessage);
             AddEventMessage(purchaseMessage, bought ? Color { 128, 238, 166, 255 } : Color { 255, 130, 130, 255 });
@@ -569,11 +680,11 @@ void Game::HandleInput()
             const ItemStack stack = localPlayer->GetInventory().GetHotbarSlots()[slot];
             if (stack.IsEmpty())
             {
-                SetMessage("Selected empty slot.", 1.0f);
+                SetMessage("Выбран пустой слот.", 1.0f);
             }
             else
             {
-                SetMessage(std::string("Selected ") + ItemDisplayName(stack.type) + ".", 1.2f);
+                SetMessage(std::string("Выбрано: ") + ItemDisplayName(stack.type) + ".", 1.2f);
             }
         }
     }
@@ -594,7 +705,7 @@ void Game::HandleInput()
             const ItemStack stack = localPlayer->GetInventory().GetHotbarSlots()[selectedHotbarSlot_];
             if (!stack.IsEmpty())
             {
-                SetMessage(std::string("Selected ") + ItemDisplayName(stack.type) + ".", 0.8f);
+                SetMessage(std::string("Выбрано: ") + ItemDisplayName(stack.type) + ".", 0.8f);
             }
         }
     }
@@ -606,7 +717,7 @@ void Game::HandleInput()
         if (team != nullptr && team->coreAlive && !localPlayer->IsEliminated())
         {
             localPlayer->RespawnAtHome();
-            SetMessage("Debug respawn.");
+            SetMessage("Отладочный респаун.");
         }
     }
 #endif
@@ -632,13 +743,13 @@ void Game::Update(float dt)
         });
         audio_.SetListener(audioCamera.position, Vector3 { -forward.z, 0.0f, forward.x });
         MusicMood mood = MusicMood::Menu;
-        if (winnerTeamId_.has_value())
+        if (matchSimulation_.HasWinner())
         {
             mood = MusicMood::Victory;
         }
         else if (screen_ == GameScreen::Playing || screen_ == GameScreen::Paused)
         {
-            mood = matchTime_ >= kCoreCollapseSeconds - 90.0f ? MusicMood::Intense : MusicMood::Match;
+            mood = matchSimulation_.MatchTimeSeconds() >= kCoreCollapseSeconds - 90.0f ? MusicMood::Intense : MusicMood::Match;
         }
         music_.Update(mood);
     }
@@ -648,27 +759,112 @@ void Game::Update(float dt)
         return;
     }
 
-    const int maxTicks = headless_ ? 1024 : 32;
-    const int ticks = automatch_.active ? std::clamp(automatchTicksPerFrame_, 1, maxTicks) : 1;
-    for (int i = 0; i < ticks; ++i)
+    const float fixedDt = matchSimulation_.FixedDeltaSeconds();
+    const int maxSteps = headless_ ? 1024 : 32;
+
+    if (automatch_.active)
     {
-        const auto started = profilingEnabled_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
-        UpdateMatchSimulation(dt);
-        if (profilingEnabled_)
+        // Headless / automatch fast-forward: run a fixed number of fixed-size
+        // ticks per frame, independent of the real frame rate. The simulation is
+        // fixed-step, so stepping does NOT use the frame dt — determinism does
+        // not depend on FPS. fixedDt == 1/60 == the value the old loop passed in
+        // (Update is fed 1/60 by RunAutomatchBatch), so this is value-preserving.
+        const int ticks = std::clamp(automatchTicksPerFrame_, 1, maxSteps);
+        int stepped = 0;
+        for (int i = 0; i < ticks; ++i)
         {
-            profileSimulationMs_ += std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - started).count();
-            ++profileSimulationTicks_;
+            StepSimulationProfiled(fixedDt);
+            ++stepped;
+            // Match the previous loop: stop the moment the batch finishes so we
+            // don't keep ticking a completed match (keeps stats byte-identical).
+            if (!automatch_.active)
+            {
+                break;
+            }
         }
-        if (!automatch_.active)
-        {
-            break;
-        }
+        lastSimStepCount_ = stepped;
+        renderAlpha_ = 0.0f;
+        // Age presentation by the simulated time during fast-forward (matches the
+        // old per-tick tail); no-op when headless.
+        UpdatePresentation(static_cast<float>(stepped) * fixedDt);
+        return;
     }
+
+    // Interactive: accumulate real frame time and advance the simulation at the
+    // fixed rate. Render is decoupled — a frame may run 0, 1 or several steps.
+    simulationAccumulator_ += dt;
+    const float maxAccumulated = fixedDt * static_cast<float>(maxSteps);
+    if (simulationAccumulator_ > maxAccumulated)
+    {
+        // Spiral-of-death guard: after a long stall (window drag, breakpoint),
+        // drop the backlog instead of trying to simulate it all this frame.
+        ++accumulatorClampCount_;
+        simulationAccumulator_ = maxAccumulated;
+    }
+
+    // Fold this frame's local input into the pending sim input so one-shot edges
+    // survive a zero-step frame and fire on exactly one tick.
+    pendingLocalInput_ = MergePendingInput(pendingLocalInput_, currentInput_);
+    const PlayerInput frameInput = currentInput_;
+
+    int steps = 0;
+    const auto stepsStarted = std::chrono::steady_clock::now();
+    while (simulationAccumulator_ >= fixedDt)
+    {
+        currentInput_ = pendingLocalInput_;
+        StepSimulationProfiled(fixedDt);
+        ClearOneShotEdges(pendingLocalInput_);
+        simulationAccumulator_ -= fixedDt;
+        ++steps;
+    }
+    lastSimStepMs_ = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - stepsStarted).count();
+    lastSimStepCount_ = steps;
+    currentInput_ = frameInput; // restore for per-frame presentation
+
+    // Interpolation factor toward the next tick. Plumbed for future render
+    // interpolation; not yet applied to entity rendering (deferred).
+    renderAlpha_ = fixedDt > 0.0f ? simulationAccumulator_ / fixedDt : 0.0f;
+
+    UpdatePresentation(dt);
+}
+
+void Game::StepSimulationProfiled(float dt)
+{
+    const auto started = profilingEnabled_
+        ? std::chrono::steady_clock::now()
+        : std::chrono::steady_clock::time_point {};
+    UpdateMatchSimulation(dt);
+    if (profilingEnabled_)
+    {
+        profileSimulationMs_ += std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started).count();
+        ++profileSimulationTicks_;
+    }
+}
+
+void Game::UpdatePresentation(float dt)
+{
+    // Per-frame presentation, decoupled from the fixed-step simulation so it
+    // stays smooth regardless of how many sim ticks ran this frame (0 at high
+    // FPS, several after a stall). Placement preview + fast placement + the
+    // network mock stay per-tick inside UpdateMatchSimulation (they are gameplay
+    // / per-tick replication); only camera, feedback and the combat preview run
+    // here per frame.
+    if (headless_)
+    {
+        return;
+    }
+    UpdateCombatPreview();
+    UpdateFeedback(dt);
+    UpdateCamera(dt);
 }
 
 void Game::UpdateMatchSimulation(float dt)
 {
+    // MatchSimulation owns the authoritative simulation clock (single source of
+    // truth for the tick). See docs/NETWORK_PREP_PLAN.md.
+    matchSimulation_.AdvanceTick();
     if (!players_.empty())
     {
         simulationOrderOffset_ = (simulationOrderOffset_ + 1) % players_.size();
@@ -679,26 +875,26 @@ void Game::UpdateMatchSimulation(float dt)
     }
     UpdateHeroPassives(dt);
 
-    if (!winnerTeamId_.has_value())
+    if (!matchSimulation_.HasWinner())
     {
-        matchTime_ += dt;
+        matchSimulation_.AdvanceClock(dt);
         if (automatch_.active)
         {
-            if (!coreCollapseTriggered_ && !coreCollapseWarned_ && matchTime_ >= kCoreCollapseSeconds - 60.0f)
+            if (!coreCollapseTriggered_ && !coreCollapseWarned_ && matchSimulation_.MatchTimeSeconds() >= kCoreCollapseSeconds - 60.0f)
             {
                 coreCollapseWarned_ = true;
-                AddKillFeed("Sudden death через 60 секунд", Color { 255, 118, 118, 255 }, 8.0f);
+            AddKillFeed("Внезапная смерть через 60 секунд", Color { 255, 118, 118, 255 }, 8.0f);
             }
-            if (!coreCollapseTriggered_ && matchTime_ >= kCoreCollapseSeconds)
+            if (!coreCollapseTriggered_ && matchSimulation_.MatchTimeSeconds() >= kCoreCollapseSeconds)
             {
                 TriggerCoreCollapse();
             }
         }
-        if (!generatorBoostTriggered_ && matchTime_ >= 10.0f * 60.0f)
+        if (!generatorBoostTriggered_ && matchSimulation_.MatchTimeSeconds() >= 10.0f * 60.0f)
         {
             generatorBoostTriggered_ = true;
-            AddEventMessage("10:00 Generator speed increased", Color { 255, 235, 142, 255 }, 5.0f);
-            AddKillFeed("Generators accelerated", Color { 255, 235, 142, 255 }, 6.0f);
+            AddEventMessage("10:00 Скорость генераторов увеличена", Color { 255, 235, 142, 255 }, 5.0f);
+            AddKillFeed("Генераторы ускорены", Color { 255, 235, 142, 255 }, 6.0f);
             audio_.PlayPurchase();
         }
         UpdateLocalPlayer(dt);
@@ -727,22 +923,22 @@ void Game::UpdateMatchSimulation(float dt)
         UpdateBaseHealing(dt);
         UpdateDamageCredits(dt);
         HandleDeathsAndRespawns();
-        winnerTeamId_ = rules_.CheckWinCondition(teams_, players_);
-        if (!winnerTeamId_.has_value() && coreCollapseTriggered_ && suddenDeathTiebreakTeamId_.has_value())
+        matchSimulation_.SetWinner(rules_.CheckWinCondition(teams_, players_));
+        if (!matchSimulation_.HasWinner() && coreCollapseTriggered_ && suddenDeathTiebreakTeamId_.has_value())
         {
             const bool anyTeamStillAlive = std::any_of(
                 players_.begin(), players_.end(),
                 [](const Player& player) { return !player.IsEliminated(); });
             if (!anyTeamStillAlive)
             {
-                winnerTeamId_ = suddenDeathTiebreakTeamId_;
+                matchSimulation_.SetWinner(suddenDeathTiebreakTeamId_);
             }
         }
-        if (winnerTeamId_.has_value())
+        if (matchSimulation_.HasWinner())
         {
-            const Team* winner = FindTeam(*winnerTeamId_);
-            SetMessage((winner != nullptr ? winner->name : "A") + std::string(" team wins!"), 8.0f);
-            AddEventMessage((winner != nullptr ? winner->name : "A") + std::string(" team wins!"), Color { 255, 235, 142, 255 }, 7.0f);
+            const Team* winner = FindTeam(matchSimulation_.WinnerTeamId());
+            SetMessage((winner != nullptr ? winner->name : "Команда") + std::string(" побеждает!"), 8.0f);
+            AddEventMessage((winner != nullptr ? winner->name : "Команда") + std::string(" побеждает!"), Color { 255, 235, 142, 255 }, 7.0f);
             audio_.PlayVictory();
         }
     }
@@ -770,13 +966,15 @@ void Game::UpdateMatchSimulation(float dt)
 
     if (!headless_)
     {
+        // Per-tick local gameplay + per-tick network replication. The placement
+        // preview is recomputed here because UpdateFastPlacement consumes it.
+        // Camera / feedback / combat preview moved to UpdatePresentation (per
+        // frame) so they stay smooth at render rates above the tick rate.
         UpdatePlacementPreview();
-        UpdateCombatPreview();
         UpdateFastPlacement(dt);
-        UpdateFeedback(dt);
         SendMockNetworkInput();
-        UpdateCamera(dt);
     }
+    UpdatePredictionStats(dt);
 }
 
 void Game::Render()
@@ -807,6 +1005,12 @@ void Game::Render()
     if (screen_ == GameScreen::MainMenu)
     {
         RenderMainMenu();
+        EndDrawing();
+        return;
+    }
+    if (screen_ == GameScreen::Multiplayer)
+    {
+        RenderMultiplayerMenu();
         EndDrawing();
         return;
     }
@@ -845,11 +1049,11 @@ void Game::Render()
     renderer_.RenderScene(
         world_,
         teams_,
-        cores_,
+        matchSimulation_.Cores(),
         players_,
-        generators_,
-        pickups_,
-        droppedItems_,
+        matchSimulation_.Generators(),
+        matchSimulation_.Pickups(),
+        matchSimulation_.DroppedItems(),
         heroDevices,
         orbitaTeleportPreview,
         placementPreview_,
@@ -901,13 +1105,13 @@ void Game::Render()
             stats_,
             hitMarkerTimer_,
             reducedFlashes_ ? damageFlashTimer_ * 0.25f : damageFlashTimer_,
-            matchTime_,
+            matchSimulation_.MatchTimeSeconds(),
             KeyLabel(input_.GetBindings().heroActive1),
             KeyLabel(input_.GetBindings().heroActive2),
             KeyLabel(input_.GetBindings().heroUltimate),
             sniperScopeBlend_,
             sniperMagnification_,
-            winnerTeamId_);
+            matchSimulation_.Winner());
 
         RenderKillFeed();
         RenderDeathOverlay(*localPlayer);
@@ -928,7 +1132,7 @@ void Game::Render()
         {
             RenderGameHints(*localPlayer);
         }
-        if (tutorialMode_ || matchTime_ < 72.0f)
+        if (tutorialMode_ || matchSimulation_.MatchTimeSeconds() < 72.0f)
         {
             RenderOnboarding(*localPlayer);
         }
@@ -941,8 +1145,22 @@ void Game::Render()
         if (showBotDebug_)
         {
             RenderBotDebug();
+            RenderNetworkDebugOverlay();
+            // Fixed-step loop diagnostics (item 7): steps run this frame, the
+            // interpolation alpha, time spent stepping, and how many times the
+            // accumulator hit the spiral-of-death clamp.
+            DrawText(
+                TextFormat(
+                    "sim-loop steps/frame=%d alpha=%.2f stepMs=%.2f clamps=%llu tick=%u acc=%.3fs",
+                    lastSimStepCount_, renderAlpha_, lastSimStepMs_, accumulatorClampCount_,
+                    matchSimulation_.CurrentTick(), simulationAccumulator_),
+                22, GetScreenHeight() - 26, 14, Color { 128, 238, 166, 255 });
         }
 #endif
+        if (networkMode_ == NetworkMode::LocalClient && !showBotDebug_)
+        {
+            RenderNetworkDebugOverlay();
+        }
         RenderAutomatchOverlay();
         if (scoreboardHeld_)
         {
@@ -958,11 +1176,34 @@ void Game::Render()
     EndDrawing();
 }
 
+void Game::RenderNetworkDebugOverlay() const
+{
+    const Color color = predictionCorrectionFlashTimer_ > 0.0f
+        ? Color { 255, 201, 112, 255 }
+        : Color { 112, 214, 255, 255 };
+    DrawText(
+        TextFormat(
+            "net ping=%.0fms age=%.0fms loss=%.1f%% interp=%.0fms predErr=%.3fm corr/s=%.1f unacked=%d snapshots=%d authTick=%u",
+            estimatedPingMs_, networkSnapshotAgeMs_, networkPacketLossEstimate_ * 100.0f,
+            networkInterpolationDelayMs_,
+            predictionError_, predictionCorrectionsPerSecond_, unackedCommandCount_,
+            static_cast<int>(remoteSnapshotBuffer_.size()), lastAuthoritativeTick_),
+        22, GetScreenHeight() - 44, 14, color);
+    DrawText(
+        TextFormat(
+            "net rx=%.0fB/s %.1fpps full/delta=%u/%u size=%zu/%zu drop/ignore=%u/%u resync=%u",
+            networkBytesPerSecond_, networkPacketsPerSecond_,
+            networkFullSnapshots_, networkDeltaSnapshots_,
+            networkLastFullSnapshotBytes_, networkLastDeltaSnapshotBytes_,
+            networkDroppedSnapshots_, networkIgnoredSnapshots_, networkResyncRequests_),
+        22, GetScreenHeight() - 62, 14, color);
+}
+
 void Game::TriggerCoreCollapse()
 {
     coreCollapseTriggered_ = true;
     int destroyedCount = 0;
-    for (EnergyCore& core : cores_)
+    for (EnergyCore& core : matchSimulation_.Cores())
     {
         if (!core.IsAlive())
         {
@@ -975,7 +1216,7 @@ void Game::TriggerCoreCollapse()
         }
         // The collapse is the arena-wide match finisher: no hero trick may
         // refill a core here, otherwise stalemates never resolve.
-        world_.RemoveBlock(core.GetBlockPosition());
+        RemoveWorldBlock(core.GetBlockPosition(), BlockDeltaReason::CoreCollapse);
         Team* team = FindTeam(core.GetTeamId());
         if (team != nullptr)
         {
@@ -988,7 +1229,7 @@ void Game::TriggerCoreCollapse()
     if (destroyedCount > 0)
     {
         SetMessage("Арена рушится! Все Коры уничтожены, распад арены ранит каждого. Последняя жизнь.", 6.0f);
-        AddEventMessage("All EnergyCores collapsed", Color { 255, 118, 118, 255 }, 6.0f);
+        AddEventMessage("Все Коры разрушены", Color { 255, 118, 118, 255 }, 6.0f);
         audio_.PlayCoreDestroyed();
         AddCameraShake(0.34f, 0.45f);
     }
@@ -1106,10 +1347,10 @@ void Game::DropPlayerResources(Player& player)
         }
 
         player.GetInventory().SpendResource(type, amount);
-        pickups_.push_back(ResourcePickup {
+        matchSimulation_.Pickups().push_back(ResourcePickup {
             type,
             amount,
-            Vector3 { player.GetPosition().x, player.GetPosition().y + 0.35f, player.GetPosition().z },
+            Vec3 { player.GetPosition().x, player.GetPosition().y + 0.35f, player.GetPosition().z },
             0.65f,
             24.0f,
             0.0f,
@@ -1278,7 +1519,7 @@ void Game::UpdateSpectator(float dt)
     if (IsKeyPressed(KEY_F))
     {
         spectatorFreeCamera_ = !spectatorFreeCamera_;
-        SetMessage(spectatorFreeCamera_ ? "Spectator: free camera." : "Spectator: follow player.", 1.5f);
+            SetMessage(spectatorFreeCamera_ ? "Наблюдатель: свободная камера." : "Наблюдатель: слежение за игроком.", 1.5f);
         if (const Player* target = GetSpectatorTarget())
         {
             spectatorPosition_ = target->GetPosition();
@@ -1344,28 +1585,22 @@ void Game::UpdateSpectator(float dt)
 void Game::UpdateLocalPlayer(float dt)
 {
     Player* player = GetLocalPlayer();
-    if (player == nullptr || !player->IsAlive())
+    if (player == nullptr || !player->IsAlive() || localPlayerServerDriven_)
     {
+        // localPlayerServerDriven_: an external authority (the server mock in
+        // --network-smoke) applies the controlled player's PlayerCommand
+        // directly, so the local update must not also self-drive it. The flag
+        // defaults false, so normal play is unchanged.
         return;
     }
 
-    player->SetYaw(cameraController_.GetYaw());
-    const Vector3 forward = cameraController_.GetFlatForward();
-    const Vector3 right = cameraController_.GetFlatRight();
-    Vector3 wish {
-        forward.x * currentInput_.move.z + right.x * currentInput_.move.x,
-        0.0f,
-        forward.z * currentInput_.move.z + right.z * currentInput_.move.x
-    };
-    const ItemType selectedItem = GetSelectedHotbarStack(*player).type;
-    const bool aimingBlaster = (selectedItem == ItemType::Blaster && currentInput_.placeHeld)
-        || (selectedItem == ItemType::SniperRifle && currentInput_.scopeHeld);
-    if (aimingBlaster)
-    {
-        wish.x *= 0.56f;
-        wish.z *= 0.56f;
-    }
-    UseUtilityInputs(*player);
+    // Movement, aim and selected slot are sourced from a typed PlayerCommand —
+    // the same shape bots/network will produce — and applied via
+    // ApplyPlayerCommand(). Utility inputs run first (they aim through the
+    // camera, independent of the player's yaw). See NETWORK_PREP_PLAN.md for
+    // which inputs already flow through the command and which still don't.
+    const PlayerCommand command = BuildLocalPlayerCommand();
+    UseUtilityInputs(*player, command);
 
     const bool wasOnGround = player->IsOnGround();
     const float fallingVelocity = player->GetVelocity().y;
@@ -1373,26 +1608,10 @@ void Game::UpdateLocalPlayer(float dt)
     {
         localAirPeakY_ = player->GetPosition().y;
     }
-    const bool wantsForwardSprint = currentInput_.move.z > 0.05f;
-    const bool sprint = currentInput_.sprint && wantsForwardSprint && !currentInput_.sneak && !currentInput_.bridgeMode && !aimingBlaster;
-    if (currentInput_.sprintTapped && sprint)
-    {
-        player->RefreshSprintReset();
-    }
-    player->Move(
-        wish,
-        currentInput_.jumpHeld,
-        dt,
-        world_,
-        sprint,
-        currentInput_.sneak,
-        TerrainSpeedMultiplier(*player),
-        false,
-        BiomeGravityMultiplier(),
-        BiomeJumpMultiplier(),
-        BiomeGroundControlMultiplier(*player),
-        BiomeAirControlMultiplier());
+
+    ApplyPlayerCommand(*player, command, dt);
     ApplyStandingBlockEffects(*player, true);
+    StorePredictedLocalCommand(command, *player);
 
     if (!player->IsOnGround())
     {
@@ -1411,6 +1630,142 @@ void Game::UpdateLocalPlayer(float dt)
 
     localWasOnGround_ = player->IsOnGround();
     localFallVelocity_ = player->GetVelocity().y;
+}
+
+void Game::ApplyPlayerCommand(Player& player, const PlayerCommand& command, float dt)
+{
+    // Aim comes from the command: yaw drives both facing and the movement
+    // basis. Pitch is retained for the local player for future aim-dependent
+    // actions (currently unused). For the local player command.aimYaw equals
+    // the camera yaw, so this reproduces the previous behaviour exactly.
+    player.SetYaw(command.aimYaw);
+    if (command.selectedSlot >= 0 && command.selectedSlot < kHotbarSlotCount)
+    {
+        // The local player keeps its slot in selectedHotbarSlot_ (UI mirror);
+        // network-controlled players carry their own slot so the authoritative
+        // server replicates the right held item per player (Phase 0.1W).
+        if (player.IsLocal())
+        {
+            selectedHotbarSlot_ = command.selectedSlot;
+        }
+        else
+        {
+            player.SetSelectedSlot(command.selectedSlot);
+        }
+    }
+    if (player.IsLocal())
+    {
+        localAimPitch_ = command.aimPitch;
+    }
+
+    const bool hasMovementIntent = std::fabs(command.moveForward) > 0.0001f
+        || std::fabs(command.moveStrafe) > 0.0001f
+        || command.jump
+        || command.sprint
+        || command.sprintTapped
+        || command.sneak;
+    if (dt <= 0.0f && !hasMovementIntent)
+    {
+        return;
+    }
+
+    const Vector3 forward = player.Forward();
+    const Vector3 right = player.Right();
+    Vector3 wish {
+        forward.x * command.moveForward + right.x * command.moveStrafe,
+        0.0f,
+        forward.z * command.moveForward + right.z * command.moveStrafe
+    };
+    // Aiming-down-sight slow + sprint modifiers now come from the command.
+    const ItemType selectedItem = GetSelectedHotbarStack(player).type;
+    const bool aimingBlaster = (selectedItem == ItemType::Blaster && command.placeHeld)
+        || (selectedItem == ItemType::SniperRifle && command.scopeHeld);
+    if (aimingBlaster)
+    {
+        wish.x *= 0.56f;
+        wish.z *= 0.56f;
+    }
+
+    const bool wantsForwardSprint = command.moveForward > 0.05f;
+    const bool sprint = command.sprint && wantsForwardSprint
+        && !command.bridgeMode && !command.sneak && !aimingBlaster;
+    if (command.sprintTapped && sprint)
+    {
+        player.RefreshSprintReset();
+    }
+    player.Move(
+        wish,
+        command.jump,
+        dt,
+        world_,
+        sprint,
+        command.sneak,
+        TerrainSpeedMultiplier(player),
+        !player.IsLocal(),
+        BiomeGravityMultiplier(),
+        BiomeJumpMultiplier(),
+        BiomeGroundControlMultiplier(player),
+        BiomeAirControlMultiplier());
+}
+
+void Game::RecordBlockDelta(const GridPos& pos, const Block& oldBlock, const Block& newBlock, BlockDeltaReason reason, int ownerPlayerId)
+{
+    if (SameBlock(oldBlock, newBlock))
+    {
+        return;
+    }
+
+    BlockDelta delta;
+    delta.tick = matchSimulation_.CurrentTick();
+    delta.position = pos;
+    delta.oldType = oldBlock.type;
+    delta.newType = newBlock.type;
+    delta.oldTeamId = oldBlock.teamId;
+    delta.newTeamId = newBlock.teamId;
+    delta.ownerPlayerId = ownerPlayerId;
+    delta.reason = reason;
+    matchSimulation_.RecordBlockDelta(delta);
+}
+
+bool Game::PlaceWorldBlock(const GridPos& pos, const Block& block, bool allowReplace, BlockDeltaReason reason, int ownerPlayerId)
+{
+    const Block* oldBlockPtr = world_.GetBlock(pos);
+    const Block oldBlock = oldBlockPtr != nullptr ? *oldBlockPtr : Block {};
+    if (!world_.PlaceBlock(pos, block, allowReplace))
+    {
+        return false;
+    }
+
+    const Block* newBlockPtr = world_.GetBlock(pos);
+    const Block newBlock = newBlockPtr != nullptr ? *newBlockPtr : Block {};
+    RecordBlockDelta(pos, oldBlock, newBlock, reason, ownerPlayerId);
+    return true;
+}
+
+bool Game::BreakWorldBlock(const GridPos& pos, int attackerTeam, BlockDeltaReason reason, int ownerPlayerId)
+{
+    const Block* oldBlockPtr = world_.GetBlock(pos);
+    const Block oldBlock = oldBlockPtr != nullptr ? *oldBlockPtr : Block {};
+    if (!world_.BreakBlock(pos, attackerTeam))
+    {
+        return false;
+    }
+
+    RecordBlockDelta(pos, oldBlock, Block {}, reason, ownerPlayerId);
+    return true;
+}
+
+bool Game::RemoveWorldBlock(const GridPos& pos, BlockDeltaReason reason, int ownerPlayerId)
+{
+    const Block* oldBlockPtr = world_.GetBlock(pos);
+    const Block oldBlock = oldBlockPtr != nullptr ? *oldBlockPtr : Block {};
+    if (!world_.RemoveBlock(pos))
+    {
+        return false;
+    }
+
+    RecordBlockDelta(pos, oldBlock, Block {}, reason, ownerPlayerId);
+    return true;
 }
 
 void Game::HandleDeathsAndRespawns()
@@ -1496,24 +1851,24 @@ void Game::HandleDeathsAndRespawns()
                 if (voidDeath || finalDeath)
                 {
                     automatch_.currentTimeline.push_back(AutomatchTimelineEvent {
-                        matchTime_,
+                        matchSimulation_.MatchTimeSeconds(),
                         voidDeath ? "voidFall" : "finalDeath",
                         player.GetTeamId(),
                         killerTeamId,
                         killerId,
                         player.GetId(),
                         finalDeath ? 1 : 0,
-                        player.GetName() + (voidDeath ? " fell into void" : " final death")
+                        player.GetName() + (voidDeath ? " упал в воид" : " финальная смерть")
                     });
                 }
             }
-            SetMessage(player.GetName() + (finalDeath ? " was eliminated." : " was defeated and will respawn."));
-            AddEventMessage(player.GetName() + (finalDeath ? " eliminated" : " down"), finalDeath ? RED : ORANGE, 2.2f);
+            SetMessage(player.GetName() + (finalDeath ? " выбывает." : " повержен и скоро возродится."));
+            AddEventMessage(player.GetName() + (finalDeath ? " выбыл" : " повержен"), finalDeath ? RED : ORANGE, 2.2f);
             AddKillFeed(
                 player.GetName()
                     + (killerId >= 0
-                            ? " lost inventory"
-                            : (player.GetPosition().y < -12.0f ? " fell into void" : " died")),
+                            ? " потерял инвентарь"
+                            : (player.GetPosition().y < -12.0f ? " упал в воид" : " погиб")),
                 finalDeath ? RED : ORANGE,
                 5.0f);
             audio_.PlayDeath();
@@ -1543,17 +1898,17 @@ void Game::HandleDeathsAndRespawns()
                 if (automatch_.active && !player.IsLocal())
                 {
                     automatch_.currentTimeline.push_back(AutomatchTimelineEvent {
-                        matchTime_,
+                        matchSimulation_.MatchTimeSeconds(),
                         "finalDeath",
                         player.GetTeamId(),
                         -1,
                         -1,
                         player.GetId(),
                         1,
-                        player.GetName() + " lost respawn protection"
+                        player.GetName() + " потерял защиту респауна"
                     });
                 }
-                SetMessage(player.GetName() + " lost respawn protection. Final death.");
+                SetMessage(player.GetName() + " потерял защиту респауна. Финальная смерть.");
                 if (player.IsLocal())
                 {
                     EnterSpectatorMode();
@@ -1562,7 +1917,7 @@ void Game::HandleDeathsAndRespawns()
             else if (player.GetRespawnTimer() <= 0.0f)
             {
                 player.RespawnAtHome();
-                SetMessage(player.GetName() + " respawned. " + BoolCoreState(team->coreAlive));
+                SetMessage(player.GetName() + " возродился. " + BoolCoreState(team->coreAlive));
                 AddWorldEffect(player.GetHomeSpawnPoint(), GetTeamColor(team->color), 0.42f, 0.45f);
             }
         }
@@ -1571,9 +1926,44 @@ void Game::HandleDeathsAndRespawns()
 
 void Game::SendMockNetworkInput()
 {
+    // Legacy byte-level mock kept for connect/disconnect lifecycle parity.
     network_.SendToServer(NetworkMessage { NetworkMessageType::Input, static_cast<unsigned int>(localPlayerId_), "local_input_frame" });
     network_.Pump();
     (void)network_.ConsumeIncoming();
+
+    // Forward-looking typed session: exercised live only when a network mode
+    // beyond pure single-player is active (e.g. launched with --host). It has
+    // no gameplay effect yet — the local simulation stays authoritative — but
+    // proves the command -> authoritative tick -> snapshot path end to end with
+    // the real match data. The transport layer will later replace the session.
+    if (networkMode_ == NetworkMode::LocalSinglePlayer)
+    {
+        return;
+    }
+    if (!serverSession_.IsRunning())
+    {
+        serverSession_.Configure(serverConfig_);
+        serverSession_.Start();
+    }
+    // Exercise the full Phase 0.1A path: transport (session) receives the
+    // command, the server forwards it into MatchSimulation's intake queue, and
+    // the simulation drains it. In host mode the local simulation already
+    // applied the local player's command this tick (UpdateLocalPlayer), so the
+    // drained command is NOT re-applied here — that would double-move the
+    // player. The authoritative tick already advanced via
+    // matchSimulation_.AdvanceTick() in UpdateMatchSimulation. Remote players
+    // are what the server will actually apply from drained commands later.
+    serverSession_.SubmitCommand(BuildLocalPlayerCommand());
+    for (const PlayerCommand& received : serverSession_.DrainCommands())
+    {
+        matchSimulation_.SubmitCommand(received);
+    }
+    (void)matchSimulation_.DrainCommands();
+    const MatchSnapshot snapshot = BuildNetworkSnapshot();
+    serverSession_.PublishSnapshot(snapshot);
+    PushRemoteSnapshot(snapshot);
+    ApplyAuthoritativeSnapshotForPrediction(snapshot, matchSimulation_.FixedDeltaSeconds());
+    matchSimulation_.ClearBlockDeltasThrough(snapshot.tick);
 }
 
 bool Game::IsLocalPlayerInShopZone() const
@@ -1691,7 +2081,7 @@ std::string Game::TeamSizeName() const
         return std::to_string(size) + "v" + std::to_string(size);
     }
 
-    return std::to_string(size) + " per team";
+    return std::to_string(size) + " в команде";
 }
 
 std::string Game::BotCountName() const
@@ -1712,7 +2102,7 @@ std::string Game::AutomatchSpeedName() const
 
 std::string Game::AutomatchDurationName() const
 {
-    return std::to_string(std::clamp(automatchMaxMinutes_, 3, 30)) + " min";
+    return std::to_string(std::clamp(automatchMaxMinutes_, 3, 30)) + " мин";
 }
 
 int Game::GetForgeBonusForTeam(int teamId) const
@@ -1723,7 +2113,7 @@ int Game::GetForgeBonusForTeam(int teamId) const
         return 0;
     }
 
-    const int tenMinuteBoost = matchTime_ >= 10.0f * 60.0f ? 1 : 0;
+    const int tenMinuteBoost = matchSimulation_.MatchTimeSeconds() >= 10.0f * 60.0f ? 1 : 0;
     return std::min(3, team->forgeLevel / 2 + tenMinuteBoost);
 }
 
@@ -1732,18 +2122,18 @@ bool Game::RepairTeamCore(Player& player, Team& team, std::string& message)
     EnergyCore* core = FindCoreByTeam(team.id);
     if (core == nullptr || !core->IsAlive())
     {
-        message = "Core cannot be repaired after destruction.";
+        message = "Кор нельзя починить после уничтожения.";
         return false;
     }
     if (core->GetHealth() >= core->GetMaxHealth())
     {
-        message = "Core is already fully repaired.";
+        message = "Кор уже полностью починен.";
         return false;
     }
     Inventory& inventory = player.GetInventory();
     if (inventory.GetResource(ResourceType::Crystal) < 2 || inventory.GetResource(ResourceType::Gold) < 3)
     {
-        message = "Need 2 Crystal + 3 Gold for Core repair.";
+        message = "Нужно 2 кристалла + 3 золота для ремонта Кора.";
         return false;
     }
 
@@ -1751,36 +2141,20 @@ bool Game::RepairTeamCore(Player& player, Team& team, std::string& message)
     inventory.SpendResource(ResourceType::Crystal, 2);
     inventory.SpendResource(ResourceType::Gold, 3);
     core->Repair(30);
-    message = "Core repaired +" + std::to_string(core->GetHealth() - beforeHealth) + ".";
+    message = "Кор починен +" + std::to_string(core->GetHealth() - beforeHealth) + ".";
     AddWorldEffect(world_.GridToWorld(core->GetBlockPosition()), Color { 112, 232, 255, 255 }, 0.55f, 0.50f);
-    AddKillFeed(team.name + " Core repaired", Color { 112, 232, 255, 255 }, 4.0f);
+    AddKillFeed(team.name + " Кор починен", Color { 112, 232, 255, 255 }, 4.0f);
     return true;
 }
 
 Player* Game::GetLocalPlayer()
 {
-    for (Player& player : players_)
-    {
-        if (player.GetId() == localPlayerId_)
-        {
-            return &player;
-        }
-    }
-
-    return nullptr;
+    return matchSimulation_.GetPlayer(localPlayerId_);
 }
 
 const Player* Game::GetLocalPlayer() const
 {
-    for (const Player& player : players_)
-    {
-        if (player.GetId() == localPlayerId_)
-        {
-            return &player;
-        }
-    }
-
-    return nullptr;
+    return matchSimulation_.GetPlayer(localPlayerId_);
 }
 
 Player* Game::GetSpectatorTarget()
@@ -1875,7 +2249,7 @@ void Game::EnterSpectatorMode()
         spectatorFreeCamera_ = true;
     }
     cameraController_.SetMode(ViewMode::ThirdPerson);
-    SetMessage("Final death. Spectator mode enabled.", 4.0f);
+    SetMessage("Финальная смерть. Режим наблюдателя включен.", 4.0f);
 }
 
 void Game::CycleSpectatorTarget(int direction)
@@ -1895,7 +2269,7 @@ void Game::CycleSpectatorTarget(int direction)
             spectatorTargetIndex_ = index;
             spectatorFreeCamera_ = false;
             spectatorPosition_ = players_[index].GetPosition();
-            SetMessage("Spectating " + players_[index].GetName(), 1.4f);
+            SetMessage("Наблюдение за " + players_[index].GetName(), 1.4f);
             return;
         }
     }
@@ -1929,7 +2303,7 @@ const Team* Game::FindTeam(int teamId) const
 
 EnergyCore* Game::FindCoreByTeam(int teamId)
 {
-    for (EnergyCore& core : cores_)
+    for (EnergyCore& core : matchSimulation_.Cores())
     {
         if (core.GetTeamId() == teamId)
         {
@@ -1942,7 +2316,7 @@ EnergyCore* Game::FindCoreByTeam(int teamId)
 
 EnergyCore* Game::FindCoreAt(const GridPos& pos)
 {
-    for (EnergyCore& core : cores_)
+    for (EnergyCore& core : matchSimulation_.Cores())
     {
         if (core.GetBlockPosition() == pos)
         {
@@ -1955,17 +2329,30 @@ EnergyCore* Game::FindCoreAt(const GridPos& pos)
 
 ItemStack Game::GetSelectedHotbarStack(const Player& player) const
 {
-    if (!player.IsLocal())
+    // The local player reads the UI slot (selectedHotbarSlot_); a network-
+    // controlled player reads its own replicated slot. Bots have no held-item
+    // concept (their combat path doesn't use this) — keep returning empty so
+    // their behaviour and automatch determinism are unchanged.
+    int slot;
+    if (player.IsLocal())
+    {
+        slot = selectedHotbarSlot_;
+    }
+    else if (IsNetworkControlledPlayer(player.GetId()))
+    {
+        slot = player.GetSelectedSlot();
+    }
+    else
     {
         return ItemStack {};
     }
 
     const Inventory& inventory = player.GetInventory();
-    if (selectedHotbarSlot_ < 0 || selectedHotbarSlot_ >= kHotbarSlotCount)
+    if (slot < 0 || slot >= kHotbarSlotCount)
     {
         return ItemStack {};
     }
-    return inventory.GetHotbarSlots()[selectedHotbarSlot_];
+    return inventory.GetHotbarSlots()[slot];
 }
 
 bool Game::IsSniperScopeRequested(const Player& player) const
@@ -1973,8 +2360,8 @@ bool Game::IsSniperScopeRequested(const Player& player) const
     return player.IsAlive()
         && !shopOpen_
         && !inventoryOpen_
-        && !winnerTeamId_.has_value()
-        && currentInput_.scopeHeld
+        && !matchSimulation_.HasWinner()
+        && BuildLocalPlayerCommand().scopeHeld
         && GetSelectedHotbarStack(player).type == ItemType::SniperRifle;
 }
 
@@ -1990,7 +2377,9 @@ std::optional<BlockType> Game::GetSelectedBlockType(const Player& player) const
 
 std::optional<WeaponType> Game::GetSelectedWeaponType(const Player& player) const
 {
-    if (!player.IsLocal())
+    // Bots have no held-item concept and always melee with a sword. The local
+    // player and network-controlled players use their actually selected item.
+    if (!player.IsLocal() && !IsNetworkControlledPlayer(player.GetId()))
     {
         return WeaponType::Sword;
     }
@@ -2005,7 +2394,7 @@ std::optional<WeaponType> Game::GetSelectedWeaponType(const Player& player) cons
 
 int Game::EffectiveToolLevel(const Player& player) const
 {
-    if (!player.IsLocal())
+    if (!player.IsLocal() && !IsNetworkControlledPlayer(player.GetId()))
     {
         return player.GetInventory().GetToolLevel();
     }
@@ -2092,7 +2481,7 @@ void Game::RegisterCombatEvent(const CombatEvent& event, const std::string& mess
     AddFloatingText((event.coreHit ? "-" : "-") + std::to_string(event.damage), event.position, event.coreHit ? Color { 112, 232, 255, 255 } : Color { 255, 236, 135, 255 });
     if (event.combo)
     {
-        AddFloatingText("Combo", Vector3 { event.position.x, event.position.y + 0.28f, event.position.z }, Color { 255, 235, 142, 255 });
+        AddFloatingText("Комбо", Vector3 { event.position.x, event.position.y + 0.28f, event.position.z }, Color { 255, 235, 142, 255 });
     }
     else if (event.sprintReset)
     {
@@ -2100,7 +2489,7 @@ void Game::RegisterCombatEvent(const CombatEvent& event, const std::string& mess
     }
     if (voidThreat)
     {
-        AddFloatingText("Void hit", Vector3 { event.position.x, event.position.y + 0.52f, event.position.z }, Color { 255, 155, 118, 255 });
+        AddFloatingText("Удар в воид", Vector3 { event.position.x, event.position.y + 0.52f, event.position.z }, Color { 255, 155, 118, 255 });
     }
     if (!event.coreHit && event.targetId >= 0)
     {
@@ -2142,7 +2531,7 @@ void Game::RegisterCombatEvent(const CombatEvent& event, const std::string& mess
             {
                 const int bonusDamage = std::max(2, event.damage / 5);
                 targetPlayer->Damage(bonusDamage);
-                AddFloatingText("INTRUDER -" + std::to_string(bonusDamage), targetPlayer->GetPosition(), HeroAccentColor(HeroId::Konvoy));
+                AddFloatingText("НАРУШИТЕЛЬ -" + std::to_string(bonusDamage), targetPlayer->GetPosition(), HeroAccentColor(HeroId::Konvoy));
                 attackerPlayer->AddHeroUltimateCharge(2.0f);
             }
         }
@@ -2188,8 +2577,8 @@ void Game::RegisterCombatEvent(const CombatEvent& event, const std::string& mess
                     {
                         constexpr int burstDamage = 12;
                         targetPlayer->Damage(burstDamage);
-                        NoteDamageCredit(targetPlayer->GetId(), attackerPlayer->GetId(), "Likho bleed burst");
-                        AddFloatingText("BLEED BURST -12", targetPlayer->GetPosition(), HeroAccentColor(HeroId::Likho));
+                    NoteDamageCredit(targetPlayer->GetId(), attackerPlayer->GetId(), "кровотечением Лихо");
+                    AddFloatingText("КРОВОТЕЧЕНИЕ -12", targetPlayer->GetPosition(), HeroAccentColor(HeroId::Likho));
                         found->successfulHits = 0;
                     }
                 }
@@ -2239,29 +2628,29 @@ void Game::RegisterCombatEvent(const CombatEvent& event, const std::string& mess
             {
                 if (automatch_.currentFirstCoreDamageTime < 0.0f)
                 {
-                    automatch_.currentFirstCoreDamageTime = matchTime_;
+                    automatch_.currentFirstCoreDamageTime = matchSimulation_.MatchTimeSeconds();
                     automatch_.currentTimeline.push_back(AutomatchTimelineEvent {
-                        matchTime_,
+                        matchSimulation_.MatchTimeSeconds(),
                         "firstCoreDamage",
                         event.targetTeamId,
                         attackerTeamId,
                         event.attackerId,
                         -1,
                         event.damage,
-                        "First Core damage"
+                        "Первый урон Кору"
                     });
                 }
                 if (event.coreDestroyed)
                 {
                     automatch_.currentTimeline.push_back(AutomatchTimelineEvent {
-                        matchTime_,
+                        matchSimulation_.MatchTimeSeconds(),
                         "coreDestroyed",
                         event.targetTeamId,
                         attackerTeamId,
                         event.attackerId,
                         -1,
                         event.damage,
-                        std::string(TeamName(event.targetTeamId)) + " Core destroyed"
+                        std::string(TeamName(event.targetTeamId)) + " Кор уничтожен"
                     });
                 }
             }
@@ -2333,11 +2722,11 @@ void Game::RegisterCombatEvent(const CombatEvent& event, const std::string& mess
     {
         AddCameraShake(0.30f, 0.32f);
         audio_.PlayCoreDestroyed();
-        AddKillFeed(std::string(TeamName(event.targetTeamId)) + " Core destroyed", Color { 255, 118, 118, 255 }, 7.0f);
+        AddKillFeed(std::string(TeamName(event.targetTeamId)) + " Кор уничтожен", Color { 255, 118, 118, 255 }, 7.0f);
     }
     else if (event.coreHit)
     {
-        AddKillFeed(std::string(TeamName(event.targetTeamId)) + " Core hit -" + std::to_string(event.damage), Color { 112, 232, 255, 255 }, 3.8f);
+        AddKillFeed(std::string(TeamName(event.targetTeamId)) + " Кор -" + std::to_string(event.damage), Color { 112, 232, 255, 255 }, 3.8f);
     }
 
     if (event.killed)
@@ -2355,9 +2744,9 @@ void Game::RegisterCombatEvent(const CombatEvent& event, const std::string& mess
                 target = &player;
             }
         }
-        const std::string attackerName = attacker != nullptr ? attacker->GetName() : "Unknown";
-        const std::string targetName = target != nullptr ? target->GetName() : "Enemy";
-        AddKillFeed(attackerName + " eliminated " + targetName, Color { 255, 235, 142, 255 }, 5.5f);
+        const std::string attackerName = attacker != nullptr ? attacker->GetName() : "Неизвестно";
+        const std::string targetName = target != nullptr ? target->GetName() : "Враг";
+        AddKillFeed(attackerName + " устранил " + targetName, Color { 255, 235, 142, 255 }, 5.5f);
     }
 }
 

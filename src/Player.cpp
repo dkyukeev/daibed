@@ -57,8 +57,8 @@ Player::Player(int id, std::string name, int teamId, Vector3 spawnPoint, bool lo
     : id_(id),
       name_(std::move(name)),
       teamId_(teamId),
-      homeSpawnPoint_(spawnPoint),
-      position_(spawnPoint),
+      homeSpawnPoint_ { spawnPoint.x, spawnPoint.y, spawnPoint.z },
+      position_ { spawnPoint.x, spawnPoint.y, spawnPoint.z },
       local_(local)
 {
 }
@@ -80,17 +80,48 @@ int Player::GetTeamId() const
 
 Vector3 Player::GetHomeSpawnPoint() const
 {
-    return homeSpawnPoint_;
+    return Vector3 { homeSpawnPoint_.x, homeSpawnPoint_.y, homeSpawnPoint_.z };
 }
 
 Vector3 Player::GetPosition() const
 {
-    return position_;
+    return Vector3 { position_.x, position_.y, position_.z };
 }
 
 Vector3 Player::GetVelocity() const
 {
+    return Vector3 { velocity_.x, velocity_.y, velocity_.z };
+}
+
+Vec3 Player::GetPositionVec3() const
+{
+    return position_;
+}
+
+Vec3 Player::GetVelocityVec3() const
+{
     return velocity_;
+}
+
+void Player::SetPosition(Vec3 position)
+{
+    position_ = position;
+}
+
+void Player::SetVelocity(Vec3 velocity)
+{
+    velocity_ = velocity;
+}
+
+void Player::ApplyReplicatedState(int health, int maxHealth, bool alive, bool eliminated, float respawnTimer)
+{
+    // Client-only: reflect an authoritative snapshot's public state without
+    // running combat/death logic. See docs/NETWORK_PREP_PLAN.md (Phase 0.1T).
+    maxHealth_ = maxHealth > 0 ? maxHealth : maxHealth_;
+    health_ = std::clamp(health, 0, maxHealth_);
+    alive_ = alive;
+    eliminated_ = eliminated;
+    respawnTimer_ = std::max(0.0f, respawnTimer);
 }
 
 float Player::GetYaw() const
@@ -178,6 +209,11 @@ float Player::GetInvulnerabilityTimer() const
     return invulnerabilityTimer_;
 }
 
+float Player::GetControlDebuffTimer() const
+{
+    return controlDebuffTimer_;
+}
+
 bool Player::HasShield() const
 {
     return shieldTimer_ > 0.0f;
@@ -201,6 +237,16 @@ Inventory& Player::GetInventory()
 const Inventory& Player::GetInventory() const
 {
     return inventory_;
+}
+
+int Player::GetSelectedSlot() const
+{
+    return selectedSlot_;
+}
+
+void Player::SetSelectedSlot(int slot)
+{
+    selectedSlot_ = slot;
 }
 
 Vector3 Player::Forward() const
@@ -239,14 +285,14 @@ void Player::Move(
 {
     if (!alive_ || eliminated_)
     {
-        velocity_ = Vector3 { 0.0f, 0.0f, 0.0f };
+        velocity_ = Vec3 { 0.0f, 0.0f, 0.0f };
         sprinting_ = false;
         sneaking_ = false;
         return;
     }
     if (heroId_ == HeroId::Orbita && heroState_.orbitaDashRemaining > 0.0f)
     {
-        velocity_ = Vector3 { 0.0f, 0.0f, 0.0f };
+        velocity_ = Vec3 { 0.0f, 0.0f, 0.0f };
         sprinting_ = false;
         sneaking_ = false;
         return;
@@ -357,6 +403,18 @@ void Player::UpdateTimers(float dt)
     {
         heroState_.orbitaTeleportPrimed = false;
     }
+    UpdateLocomotionAnimation();
+    heroState_.ultimateCharge = std::clamp(heroState_.ultimateCharge, 0.0f, 100.0f);
+    heroState_.ultimateReady = heroState_.ultimateCharge >= 100.0f;
+
+    if (!alive_ && !eliminated_ && respawnTimer_ > 0.0f)
+    {
+        respawnTimer_ = std::max(0.0f, respawnTimer_ - dt);
+    }
+}
+
+void Player::UpdateLocomotionAnimation()
+{
     if (heroState_.animationTimer <= 0.0f
         && heroState_.animationState != HeroAnimationState::UltPrimed
         && heroState_.animationState != HeroAnimationState::Overloaded)
@@ -384,13 +442,14 @@ void Player::UpdateTimers(float dt)
         }
         heroState_.animationDuration = 0.0f;
     }
-    heroState_.ultimateCharge = std::clamp(heroState_.ultimateCharge, 0.0f, 100.0f);
-    heroState_.ultimateReady = heroState_.ultimateCharge >= 100.0f;
+}
 
-    if (!alive_ && !eliminated_ && respawnTimer_ > 0.0f)
-    {
-        respawnTimer_ = std::max(0.0f, respawnTimer_ - dt);
-    }
+void Player::AdvanceAnimation(float dt)
+{
+    // Tick down an active event pose (attack/cast/...) then derive locomotion from
+    // the current velocity. Animation only — no movement/cooldown side effects.
+    heroState_.animationTimer = std::max(0.0f, heroState_.animationTimer - dt);
+    UpdateLocomotionAnimation();
 }
 
 void Player::Damage(int amount)
@@ -447,6 +506,19 @@ void Player::ApplyKnockback(Vector3 impulse, float controlLossSeconds)
     velocity_.x += impulse.x;
     velocity_.y = std::max(velocity_.y, impulse.y);
     velocity_.z += impulse.z;
+    knockbackControlTimer_ = std::max(
+        knockbackControlTimer_,
+        controlLossSeconds > 0.0f ? controlLossSeconds : kKnockbackControlSeconds);
+}
+
+void Player::AdoptReplicatedKnockbackVelocity(Vec3 velocity, float controlLossSeconds)
+{
+    if (!alive_ || eliminated_)
+    {
+        return;
+    }
+
+    velocity_ = velocity;
     knockbackControlTimer_ = std::max(
         knockbackControlTimer_,
         controlLossSeconds > 0.0f ? controlLossSeconds : kKnockbackControlSeconds);
@@ -554,10 +626,10 @@ void Player::Teleport(Vector3 position, bool clearVelocity)
         return;
     }
 
-    position_ = position;
+    position_ = Vec3 { position.x, position.y, position.z };
     if (clearVelocity)
     {
-        velocity_ = Vector3 { 0.0f, 0.0f, 0.0f };
+        velocity_ = Vec3 { 0.0f, 0.0f, 0.0f };
     }
     onGround_ = false;
 }
@@ -680,7 +752,7 @@ void Player::ClearHeroActiveEffects()
 void Player::RespawnAtHome()
 {
     position_ = homeSpawnPoint_;
-    velocity_ = Vector3 { 0.0f, 0.0f, 0.0f };
+    velocity_ = Vec3 { 0.0f, 0.0f, 0.0f };
     health_ = maxHealth_;
     alive_ = true;
     eliminated_ = false;
@@ -712,7 +784,7 @@ void Player::Kill(bool finalDeath)
     alive_ = false;
     eliminated_ = finalDeath;
     respawnTimer_ = finalDeath ? 0.0f : 3.0f;
-    velocity_ = Vector3 { 0.0f, 0.0f, 0.0f };
+    velocity_ = Vec3 { 0.0f, 0.0f, 0.0f };
     jumpBufferTimer_ = 0.0f;
     coyoteTimer_ = 0.0f;
     sprinting_ = false;
@@ -789,7 +861,7 @@ bool Player::HasGroundSupportAt(Vector3 position, const World& world) const
 
 void Player::TryMoveAxis(Vector3 delta, const World& world, bool preventEdgeFall, bool allowAutoStep)
 {
-    Vector3 next = position_;
+    Vector3 next { position_.x, position_.y, position_.z };
     next.x += delta.x;
     next.y += delta.y;
     next.z += delta.z;
@@ -811,13 +883,13 @@ void Player::TryMoveAxis(Vector3 delta, const World& world, bool preventEdgeFall
 
     if (!world.CollidesWithAABB(next, kHalfExtents))
     {
-        position_ = next;
+        position_ = Vec3 { next.x, next.y, next.z };
         return;
     }
 
     if (allowAutoStep && horizontalMove && onGround_)
     {
-        Vector3 lifted = position_;
+        Vector3 lifted { position_.x, position_.y, position_.z };
         lifted.y += kStepHeight;
         Vector3 stepped = lifted;
         stepped.x += delta.x;
@@ -825,7 +897,7 @@ void Player::TryMoveAxis(Vector3 delta, const World& world, bool preventEdgeFall
         if (!world.CollidesWithAABB(lifted, kHalfExtents)
             && !world.CollidesWithAABB(stepped, kHalfExtents))
         {
-            position_ = stepped;
+            position_ = Vec3 { stepped.x, stepped.y, stepped.z };
             return;
         }
     }

@@ -373,22 +373,22 @@ const char* ToString(BotState state)
     switch (state)
     {
     case BotState::Collect:
-        return "Collect";
+        return "Сбор";
     case BotState::Shop:
-        return "Shop";
+        return "Магазин";
     case BotState::Bridge:
-        return "Bridge";
+        return "Мост";
     case BotState::BreakDefense:
-        return "BreakDefense";
+        return "Взлом защиты";
     case BotState::AttackCore:
-        return "AttackCore";
+        return "Атака Кора";
     case BotState::Fight:
-        return "Fight";
+        return "Бой";
     case BotState::Retreat:
-        return "Retreat";
+        return "Отход";
     }
 
-    return "Unknown";
+    return "Неизвестно";
 }
 
 const char* ToString(BotRole role)
@@ -396,16 +396,16 @@ const char* ToString(BotRole role)
     switch (role)
     {
     case BotRole::Defender:
-        return "Defender";
+        return "Защита";
     case BotRole::Rusher:
-        return "Rusher";
+        return "Раш";
     case BotRole::Collector:
-        return "Collector";
+        return "Сбор";
     case BotRole::Fighter:
-        return "Fighter";
+        return "Бой";
     }
 
-    return "Unknown";
+    return "Неизвестно";
 }
 
 const char* ToString(BotIntent intent)
@@ -413,28 +413,28 @@ const char* ToString(BotIntent intent)
     switch (intent)
     {
     case BotIntent::DefendCore:
-        return "DefendCore";
+        return "Защита";
     case BotIntent::RepairCoreDefense:
-        return "RepairDefense";
+        return "Ремонт";
     case BotIntent::GearUp:
-        return "GearUp";
+        return "Закуп";
     case BotIntent::SecureResources:
-        return "Resources";
+        return "Ресурсы";
     case BotIntent::PressureCore:
-        return "PressureCore";
+        return "Давление";
     case BotIntent::BreakCoreDefense:
-        return "BreakDefense";
+        return "Взлом";
     case BotIntent::FightEnemy:
-        return "Fight";
+        return "Бой";
     case BotIntent::ChaseWeakEnemy:
-        return "Chase";
+        return "Погоня";
     case BotIntent::RetreatHome:
-        return "Retreat";
+        return "Отход";
     case BotIntent::Recover:
-        return "Recover";
+        return "Восст.";
     }
 
-    return "Unknown";
+    return "Неизвестно";
 }
 
 const char* ToString(CoordinationSignal signal)
@@ -442,22 +442,22 @@ const char* ToString(CoordinationSignal signal)
     switch (signal)
     {
     case CoordinationSignal::None:
-        return "None";
+        return "Нет";
     case CoordinationSignal::AttackingCore:
-        return "AttackingCore";
+        return "Атака Кора";
     case CoordinationSignal::DefendingCore:
-        return "DefendingCore";
+        return "Защита Кора";
     case CoordinationSignal::BuildingBridge:
-        return "BuildingBridge";
+        return "Строит мост";
     case CoordinationSignal::Retreating:
-        return "Retreating";
+        return "Отходит";
     case CoordinationSignal::CallingForHelp:
-        return "CallingForHelp";
+        return "Зовет помощь";
     case CoordinationSignal::HoldingMid:
-        return "HoldingMid";
+        return "Держит центр";
     }
 
-    return "Unknown";
+    return "Неизвестно";
 }
 
 const char* ToString(StrategicGoal goal)
@@ -465,20 +465,20 @@ const char* ToString(StrategicGoal goal)
     switch (goal)
     {
     case StrategicGoal::Idle:
-        return "Idle";
+        return "Ожидание";
     case StrategicGoal::EconomicPhase:
-        return "EconomicPhase";
+        return "Экономика";
     case StrategicGoal::BridgePush:
-        return "BridgePush";
+        return "Пуш мостом";
     case StrategicGoal::CoreAssault:
-        return "CoreAssault";
+        return "Штурм Кора";
     case StrategicGoal::BaseDefense:
-        return "BaseDefense";
+        return "Защита базы";
     case StrategicGoal::HuntPlayers:
-        return "HuntPlayers";
+        return "Охота";
     case StrategicGoal::MidControl:
-        return "MidControl";
+        return "Контроль центра";
     }
 
-    return "Unknown";
+    return "Неизвестно";
 }

@@ -191,7 +191,7 @@ ViewMode CameraController::GetMode() const
 
 const char* CameraController::GetModeName() const
 {
-    return mode_ == ViewMode::FirstPerson ? "First-person" : "Third-person";
+    return mode_ == ViewMode::FirstPerson ? "от первого лица" : "от третьего лица";
 }
 
 Vector3 CameraController::LookDirection() const

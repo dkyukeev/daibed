@@ -386,18 +386,18 @@ const char* CombatSystem::WeaponName(WeaponType weapon)
     switch (weapon)
     {
     case WeaponType::Sword:
-        return "Sword";
+        return "Клинок";
     case WeaponType::Axe:
-        return "Axe";
+        return "Топор";
     case WeaponType::Spear:
-        return "Spear";
+        return "Копье";
     }
-    return "Weapon";
+    return "Оружие";
 }
 
 const char* CombatSystem::HitZoneName(HitZone hitZone)
 {
-    return hitZone == HitZone::Head ? "head" : "body";
+    return hitZone == HitZone::Head ? "голова" : "корпус";
 }
 
 float CombatSystem::AttackRange(WeaponType weapon, int swordLevel)
@@ -659,28 +659,28 @@ bool CombatSystem::Attack(Player& attacker, std::vector<Player>& players, Vector
     attacker.ResetAttackCooldown(CombatSystem::AttackCooldown(weapon, attacker.GetInventory().GetSwordLevel()) + (chargeMultiplier > 1.05f ? 0.14f : 0.0f));
 
     std::ostringstream stream;
-    stream << attacker.GetName() << " " << (chargeMultiplier > 1.05f ? "charged " : "")
-           << CombatSystem::WeaponName(weapon) << " hit " << bestTarget->GetName()
-           << " (" << CombatSystem::HitZoneName(hitZone) << ") for " << finalDamage << ".";
+    stream << attacker.GetName() << ": " << (chargeMultiplier > 1.05f ? "заряженный " : "")
+           << CombatSystem::WeaponName(weapon) << " попадает по " << bestTarget->GetName()
+           << " (" << CombatSystem::HitZoneName(hitZone) << "), урон " << finalDamage << ".";
     if (knockback.combo)
     {
-        stream << " Combo.";
+        stream << " Комбо.";
     }
     if (weapon == WeaponType::Spear && knockback.weaponSpecial)
     {
-        stream << " Reach.";
+        stream << " Дальность.";
     }
     if (weapon == WeaponType::Axe && heavyAxe)
     {
-        stream << " Heavy.";
+        stream << " Тяжелый удар.";
         if (cleaveHits > 0)
         {
-            stream << " Cleave x" << cleaveHits << ".";
+            stream << " Рассечение x" << cleaveHits << ".";
         }
     }
     else if (knockback.sprintReset)
     {
-        stream << " Sprint reset.";
+        stream << " Сброс спринта.";
     }
     if (orbitaMomentumStrike)
     {
@@ -724,10 +724,10 @@ bool CombatSystem::DamageCore(Player& attacker, EnergyCore& core, std::string& m
     attacker.ResetAttackCooldown(0.45f);
 
     std::ostringstream stream;
-    stream << attacker.GetName() << " damaged EnergyCore for " << damage << ".";
+    stream << attacker.GetName() << " нанес Кору " << damage << " урона.";
     if (destroyed)
     {
-        stream << " Core destroyed!";
+        stream << " Кор уничтожен!";
     }
     message = stream.str();
     if (event != nullptr)

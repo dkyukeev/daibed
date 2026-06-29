@@ -191,17 +191,7 @@ struct KillFeedEntry
     float age = 0.0f;
 };
 
-struct DroppedItem
-{
-    ItemStack stack;
-    Vector3 position {};
-    Vector3 velocity {};
-    int ownerPlayerId = -1;
-    float ownerPickupDelay = 0.0f;
-    float lifetime = 45.0f;
-    float age = 0.0f;
-    bool collected = false;
-};
+// DroppedItem moved to Inventory.h (raylib-free, owned by MatchSimulation).
 
 struct MatchStats
 {

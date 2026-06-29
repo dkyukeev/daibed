@@ -12,6 +12,11 @@ endif()
 
 option(DAIBED_USE_SYSTEM_RAYLIB "Use an already installed raylib package" ON)
 option(DAIBED_DEVELOPER_BUILD "Expose automatch and experimental setup in the UI" OFF)
+# Real UDP socket transport (Phase 0.1R). This adds NO fetched external
+# dependency — it uses only the OS socket API (Winsock2 / BSD sockets), linking
+# the system library ws2_32 on Windows. Turn OFF to build without any socket
+# code (the transport then compiles to safe stubs). See docs/NETWORK_PREP_PLAN.md.
+option(DAIBED_ENABLE_NETWORK "Build the real UDP socket transport (system sockets only; no external download)" ON)
 
 if(DAIBED_USE_SYSTEM_RAYLIB)
     find_package(raylib QUIET)
@@ -51,6 +56,7 @@ add_executable(DaiBed
     src/CrashLogger.cpp
     src/Game.cpp
     src/GameBotAI.cpp
+    src/GameNetwork.cpp
     src/GameUI.cpp
     src/GameRules.cpp
     src/GamePlacement.cpp
@@ -68,6 +74,7 @@ add_executable(DaiBed
     src/MusicSystem.cpp
     src/Player.cpp
     src/ParticleSystem.cpp
+    src/Platform/ServerProcess.cpp
     src/PostProcessor.cpp
     src/Renderer.cpp
     src/Resource.cpp
@@ -78,7 +85,14 @@ add_executable(DaiBed
     src/World.cpp
     src/Network/Client.cpp
     src/Network/LocalNetworkMock.cpp
+    src/Network/LocalServerSession.cpp
+    src/Network/LoopbackTransport.cpp
+    src/Network/NetworkProtocol.cpp
     src/Network/Server.cpp
+    src/Network/SnapshotDelta.cpp
+    src/Network/SnapshotVisibility.cpp
+    src/Network/UdpTransport.cpp
+    src/Simulation/MatchSimulation.cpp
 )
 
 target_include_directories(DaiBed PRIVATE src)
@@ -87,6 +101,19 @@ target_compile_definitions(DaiBed PRIVATE
     DAIBED_VERSION="${PROJECT_VERSION}"
     DAIBED_DEVELOPER_BUILD=$<BOOL:${DAIBED_DEVELOPER_BUILD}>
 )
+
+# Real network transport: define DAIBED_HAVE_NETWORK and link the OS socket
+# library. No FetchContent / no external package is involved.
+if(DAIBED_ENABLE_NETWORK)
+    target_compile_definitions(DaiBed PRIVATE DAIBED_HAVE_NETWORK=1)
+    if(WIN32)
+        target_link_libraries(DaiBed PRIVATE ws2_32)
+    endif()
+    message(STATUS "DaiBed: real UDP transport ENABLED (system sockets)")
+else()
+    target_compile_definitions(DaiBed PRIVATE DAIBED_HAVE_NETWORK=0)
+    message(STATUS "DaiBed: real UDP transport DISABLED (stub transport)")
+endif()
 
 if(MSVC)
     target_compile_options(DaiBed PRIVATE /W4 /permissive-)

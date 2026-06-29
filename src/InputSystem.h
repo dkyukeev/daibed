@@ -105,6 +105,12 @@ public:
     GamepadBindings& MutableGamepadBindings();
     void SetMouseSensitivity(float sensitivity);
     float GetMouseSensitivity() const;
+    // Developer kit: when enabled, Poll() adds keyboard fallbacks for the
+    // otherwise mouse-only actions (attack/place/break/scope and look), so the
+    // whole game is drivable without a mouse. Additive (OR'd with mouse), so it
+    // never disturbs normal play. See --dev-keyboard / docs/NETWORK_PREP_PLAN.md.
+    void SetDevKeyboard(bool enabled);
+    bool IsDevKeyboard() const;
     void SetGamepadDeadZone(float deadZone);
     float GetGamepadDeadZone() const;
     void SetGamepadSensitivity(float sensitivity);
@@ -114,6 +120,7 @@ private:
     KeyBindings bindings_ {};
     GamepadBindings gamepadBindings_ {};
     float mouseSensitivity_ = 1.0f;
+    bool devKeyboard_ = false;
     float gamepadDeadZone_ = 0.18f;
     float gamepadSensitivity_ = 1.0f;
     mutable double lastForwardTapTime_ = -10.0;

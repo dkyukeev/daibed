@@ -48,15 +48,15 @@ const char* Game::MatchModeName() const
     switch (selectedMode_)
     {
     case MatchMode::SoloVsBots:
-        return "Solo vs bots";
+        return "Один против ботов";
     case MatchMode::TwoVsTwo:
-        return "2 teams";
+        return "Две команды";
     case MatchMode::FourTeams:
-        return "4 teams FFA";
+        return "Четыре команды";
     case MatchMode::Duel:
-        return "Duel arena";
+        return "Дуэль";
     }
-    return "Unknown";
+    return "Неизвестно";
 }
 
 const char* Game::BotDifficultyName() const
@@ -64,13 +64,13 @@ const char* Game::BotDifficultyName() const
     switch (botDifficulty_)
     {
     case BotDifficulty::Easy:
-        return "Easy";
+        return "Легко";
     case BotDifficulty::Normal:
-        return "Normal";
+        return "Нормально";
     case BotDifficulty::Hard:
-        return "Hard";
+        return "Сложно";
     }
-    return "Unknown";
+    return "Неизвестно";
 }
 
 const char* Game::ArenaLayoutName() const
@@ -78,11 +78,11 @@ const char* Game::ArenaLayoutName() const
     switch (arenaLayout_)
     {
     case ArenaLayout::Classic:
-        return "Classic";
+        return "Классика";
     case ArenaLayout::Vertical:
-        return "Vertical";
+        return "Вертикальная";
     }
-    return "Unknown";
+    return "Неизвестно";
 }
 
 const char* Game::ArenaBiomeName() const
@@ -90,17 +90,17 @@ const char* Game::ArenaBiomeName() const
     switch (arenaBiome_)
     {
     case ArenaBiome::Arena:
-        return "Arena";
+        return "Арена";
     case ArenaBiome::Ice:
-        return "Ice";
+        return "Лед";
     case ArenaBiome::Lava:
-        return "Lava";
+        return "Лава";
     case ArenaBiome::Space:
-        return "Space";
+        return "Космос";
     case ArenaBiome::Ruins:
-        return "Ruins";
+        return "Руины";
     }
-    return "Unknown";
+    return "Неизвестно";
 }
 
 const char* Game::ResolutionName() const
@@ -639,15 +639,15 @@ const char* Game::TeamName(int teamId) const
     switch (teamId)
     {
     case 0:
-        return "Red";
+        return "Красные";
     case 1:
-        return "Blue";
+        return "Синие";
     case 2:
-        return "Green";
+        return "Зеленые";
     case 3:
-        return "Yellow";
+        return "Желтые";
     }
-    return "Unknown";
+    return "Неизвестно";
 }
 
 Color Game::BiomeSkyColor() const
@@ -711,35 +711,35 @@ const char* Game::KeyLabel(int key) const
         switch (MouseButtonFromBinding(key))
         {
         case MOUSE_BUTTON_LEFT:
-            return "Mouse L";
+            return "ЛКМ";
         case MOUSE_BUTTON_RIGHT:
-            return "Mouse R";
+            return "ПКМ";
         case MOUSE_BUTTON_MIDDLE:
-            return "Mouse M";
+            return "СКМ";
         case MOUSE_BUTTON_SIDE:
-            return "Mouse Side";
+            return "Мышь сбоку";
         case MOUSE_BUTTON_EXTRA:
-            return "Mouse Extra";
+            return "Мышь доп.";
         case MOUSE_BUTTON_FORWARD:
-            return "Mouse Fwd";
+            return "Мышь вперед";
         case MOUSE_BUTTON_BACK:
-            return "Mouse Back";
+            return "Мышь назад";
         default:
-            return "Mouse";
+            return "Мышь";
         }
     }
     switch (key)
     {
     case KEY_SPACE:
-        return "Space";
+        return "Пробел";
     case KEY_LEFT_SHIFT:
-        return "LShift";
+        return "Лев. Shift";
     case KEY_RIGHT_SHIFT:
-        return "RShift";
+        return "Прав. Shift";
     case KEY_LEFT_CONTROL:
-        return "LCtrl";
+        return "Лев. Ctrl";
     case KEY_RIGHT_CONTROL:
-        return "RCtrl";
+        return "Прав. Ctrl";
     case KEY_TAB:
         return "Tab";
     case KEY_ENTER:

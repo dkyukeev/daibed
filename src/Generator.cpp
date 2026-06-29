@@ -1,19 +1,14 @@
 #include "Generator.h"
 
-#include <cmath>
-
 namespace
 {
-float DistanceSquared(Vector3 a, Vector3 b)
+float DistanceSquared(Vec3 a, Vec3 b)
 {
-    const float dx = a.x - b.x;
-    const float dy = a.y - b.y;
-    const float dz = a.z - b.z;
-    return dx * dx + dy * dy + dz * dz;
+    return (a - b).LengthSquared();
 }
 }
 
-Generator::Generator(ResourceType type, Vector3 position, float interval, int amount, int teamId)
+Generator::Generator(ResourceType type, Vec3 position, float interval, int amount, int teamId)
     : type_(type),
       position_(position),
       interval_(interval),
@@ -31,12 +26,13 @@ void Generator::Update(float dt, std::vector<ResourcePickup>& pickups, int bonus
     }
 
     timer_ = 0.0f;
+    const Vec3 spawnPosition { position_.x, position_.y + 1.0f, position_.z };
     int nearbyCount = 0;
     for (const ResourcePickup& pickup : pickups)
     {
         if (!pickup.collected
             && pickup.type == type_
-            && DistanceSquared(pickup.position, Vector3 { position_.x, position_.y + 1.0f, position_.z }) < 5.0f)
+            && DistanceSquared(pickup.position, spawnPosition) < 5.0f)
         {
             ++nearbyCount;
         }
@@ -51,7 +47,7 @@ void Generator::Update(float dt, std::vector<ResourcePickup>& pickups, int bonus
     pickups.push_back(ResourcePickup {
         type_,
         amount_ + bonusAmount,
-        Vector3 { position_.x, position_.y + 1.0f, position_.z },
+        spawnPosition,
         0.55f,
         30.0f,
         0.0f,
@@ -63,7 +59,7 @@ ResourceType Generator::GetType() const
     return type_;
 }
 
-Vector3 Generator::GetPosition() const
+Vec3 Generator::GetPosition() const
 {
     return position_;
 }

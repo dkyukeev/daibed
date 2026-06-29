@@ -1,5 +1,6 @@
 #include "Game.h"
 #include "HeroSystem.h"
+#include "VecConvert.h"
 
 #include "raylib.h"
 
@@ -330,13 +331,13 @@ void MergeNearbyResourcePickups(std::vector<ResourcePickup>& pickups)
             {
                 continue;
             }
-            if (DistanceSquared(target.position, other.position) > kItemMergeRadiusSq)
+            if (DistanceSquared(ToVector3(target.position), ToVector3(other.position)) > kItemMergeRadiusSq)
             {
                 continue;
             }
 
             const int total = target.amount + other.amount;
-            target.position = Vector3 {
+            target.position = Vec3 {
                 (target.position.x * static_cast<float>(target.amount) + other.position.x * static_cast<float>(other.amount)) / static_cast<float>(total),
                 (target.position.y * static_cast<float>(target.amount) + other.position.y * static_cast<float>(other.amount)) / static_cast<float>(total),
                 (target.position.z * static_cast<float>(target.amount) + other.position.z * static_cast<float>(other.amount)) / static_cast<float>(total)
@@ -366,18 +367,18 @@ void MergeNearbyDroppedItems(std::vector<DroppedItem>& droppedItems)
             {
                 continue;
             }
-            if (DistanceSquared(target.position, other.position) > kItemMergeRadiusSq)
+            if (DistanceSquared(ToVector3(target.position), ToVector3(other.position)) > kItemMergeRadiusSq)
             {
                 continue;
             }
 
             const int total = target.stack.count + other.stack.count;
-            target.position = Vector3 {
+            target.position = Vec3 {
                 (target.position.x * static_cast<float>(target.stack.count) + other.position.x * static_cast<float>(other.stack.count)) / static_cast<float>(total),
                 (target.position.y * static_cast<float>(target.stack.count) + other.position.y * static_cast<float>(other.stack.count)) / static_cast<float>(total),
                 (target.position.z * static_cast<float>(target.stack.count) + other.position.z * static_cast<float>(other.stack.count)) / static_cast<float>(total)
             };
-            target.velocity = Vector3 {
+            target.velocity = Vec3 {
                 (target.velocity.x + other.velocity.x) * 0.35f,
                 std::max(target.velocity.y, other.velocity.y) * 0.25f,
                 (target.velocity.z + other.velocity.z) * 0.35f
@@ -395,15 +396,15 @@ void MergeNearbyDroppedItems(std::vector<DroppedItem>& droppedItems)
 
 void Game::UpdateGenerators(float dt)
 {
-    for (Generator& generator : generators_)
-    {
-        generator.Update(dt, pickups_, GetForgeBonusForTeam(generator.GetTeamId()));
-    }
+    // Generators are owned by matchSimulation_. The forge bonus depends on
+    // Game's Team data, so it is supplied as a callback at the boundary.
+    matchSimulation_.UpdateGenerators(dt, matchSimulation_.Pickups(), [this](int teamId) { return GetForgeBonusForTeam(teamId); });
 }
 
 void Game::UpdatePickups(float dt)
 {
-    for (ResourcePickup& pickup : pickups_)
+    std::vector<ResourcePickup>& pickups = matchSimulation_.Pickups();
+    for (ResourcePickup& pickup : pickups)
     {
         if (pickup.collected)
         {
@@ -418,7 +419,7 @@ void Game::UpdatePickups(float dt)
             continue;
         }
 
-        if (Player* magnetTarget = FindMagnetTarget(players_, pickup.position, -1, 0.0f, pickup.age))
+        if (Player* magnetTarget = FindMagnetTarget(players_, ToVector3(pickup.position), -1, 0.0f, pickup.age))
         {
             const Vector3 target = PickupTargetFor(*magnetTarget);
             const Vector3 toTarget {
@@ -446,7 +447,7 @@ void Game::UpdatePickups(float dt)
                 continue;
             }
 
-            if (DistanceSquared(PickupTargetFor(player), pickup.position) <= kItemPickupRadiusSq)
+            if (DistanceSquared(PickupTargetFor(player), ToVector3(pickup.position)) <= kItemPickupRadiusSq)
             {
                 player.GetInventory().AddResource(pickup.type, pickup.amount);
                 if (player.GetHeroId() == HeroId::Brom)
@@ -454,12 +455,12 @@ void Game::UpdatePickups(float dt)
                     player.AddHeroUltimateCharge(BromUltimateChargeForResource(pickup.type, pickup.amount));
                 }
                 pickup.collected = true;
-                AddWorldEffect(pickup.position, player.IsLocal() ? Color { 255, 245, 170, 255 } : Color { 180, 210, 255, 255 }, 0.22f, 0.28f);
-                AddFloatingText("+" + std::to_string(pickup.amount) + " " + ToString(pickup.type), pickup.position, player.IsLocal() ? Color { 255, 236, 135, 255 } : Fade(WHITE, 0.85f));
+                AddWorldEffect(ToVector3(pickup.position), player.IsLocal() ? Color { 255, 245, 170, 255 } : Color { 180, 210, 255, 255 }, 0.22f, 0.28f);
+                AddFloatingText("+" + std::to_string(pickup.amount) + " " + ToString(pickup.type), ToVector3(pickup.position), player.IsLocal() ? Color { 255, 236, 135, 255 } : Fade(WHITE, 0.85f));
                 if (player.IsLocal())
                 {
                     ++stats_.resourcesPicked;
-                    SetMessage("Picked up " + std::to_string(pickup.amount) + " " + ToString(pickup.type) + ".");
+                    SetMessage("Подобрано: " + std::to_string(pickup.amount) + " " + ToString(pickup.type) + ".");
                     audio_.PlayPickup();
                 }
                 break;
@@ -471,23 +472,24 @@ void Game::UpdatePickups(float dt)
     if (pickupMergeTimer_ >= kItemMergeInterval)
     {
         pickupMergeTimer_ = 0.0f;
-        MergeNearbyResourcePickups(pickups_);
+        MergeNearbyResourcePickups(pickups);
     }
 
-    pickups_.erase(
+    pickups.erase(
         std::remove_if(
-            pickups_.begin(),
-            pickups_.end(),
+            pickups.begin(),
+            pickups.end(),
             [](const ResourcePickup& pickup)
             {
                 return pickup.collected;
             }),
-        pickups_.end());
+        pickups.end());
 }
 
 void Game::UpdateDroppedItems(float dt)
 {
-    for (DroppedItem& dropped : droppedItems_)
+    std::vector<DroppedItem>& droppedItems = matchSimulation_.DroppedItems();
+    for (DroppedItem& dropped : droppedItems)
     {
         if (dropped.collected)
         {
@@ -504,10 +506,10 @@ void Game::UpdateDroppedItems(float dt)
         if (!world_.IsAir(under) && dropped.velocity.y < 0.0f)
         {
             dropped.position.y = world_.GridToWorld(under).y + 0.72f;
-            dropped.velocity = Vector3 { dropped.velocity.x * 0.72f, 0.0f, dropped.velocity.z * 0.72f };
+            dropped.velocity = Vec3 { dropped.velocity.x * 0.72f, 0.0f, dropped.velocity.z * 0.72f };
         }
 
-        if (Player* magnetTarget = FindMagnetTarget(players_, dropped.position, dropped.ownerPlayerId, dropped.ownerPickupDelay, dropped.age))
+        if (Player* magnetTarget = FindMagnetTarget(players_, ToVector3(dropped.position), dropped.ownerPlayerId, dropped.ownerPickupDelay, dropped.age))
         {
             const Vector3 target = PickupTargetFor(*magnetTarget);
             const Vector3 toTarget {
@@ -525,11 +527,11 @@ void Game::UpdateDroppedItems(float dt)
                 dropped.velocity.y += direction.y * accel * dt;
                 dropped.velocity.z += direction.z * accel * dt;
 
-                const float speed = Length(dropped.velocity);
+                const float speed = Length(ToVector3(dropped.velocity));
                 if (speed > kDroppedItemMagnetMaxSpeed)
                 {
-                    const Vector3 capped = Normalize(dropped.velocity);
-                    dropped.velocity = Vector3 {
+                    const Vector3 capped = Normalize(ToVector3(dropped.velocity));
+                    dropped.velocity = Vec3 {
                         capped.x * kDroppedItemMagnetMaxSpeed,
                         capped.y * kDroppedItemMagnetMaxSpeed,
                         capped.z * kDroppedItemMagnetMaxSpeed
@@ -549,7 +551,7 @@ void Game::UpdateDroppedItems(float dt)
                 continue;
             }
 
-            if (DistanceSquared(PickupTargetFor(player), dropped.position) <= kItemPickupRadiusSq)
+            if (DistanceSquared(PickupTargetFor(player), ToVector3(dropped.position)) <= kItemPickupRadiusSq)
             {
                 const std::optional<ResourceType> resource = ItemToResource(dropped.stack.type);
                 const bool added = resource.has_value()
@@ -562,10 +564,10 @@ void Game::UpdateDroppedItems(float dt)
                         player.AddHeroUltimateCharge(BromUltimateChargeForResource(*resource, dropped.stack.count));
                     }
                     dropped.collected = true;
-                    AddWorldEffect(dropped.position, Color { 255, 245, 170, 255 }, 0.18f, 0.22f);
+                    AddWorldEffect(ToVector3(dropped.position), Color { 255, 245, 170, 255 }, 0.18f, 0.22f);
                     if (player.IsLocal())
                     {
-                        SetMessage(std::string("Picked up ") + ItemDisplayName(dropped.stack.type) + ".");
+                        SetMessage(std::string("Подобрано: ") + ItemDisplayName(dropped.stack.type) + ".");
                         audio_.PlayPickup();
                     }
                     break;
@@ -578,18 +580,18 @@ void Game::UpdateDroppedItems(float dt)
     if (droppedItemMergeTimer_ >= kItemMergeInterval)
     {
         droppedItemMergeTimer_ = 0.0f;
-        MergeNearbyDroppedItems(droppedItems_);
+        MergeNearbyDroppedItems(droppedItems);
     }
 
-    droppedItems_.erase(
+    droppedItems.erase(
         std::remove_if(
-            droppedItems_.begin(),
-            droppedItems_.end(),
+            droppedItems.begin(),
+            droppedItems.end(),
             [](const DroppedItem& dropped)
             {
                 return dropped.collected || dropped.lifetime <= 0.0f;
             }),
-        droppedItems_.end());
+        droppedItems.end());
 }
 
 void Game::UpdateBlockHazards(float dt)
@@ -639,7 +641,7 @@ void Game::UpdateBlockHazards(float dt)
                 if (player.IsLocal())
                 {
                     damageFlashTimer_ = std::max(damageFlashTimer_, 0.32f);
-                    SetMessage("Lava biome heat: climb to safer ground.", 1.2f);
+                    SetMessage("Жар лавового биома: поднимитесь на безопасную высоту.", 1.2f);
                 }
             }
         }
@@ -887,7 +889,7 @@ void Game::UpdateHazardZones(float dt)
         }
         if (burn.timer <= 0.0f)
         {
-            world_.BreakBlock(burn.position, burn.ownerTeamId);
+            BreakWorldBlock(burn.position, burn.ownerTeamId, BlockDeltaReason::FireBurn);
             AddWorldEffect(world_.GridToWorld(burn.position), Color { 255, 118, 70, 255 }, 0.24f, 0.30f);
         }
         else
@@ -912,7 +914,7 @@ void Game::UpdateHazardZones(float dt)
         }
         zone.tickTimer = 0.55f;
 
-        for (EnergyCore& core : cores_)
+        for (EnergyCore& core : matchSimulation_.Cores())
         {
             if (core.IsAlive()
                 && DistanceSquared(world_.GridToWorld(core.GetBlockPosition()), zone.position)
@@ -1056,7 +1058,7 @@ void Game::UpdateHeroPassives(float dt)
         else if (player.GetHeroId() == HeroId::Likho && player.IsAlive())
         {
             bool insideEnemyBase = false;
-            for (const EnergyCore& core : cores_)
+            for (const EnergyCore& core : matchSimulation_.Cores())
             {
                 if (!core.IsAlive() || core.GetTeamId() == player.GetTeamId())
                 {
@@ -1128,7 +1130,7 @@ void Game::UpdateHeroTemporaryBlocks(float dt)
         if (temporary.timer <= 0.0f)
         {
             const Vector3 center = world_.GridToWorld(temporary.position);
-            world_.RemoveBlock(temporary.position);
+            RemoveWorldBlock(temporary.position, BlockDeltaReason::TemporaryExpire);
             AddWorldEffect(center, HeroAccentColor(HeroId::Orbita), 0.18f, 0.22f);
         }
     }
@@ -1488,21 +1490,21 @@ void Game::UpdateBromDevices(float dt)
         constexpr float searchRadiusSq = 56.0f * 56.0f;
         if (bot.targetLockTimer > 0.0f
             && bot.lockedPickupIndex >= 0
-            && bot.lockedPickupIndex < static_cast<int>(pickups_.size()))
+            && bot.lockedPickupIndex < static_cast<int>(matchSimulation_.Pickups().size()))
         {
-            ResourcePickup& locked = pickups_[bot.lockedPickupIndex];
+            ResourcePickup& locked = matchSimulation_.Pickups()[bot.lockedPickupIndex];
             const int remainingCapacity = kBromVacuumCapacity - BromCargoUnits(bot.cargo);
             if (!locked.collected
                 && remainingCapacity >= BromCargoWeight(locked.type) * locked.amount
-                && DistanceSquared(bot.position, locked.position) <= searchRadiusSq)
+                && DistanceSquared(bot.position, ToVector3(locked.position)) <= searchRadiusSq)
             {
                 bestPickup = &locked;
                 bestPickupIndex = bot.lockedPickupIndex;
             }
         }
-        for (int pickupIndex = 0; bestPickup == nullptr && pickupIndex < static_cast<int>(pickups_.size()); ++pickupIndex)
+        for (int pickupIndex = 0; bestPickup == nullptr && pickupIndex < static_cast<int>(matchSimulation_.Pickups().size()); ++pickupIndex)
         {
-            ResourcePickup& pickup = pickups_[pickupIndex];
+            ResourcePickup& pickup = matchSimulation_.Pickups()[pickupIndex];
             if (pickup.collected)
             {
                 continue;
@@ -1513,14 +1515,14 @@ void Game::UpdateBromDevices(float dt)
                 continue;
             }
 
-            const float distance = DistanceSquared(bot.position, pickup.position);
+            const float distance = DistanceSquared(bot.position, ToVector3(pickup.position));
             if (distance > searchRadiusSq)
             {
                 continue;
             }
 
             const float centerDistanceSq = pickup.position.x * pickup.position.x + pickup.position.z * pickup.position.z;
-            const bool nearOwnBase = DistanceSquared(pickup.position, basePosition) < 13.0f * 13.0f;
+            const bool nearOwnBase = DistanceSquared(ToVector3(pickup.position), basePosition) < 13.0f * 13.0f;
             float score = distance + centerDistanceSq * 0.18f;
             if (nearOwnBase)
             {
@@ -1570,8 +1572,8 @@ void Game::UpdateBromDevices(float dt)
             && std::fabs(bot.position.y - target.y) <= 1.35f)
         {
             bot.cargo[ResourceIndex(bestPickup->type)] += bestPickup->amount;
-            AddFloatingText("пылесос +" + std::to_string(bestPickup->amount), bestPickup->position, bromColor);
-            AddWorldEffect(bestPickup->position, bromColor, 0.18f, 0.18f);
+            AddFloatingText("пылесос +" + std::to_string(bestPickup->amount), ToVector3(bestPickup->position), bromColor);
+            AddWorldEffect(ToVector3(bestPickup->position), bromColor, 0.18f, 0.18f);
             bestPickup->collected = true;
             bot.lockedPickupIndex = -1;
             bot.targetLockTimer = 0.0f;
@@ -1676,7 +1678,7 @@ void Game::UpdateBromDevices(float dt)
                 }
             }
             const Vector3 anchor = owner != nullptr ? owner->GetPosition() : defensePoint;
-            const float orbit = static_cast<float>(drone.ownerPlayerId) * 1.7f + matchTime_ * 0.45f;
+            const float orbit = static_cast<float>(drone.ownerPlayerId) * 1.7f + matchSimulation_.MatchTimeSeconds() * 0.45f;
             const Vector3 patrol {
                 anchor.x + std::cos(orbit) * 3.4f,
                 anchor.y + 2.2f,
@@ -1864,7 +1866,7 @@ void Game::UpdateKonvoyDevices(float dt)
             {
                 dangerZone = true;
             }
-            for (const EnergyCore& core : cores_)
+            for (const EnergyCore& core : matchSimulation_.Cores())
             {
                 if (core.IsAlive() && core.GetTeamId() != target.GetTeamId()
                     && DistanceSquared(target.GetPosition(), world_.GridToWorld(core.GetBlockPosition())) <= 10.0f * 10.0f)
@@ -2257,7 +2259,7 @@ void Game::UpdateSvidetelEffects(float dt)
         }
         if (!occupied)
         {
-            world_.PlaceBlock(phased.position, phased.block, true);
+            PlaceWorldBlock(phased.position, phased.block, true, BlockDeltaReason::PhaseRestore);
             AddWorldEffect(center, HeroAccentColor(HeroId::Svidetel), 0.28f, 0.35f);
             phased.timer = -1.0f;
         }

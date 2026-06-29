@@ -104,7 +104,7 @@ void Game::StartAutomatch()
         DisableCursor();
     }
     showBotDebug_ = true;
-    SetMessage("Automatch running: bot-only simulation.", 4.0f);
+    SetMessage("Автоматч запущен: симуляция только с ботами.", 4.0f);
 }
 
 bool Game::RunAutomatchBatch(int runs, int ticksPerFrame, int maxMinutes, unsigned int seed)
@@ -186,7 +186,7 @@ void Game::ConfigureAutomatchMatch()
         }
         for (int slot = 0; slot < selectedTeamSize_; ++slot)
         {
-            Player bot(nextId++, std::string(TeamName(team.id)) + " Bot " + std::to_string(slot + 1), team.id, team.spawnPoint, false);
+            Player bot(nextId++, std::string(TeamName(team.id)) + " бот " + std::to_string(slot + 1), team.id, team.spawnPoint, false);
             bot.SetHeroId(HeroSystem::IdFromIndex(slot % HeroSystem::kHeroCount));
             bot.SetYaw(YawForTeam(team.id));
             ApplyBotLoadout(bot);
@@ -257,8 +257,8 @@ void Game::UpdateAutomatch(float dt)
         SampleAutomatchBots();
     }
 
-    const bool timeout = !winnerTeamId_.has_value() && matchTime_ >= automatch_.maxMatchSeconds;
-    if (!winnerTeamId_.has_value() && !timeout)
+    const bool timeout = !matchSimulation_.HasWinner() && matchSimulation_.MatchTimeSeconds() >= automatch_.maxMatchSeconds;
+    if (!matchSimulation_.HasWinner() && !timeout)
     {
         return;
     }
@@ -268,7 +268,7 @@ void Game::UpdateAutomatch(float dt)
     {
         automatch_.active = false;
         WriteAutomatchStatsJson();
-        SetMessage("Automatch complete. Review stats overlay.", 8.0f);
+        SetMessage("Автоматч завершен. Смотрите оверлей статистики.", 8.0f);
         return;
     }
 
@@ -371,7 +371,7 @@ void Game::SampleAutomatchBots()
             };
         }
         stats.maxDistanceFromBase = std::max(stats.maxDistanceFromBase, fromBase);
-        if (matchTime_ <= 60.0f)
+        if (matchSimulation_.MatchTimeSeconds() <= 60.0f)
         {
             stats.earlyMaxDistanceFromBase = std::max(stats.earlyMaxDistanceFromBase, fromBase);
         }
@@ -386,8 +386,8 @@ void Game::FinishAutomatchRun(bool timeout)
 {
     SampleAutomatchBots();
     AutomatchRunStats run {};
-    run.winnerTeamId = winnerTeamId_.value_or(-1);
-    run.duration = matchTime_;
+    run.winnerTeamId = matchSimulation_.WinnerTeamId();
+    run.duration = matchSimulation_.MatchTimeSeconds();
     run.timeout = timeout;
     run.firstCoreDamageTime = automatch_.currentFirstCoreDamageTime;
     run.timeline = automatch_.currentTimeline;
@@ -476,7 +476,7 @@ void Game::FinishAutomatchRun(bool timeout)
         }
     }
 
-    for (const EnergyCore& core : cores_)
+    for (const EnergyCore& core : matchSimulation_.Cores())
     {
         const int teamId = core.GetTeamId();
         if (teamId < 0 || teamId >= 4)
@@ -511,14 +511,14 @@ void Game::FinishAutomatchRun(bool timeout)
                 ++teamsWithLives;
             }
         }
-        run.finishReason = "timeout: " + std::to_string(aliveCores) + " cores alive, "
-            + std::to_string(teamsWithLives) + " teams with lives";
+        run.finishReason = "тайм-аут: живых ядер " + std::to_string(aliveCores) + ", команд с жизнями "
+            + std::to_string(teamsWithLives);
     }
     else
     {
         run.finishReason = run.winnerTeamId >= 0
-            ? std::string(TeamName(run.winnerTeamId)) + " was last team standing"
-            : "match ended without winner";
+            ? std::string(TeamName(run.winnerTeamId)) + " осталась последней командой"
+            : "матч завершен без победителя";
     }
 
     ++automatch_.completedRuns;
@@ -619,7 +619,7 @@ void Game::WriteAutomatchStatsJson() const
         file << "    {\n";
         file << "      \"index\": " << (i + 1) << ",\n";
         file << "      \"winnerTeamId\": " << run.winnerTeamId << ",\n";
-        file << "      \"winnerTeam\": \"" << JsonEscape(run.winnerTeamId >= 0 ? TeamName(run.winnerTeamId) : "None") << "\",\n";
+        file << "      \"winnerTeam\": \"" << JsonEscape(run.winnerTeamId >= 0 ? TeamName(run.winnerTeamId) : "Нет") << "\",\n";
         file << "      \"durationSeconds\": " << run.duration << ",\n";
         file << "      \"timeout\": " << (run.timeout ? "true" : "false") << ",\n";
         file << "      \"finishReason\": \"" << JsonEscape(run.finishReason) << "\",\n";
@@ -710,7 +710,7 @@ void Game::WriteAutomatchStatsJson() const
         file << "    {\n";
         file << "      \"name\": \"" << JsonEscape(stats.name) << "\",\n";
         file << "      \"teamId\": " << stats.teamId << ",\n";
-        file << "      \"team\": \"" << JsonEscape(stats.teamId >= 0 ? TeamName(stats.teamId) : "Unknown") << "\",\n";
+            file << "      \"team\": \"" << JsonEscape(stats.teamId >= 0 ? TeamName(stats.teamId) : "Неизвестно") << "\",\n";
         file << "      \"samples\": " << stats.samples << ",\n";
         file << "      \"roleChanges\": " << stats.roleChanges << ",\n";
         file << "      \"intentChanges\": " << stats.intentChanges << ",\n";

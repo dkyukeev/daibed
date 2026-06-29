@@ -3,6 +3,7 @@
 #include "CombatSystem.h"
 #include "HeroSystem.h"
 #include "UiText.h"
+#include "VecConvert.h"
 #include "rlgl.h"
 
 #include <algorithm>
@@ -508,11 +509,11 @@ std::string LevelText(const ShopItem& item, const Inventory& inventory, const Te
     switch (item.choice)
     {
     case 101:
-        return "Lv " + std::to_string(inventory.GetSwordLevel()) + "/" + std::to_string(item.maxLevel);
+        return "Ур " + std::to_string(inventory.GetSwordLevel()) + "/" + std::to_string(item.maxLevel);
     case 102:
-        return "Lv " + std::to_string(inventory.GetToolLevel()) + "/" + std::to_string(item.maxLevel);
+        return "Ур " + std::to_string(inventory.GetToolLevel()) + "/" + std::to_string(item.maxLevel);
     case 103:
-        return "Lv " + std::to_string(inventory.GetArmorLevel()) + "/" + std::to_string(item.maxLevel);
+        return "Ур " + std::to_string(inventory.GetArmorLevel()) + "/" + std::to_string(item.maxLevel);
     case 109:
         return "Ур " + std::to_string(inventory.GetBowUpgradeLevel()) + "/" + std::to_string(item.maxLevel);
     case 402:
@@ -520,11 +521,11 @@ std::string LevelText(const ShopItem& item, const Inventory& inventory, const Te
     case 403:
         return "Ур " + std::to_string(inventory.GetBlasterDamageLevel()) + "/" + std::to_string(item.maxLevel);
     case 301:
-        return "Lv " + std::to_string(team != nullptr ? team->forgeLevel : 0) + "/" + std::to_string(item.maxLevel);
+        return "Ур " + std::to_string(team != nullptr ? team->forgeLevel : 0) + "/" + std::to_string(item.maxLevel);
     case 302:
-        return "Lv " + std::to_string(team != nullptr ? team->healAuraLevel : 0) + "/" + std::to_string(item.maxLevel);
+        return "Ур " + std::to_string(team != nullptr ? team->healAuraLevel : 0) + "/" + std::to_string(item.maxLevel);
     case 304:
-        return "Lv " + std::to_string(team != nullptr && team->enemyTrackerUnlocked ? 1 : 0) + "/" + std::to_string(item.maxLevel);
+        return "Ур " + std::to_string(team != nullptr && team->enemyTrackerUnlocked ? 1 : 0) + "/" + std::to_string(item.maxLevel);
     default:
         break;
     }
@@ -1543,7 +1544,7 @@ void Renderer::RenderScene(
 
     for (const Generator& generator : generators)
     {
-        const Vector3 pos = generator.GetPosition();
+        const Vector3 pos = ToVector3(generator.GetPosition());
         DrawCube(Vector3 { pos.x, pos.y + 0.18f, pos.z }, 0.85f, 0.35f, 0.85f, GetResourceColor(generator.GetType()));
         DrawSphere(Vector3 { pos.x, pos.y + 0.62f, pos.z }, 0.24f, WHITE);
     }
@@ -2340,7 +2341,7 @@ void Renderer::RenderScene(
         DrawRectangleLines(x, y + 20, labelWidth, 6, Fade(WHITE, 0.42f));
         if (player.HasShield())
         {
-            DrawText("SHIELD", x, y + 29, 10, Color { 112, 232, 255, 255 });
+            DrawText("ЩИТ", x, y + 29, 10, Color { 112, 232, 255, 255 });
         }
     }
 
@@ -2425,7 +2426,7 @@ void Renderer::RenderUI(
     }
     if (inShopZone)
     {
-        DrawText("Shop zone: R", 28, GetScreenHeight() - 40, 18, Color { 125, 230, 255, 255 });
+        DrawText("Зона магазина: R", 28, GetScreenHeight() - 40, 18, Color { 125, 230, 255, 255 });
     }
 
     if (shopOpen)
@@ -2436,7 +2437,7 @@ void Renderer::RenderUI(
         const int panelY = GetScreenHeight() / 2 - panelHeight / 2;
         DrawRectangle(panelX, panelY, panelWidth, panelHeight, Fade(Color { 8, 10, 14, 255 }, 0.88f));
         DrawRectangleLines(panelX, panelY, panelWidth, panelHeight, Fade(WHITE, 0.22f));
-        DrawText("Team Shop", panelX + 24, panelY + 20, 28, WHITE);
+        DrawText("Командный магазин", panelX + 24, panelY + 20, 28, WHITE);
         const int tabWidth = 118;
         const int tabHeight = 26;
         const int tabY = panelY + 52;
@@ -2490,7 +2491,7 @@ void Renderer::RenderUI(
             DrawText(item.name.c_str(), panelX + 104, rowY, 17, rowColor);
             DrawText(item.description.c_str(), panelX + 252, rowY, 16, Fade(rowColor, 0.88f));
             DrawText(LevelText(item, inventory, playerTeam).c_str(), panelX + 548, rowY, 16, Fade(rowColor, 0.78f));
-            DrawText(maxed ? "MAX" : CostText(item).c_str(), panelX + 618, rowY, 16, affordable ? Color { 128, 238, 166, 255 } : Color { 255, 130, 130, 255 });
+            DrawText(maxed ? "МАКС" : CostText(item).c_str(), panelX + 618, rowY, 16, affordable ? Color { 128, 238, 166, 255 } : Color { 255, 130, 130, 255 });
             rowY += 34;
         }
     }
@@ -2708,7 +2709,7 @@ void Renderer::RenderUI(
         const int panelY = GetScreenHeight() / 2 - panelHeight / 2;
         DrawRectangle(panelX, panelY, panelWidth, panelHeight, Fade(Color { 8, 10, 14, 255 }, 0.90f));
         DrawRectangleLines(panelX, panelY, panelWidth, panelHeight, Fade(WHITE, 0.22f));
-        DrawText("Inventory", panelX + 20, panelY + 16, 24, WHITE);
+        DrawText("Инвентарь", panelX + 20, panelY + 16, 24, WHITE);
 
         const auto& mainSlots = inventory.GetMainSlots();
         const int gridX = panelX + 21;
@@ -2754,22 +2755,22 @@ void Renderer::RenderUI(
     {
         const Team* winner = FindTeam(teams, *winnerTeamId);
         const bool localVictory = localPlayer.GetTeamId() == *winnerTeamId;
-        const std::string title = localVictory ? "VICTORY" : "DEFEAT";
-        const std::string winnerText = (winner != nullptr ? winner->name : "Unknown") + " team wins";
+        const std::string title = localVictory ? "ПОБЕДА" : "ПОРАЖЕНИЕ";
+        const std::string winnerText = (winner != nullptr ? winner->name : "Неизвестная команда") + " побеждает";
         DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Fade(BLACK, 0.45f));
         DrawText(title.c_str(), GetScreenWidth() / 2 - MeasureText(title.c_str(), 48) / 2, GetScreenHeight() / 2 - 68, 48, localVictory ? Color { 142, 255, 170, 255 } : Color { 255, 138, 138, 255 });
         DrawText(winnerText.c_str(), GetScreenWidth() / 2 - MeasureText(winnerText.c_str(), 24) / 2, GetScreenHeight() / 2 - 18, 24, WHITE);
-        const std::string combatStats = "Time " + std::to_string(static_cast<int>(matchTime)) + "s"
+        const std::string combatStats = "Время " + std::to_string(static_cast<int>(matchTime)) + "с"
             + " | K/D " + std::to_string(stats.kills) + "/" + std::to_string(stats.deaths)
-            + " | Hits " + std::to_string(stats.hitsDealt)
-            + " | Damage " + std::to_string(stats.damageDealt)
-            + " | Core " + std::to_string(stats.coreDamageDealt);
-        const std::string economyStats = "Cores " + std::to_string(stats.coresDestroyed)
-            + " | Blocks " + std::to_string(stats.blocksPlaced) + "/" + std::to_string(stats.blocksBroken)
-            + " | Resources " + std::to_string(stats.resourcesPicked);
+            + " | Попадания " + std::to_string(stats.hitsDealt)
+            + " | Урон " + std::to_string(stats.damageDealt)
+            + " | Кор " + std::to_string(stats.coreDamageDealt);
+        const std::string economyStats = "Коры " + std::to_string(stats.coresDestroyed)
+            + " | Блоки " + std::to_string(stats.blocksPlaced) + "/" + std::to_string(stats.blocksBroken)
+            + " | Ресурсы " + std::to_string(stats.resourcesPicked);
         DrawText(combatStats.c_str(), GetScreenWidth() / 2 - MeasureText(combatStats.c_str(), 22) / 2, GetScreenHeight() / 2 + 20, 22, Color { 220, 220, 220, 255 });
         DrawText(economyStats.c_str(), GetScreenWidth() / 2 - MeasureText(economyStats.c_str(), 22) / 2, GetScreenHeight() / 2 + 50, 22, Color { 220, 220, 220, 255 });
-        const char* actions = "Enter: new match | Esc: main menu";
+        const char* actions = "Enter: новый матч | Esc: главное меню";
         DrawText(actions, GetScreenWidth() / 2 - MeasureText(actions, 24) / 2, GetScreenHeight() / 2 + 88, 24, Color { 220, 220, 220, 255 });
     }
 

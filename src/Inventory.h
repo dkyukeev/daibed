@@ -2,6 +2,7 @@
 
 #include "Block.h"
 #include "Resource.h"
+#include "Simulation/SimMath.h"
 
 #include <array>
 #include <optional>
@@ -60,6 +61,21 @@ struct ItemStack
 constexpr int kHotbarSlotCount = 9;
 constexpr int kMainInventorySlotCount = 27;
 constexpr int kInventorySlotCount = kHotbarSlotCount + kMainInventorySlotCount;
+
+// A dropped inventory stack in the world. Raylib-free (Vec3) so it can be owned
+// by MatchSimulation; the renderer/physics convert at the Game boundary. (Moved
+// here from Feedback.h.) See docs/NETWORK_PREP_PLAN.md.
+struct DroppedItem
+{
+    ItemStack stack;
+    Vec3 position {};
+    Vec3 velocity {};
+    int ownerPlayerId = -1;
+    float ownerPickupDelay = 0.0f;
+    float lifetime = 45.0f;
+    float age = 0.0f;
+    bool collected = false;
+};
 
 const char* ItemDisplayName(ItemType type);
 const char* ItemShortName(ItemType type);

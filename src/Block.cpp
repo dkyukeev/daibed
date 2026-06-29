@@ -71,7 +71,7 @@ const char* ToString(BlockType type)
         return "EnergyCoreBlock";
     }
 
-    return "Unknown";
+    return "Неизвестно";
 }
 
 const char* DisplayName(BlockType type)
@@ -79,45 +79,45 @@ const char* DisplayName(BlockType type)
     switch (type)
     {
     case BlockType::WoodBlock:
-        return "Wood block";
+        return "Деревянный блок";
     case BlockType::WoolBlock:
     case BlockType::TeamBlock:
-        return "Light block";
+        return "Легкий блок";
     case BlockType::StoneBlock:
-        return "Stone block";
+        return "Каменный блок";
     case BlockType::ObsidianBlock:
-        return "Obsidian";
+        return "Обсидиан";
     case BlockType::EnergyGlassBlock:
-        return "Energy glass";
+        return "Энергостекло";
     case BlockType::SpringBlock:
-        return "Spring block";
+        return "Пружинный блок";
     case BlockType::StickyBlock:
-        return "Sticky block";
+        return "Липкий блок";
     case BlockType::ExplosiveBlock:
         return "TNT";
     case BlockType::SpikeBlock:
-        return "Spikes";
+        return "Шипы";
     case BlockType::LavaBlock:
-        return "Lava";
+        return "Лава";
     case BlockType::IceBlock:
-        return "Ice";
+        return "Лед";
     case BlockType::Solid:
-        return "Arena stone";
+        return "Камень арены";
     case BlockType::GrassBlock:
-        return "Grass";
+        return "Трава";
     case BlockType::DirtBlock:
-        return "Dirt";
+        return "Земля";
     case BlockType::LeafBlock:
-        return "Leaves";
+        return "Листва";
     case BlockType::ResourceGenerator:
-        return "Generator";
+        return "Генератор";
     case BlockType::EnergyCoreBlock:
-        return "EnergyCore";
+        return "Кор";
     case BlockType::Air:
-        return "Air";
+        return "Воздух";
     }
 
-    return "Unknown";
+    return "Неизвестно";
 }
 
 bool IsBuildableBlock(BlockType type)

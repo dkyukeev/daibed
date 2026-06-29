@@ -54,29 +54,29 @@ const char* ItemDisplayName(ItemType type)
     switch (type)
     {
     case ItemType::WoodBlock:
-        return "Wood block";
+        return "Деревянный блок";
     case ItemType::LightBlock:
-        return "Light block";
+        return "Легкий блок";
     case ItemType::StoneBlock:
-        return "Stone block";
+        return "Каменный блок";
     case ItemType::ObsidianBlock:
-        return "Obsidian";
+        return "Обсидиан";
     case ItemType::EnergyGlassBlock:
-        return "Energy glass";
+        return "Энергостекло";
     case ItemType::SpringBlock:
-        return "Spring block";
+        return "Пружинный блок";
     case ItemType::StickyBlock:
-        return "Sticky block";
+        return "Липкий блок";
     case ItemType::ExplosiveBlock:
         return "TNT";
     case ItemType::Sword:
-        return "Sword";
+        return "Меч";
     case ItemType::Axe:
-        return "Axe";
+        return "Топор";
     case ItemType::Spear:
-        return "Spear";
+        return "Копье";
     case ItemType::Pickaxe:
-        return "Pickaxe";
+        return "Кирка";
     case ItemType::Bow:
         return "Лук";
     case ItemType::Blaster:
@@ -84,25 +84,25 @@ const char* ItemDisplayName(ItemType type)
     case ItemType::SniperRifle:
         return "Снайперская винтовка";
     case ItemType::EnergyArrow:
-        return "Energy arrow";
+        return "Энергострела";
     case ItemType::Fireball:
-        return "Fireball";
+        return "Фаербол";
     case ItemType::MedKit:
-        return "Med kit";
+        return "Аптечка";
     case ItemType::HomeTeleport:
-        return "Home teleport";
+        return "Телепорт домой";
     case ItemType::DashPearl:
-        return "Dash pearl";
+        return "Жемчуг рывка";
     case ItemType::Molotov:
-        return "Molotov";
+        return "Коктейль Молотова";
     case ItemType::AlarmTrap:
-        return "Alarm trap";
+        return "Сигнальная ловушка";
     case ItemType::IronResource:
-        return "Iron";
+        return "Железо";
     case ItemType::GoldResource:
-        return "Gold";
+        return "Золото";
     case ItemType::CrystalResource:
-        return "Crystal";
+        return "Кристалл";
     case ItemType::None:
         break;
     }
@@ -115,29 +115,29 @@ const char* ItemShortName(ItemType type)
     switch (type)
     {
     case ItemType::WoodBlock:
-        return "Wood";
+        return "Дерево";
     case ItemType::LightBlock:
-        return "Light";
+        return "Легк.";
     case ItemType::StoneBlock:
-        return "Stone";
+        return "Камень";
     case ItemType::ObsidianBlock:
-        return "Obs";
+        return "Обс.";
     case ItemType::EnergyGlassBlock:
-        return "Glass";
+        return "Стекло";
     case ItemType::SpringBlock:
-        return "Spring";
+        return "Пруж.";
     case ItemType::StickyBlock:
-        return "Sticky";
+        return "Липк.";
     case ItemType::ExplosiveBlock:
         return "TNT";
     case ItemType::Sword:
-        return "Sword";
+        return "Меч";
     case ItemType::Axe:
-        return "Axe";
+        return "Топор";
     case ItemType::Spear:
-        return "Spear";
+        return "Копье";
     case ItemType::Pickaxe:
-        return "Pick";
+        return "Кирка";
     case ItemType::Bow:
         return "Лук";
     case ItemType::Blaster:
@@ -145,19 +145,19 @@ const char* ItemShortName(ItemType type)
     case ItemType::SniperRifle:
         return "Снайперка";
     case ItemType::EnergyArrow:
-        return "Arrow";
+        return "Стрела";
     case ItemType::Fireball:
-        return "Fire";
+        return "Огонь";
     case ItemType::MedKit:
-        return "Med";
+        return "Апт.";
     case ItemType::HomeTeleport:
-        return "Home";
+        return "Домой";
     case ItemType::DashPearl:
-        return "Dash";
+        return "Рывок";
     case ItemType::Molotov:
-        return "Molo";
+        return "Мол.";
     case ItemType::AlarmTrap:
-        return "Alarm";
+        return "Трев.";
     case ItemType::IronResource:
         return "Fe";
     case ItemType::GoldResource:

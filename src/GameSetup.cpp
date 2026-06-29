@@ -1,4 +1,5 @@
 #include "Game.h"
+#include "VecConvert.h"
 
 #include "raylib.h"
 
@@ -330,10 +331,10 @@ void Game::SetupMatch()
 {
     world_.Clear();
     teams_.clear();
-    cores_.clear();
-    players_.clear();
-    generators_.clear();
-    pickups_.clear();
+    matchSimulation_.ResetCores();
+    matchSimulation_.Players().clear(); // players accessed via MatchSimulation (6A)
+    matchSimulation_.ResetGenerators();
+    matchSimulation_.ResetPickups();
     worldEffects_.clear();
     particles_.Clear();
     timedExplosions_.clear();
@@ -352,8 +353,13 @@ void Game::SetupMatch()
     konvoyDomes_.clear();
     likhoBleeds_.clear();
     svidetelEchoes_.clear();
+    replicatedProjectiles_.clear();
+    replicatedExplosives_.clear();
+    replicatedHazardZones_.clear();
+    replicatedHeroDevices_.clear();
+    replicatedStatusEffects_.clear();
     svidetelPhaseBlocks_.clear();
-    droppedItems_.clear();
+    matchSimulation_.ResetDroppedItems();
     floatingTexts_.clear();
     eventMessages_.clear();
     killFeed_.clear();
@@ -376,7 +382,7 @@ void Game::SetupMatch()
     hitMarkerTimer_ = 0.0f;
     damageFlashTimer_ = 0.0f;
     orbitaTeleportPreviewTimer_ = 0.0f;
-    matchTime_ = 0.0f;
+    // matchTime_ is now owned by matchSimulation_ and cleared in its Reset().
     pickupMergeTimer_ = 0.0f;
     droppedItemMergeTimer_ = 0.0f;
     passiveRegenTimer_ = 0.0f;
@@ -386,13 +392,41 @@ void Game::SetupMatch()
     localAirPeakY_ = 0.0f;
     localWasOnGround_ = false;
     simulationOrderOffset_ = 0;
-    winnerTeamId_.reset();
+    predictionHistory_.clear();
+    remoteSnapshotBuffer_.clear();
+    estimatedPingMs_ = 0.0f;
+    networkSnapshotAgeMs_ = 0.0f;
+    networkPacketLossEstimate_ = 0.0f;
+    networkInterpolationDelayMs_ = 0.0f;
+    networkInterpolationDelaySeconds_ = 0.10f;
+    networkBytesPerSecond_ = 0.0f;
+    networkPacketsPerSecond_ = 0.0f;
+    networkLastFullSnapshotBytes_ = 0;
+    networkLastDeltaSnapshotBytes_ = 0;
+    networkFullSnapshots_ = 0;
+    networkDeltaSnapshots_ = 0;
+    networkDroppedSnapshots_ = 0;
+    networkIgnoredSnapshots_ = 0;
+    networkResyncRequests_ = 0;
+    predictionError_ = 0.0f;
+    predictionCorrectionFlashTimer_ = 0.0f;
+    predictionCorrectionStatsTimer_ = 0.0f;
+    predictionCorrectionsThisSecond_ = 0;
+    predictionCorrectionsPerSecond_ = 0.0f;
+    unackedCommandCount_ = 0;
+    lastAuthoritativeTick_ = 0;
+    matchSimulation_.Reset(); // clears tick/clock/queue + winner + phase (Lobby)
     suddenDeathTiebreakTeamId_.reset();
     coreCollapseTriggered_ = false;
     coreCollapseWarned_ = false;
     suddenDeathDecayTimer_ = 0.0f;
     generatorBoostTriggered_ = false;
     shopOpen_ = false;
+    economyActionSeq_.clear();
+    clientEconomyActionSeq_ = 0;
+    pendingEconomyActionType_ = PlayerActionType::None;
+    pendingEconomyActionParamA_ = 0;
+    pendingEconomyActionParamB_ = 0;
     selectedHotbarSlot_ = 0;
     inventoryOpen_ = false;
     CloseChest();
@@ -497,7 +531,7 @@ void Game::SetupMatch()
             continue;
         }
         world_.PlaceBlock(team.coreBlock, Block { BlockType::EnergyCoreBlock, team.id, false }, true);
-        cores_.emplace_back(team.id, team.coreBlock, 120);
+        matchSimulation_.Cores().emplace_back(team.id, team.coreBlock, 120);
         world_.PlaceBlock(GridPos { team.coreBlock.x + 1, team.coreBlock.y, team.coreBlock.z }, Block { BlockType::StoneBlock, team.id, true }, true);
         world_.PlaceBlock(GridPos { team.coreBlock.x - 1, team.coreBlock.y, team.coreBlock.z }, Block { BlockType::WoolBlock, team.id, true }, true);
         world_.PlaceBlock(GridPos { team.coreBlock.x, team.coreBlock.y, team.coreBlock.z + 1 }, Block { BlockType::WoolBlock, team.id, true }, true);
@@ -513,97 +547,183 @@ void Game::SetupMatch()
         selectedTeamId_ = localTeam->id;
     }
 
-    Player local(localPlayerId_, "Local Runner", selectedTeamId_, localTeam->spawnPoint, true);
-    local.SetHeroId(selectedHeroId_);
-    local.SetYaw(YawForTeam(selectedTeamId_));
-    local.GetInventory().AddItem(selectedHeroId_ == HeroId::Svidetel ? ItemType::SniperRifle : ItemType::Sword, 1);
-    local.GetInventory().AddBlock(BlockType::WoodBlock, 24);
-    local.GetInventory().AddBlock(BlockType::WoolBlock, 32);
-    local.GetInventory().AddBlock(BlockType::StoneBlock, 8);
-
-    players_.push_back(local);
-
-    int nextBotId = 2;
-    std::array<int, 4> teamRoster {};
-    teamRoster[selectedTeamId_] = 1;
-    int botsRemaining = selectedBotCount_;
-    const auto addBot = [this, &nextBotId, &teamRoster, &botsRemaining](int teamId)
+    const auto giveHumanLoadout = [](Player& player, HeroId heroId)
     {
-        const Team* team = FindTeam(teamId);
-        if (team == nullptr || botsRemaining <= 0 || teamRoster[teamId] >= selectedTeamSize_)
-        {
-            return;
-        }
-
-        const bool ally = teamId == selectedTeamId_;
-        const std::string name = std::string(ally ? "Ally" : TeamName(teamId))
-            + " Bot " + std::to_string(teamRoster[teamId] + 1);
-        Player bot(nextBotId++, name, teamId, team->spawnPoint, false);
-        std::array<HeroId, HeroSystem::kHeroCount> availableHeroes {};
-        int availableHeroCount = 0;
-        for (int heroIndex = 0; heroIndex < HeroSystem::kHeroCount; ++heroIndex)
-        {
-            const HeroId candidate = HeroSystem::IdFromIndex(heroIndex);
-            const bool alreadyUsed = std::any_of(players_.begin(), players_.end(), [teamId, candidate](const Player& player)
-            {
-                return player.GetTeamId() == teamId && player.GetHeroId() == candidate;
-            });
-            if (!alreadyUsed)
-            {
-                availableHeroes[availableHeroCount++] = candidate;
-            }
-        }
-        const int heroChoice = availableHeroCount > 1 ? GetRandomValue(0, availableHeroCount - 1) : 0;
-        bot.SetHeroId(availableHeroCount > 0 ? availableHeroes[heroChoice] : HeroId::Radon);
-        bot.SetYaw(YawForTeam(teamId));
-        ApplyBotLoadout(bot);
-        players_.push_back(bot);
-        ++teamRoster[teamId];
-        --botsRemaining;
+        player.GetInventory().AddItem(heroId == HeroId::Svidetel ? ItemType::SniperRifle : ItemType::Sword, 1);
+        player.GetInventory().AddBlock(BlockType::WoodBlock, 24);
+        player.GetInventory().AddBlock(BlockType::WoolBlock, 32);
+        player.GetInventory().AddBlock(BlockType::StoneBlock, 8);
     };
 
-    std::vector<int> enemyTeams;
-    for (const Team& team : teams_)
+    if (!pendingNetworkRoster_.empty())
     {
-        if (team.id != selectedTeamId_ && IsTeamActiveForMode(team.id))
+        int nextPlayerId = 1;
+        for (const LobbyPlayerState& lobbyPlayer : pendingNetworkRoster_)
         {
-            enemyTeams.push_back(team.id);
+            const int teamId = std::clamp(lobbyPlayer.selectedTeam, 0, TeamCountForMode() - 1);
+            const Team* team = FindTeam(teamId);
+            if (team == nullptr)
+            {
+                continue;
+            }
+            const int heroIndex = std::clamp(lobbyPlayer.selectedHero, 0, HeroSystem::kHeroCount - 1);
+            const HeroId heroId = HeroSystem::IdFromIndex(heroIndex);
+            const std::string name = lobbyPlayer.playerName.empty()
+                ? ("Игрок " + std::to_string(lobbyPlayer.clientId))
+                : lobbyPlayer.playerName;
+            Player player(nextPlayerId++, name, teamId, team->spawnPoint, false);
+            player.SetHeroId(heroId);
+            player.SetYaw(YawForTeam(teamId));
+            giveHumanLoadout(player, heroId);
+            matchSimulation_.Players().push_back(player);
         }
-    }
-    if (TeamCountForMode() == 2 && !enemyTeams.empty())
-    {
-        const int enemyTeamId = enemyTeams.front();
-        while (botsRemaining > 0 && teamRoster[enemyTeamId] < selectedTeamSize_)
+
+        // Fill the remaining team slots with bots so a small network roster still
+        // gets a full, lively arena to play/spectate (Phase 0.1T). Network matches
+        // only — the single-player branch below is untouched, so automatch/seed
+        // determinism is unaffected. The roster players above keep ids 1..N and are
+        // the ones the server binds to clients; these bots get the later ids and
+        // are driven by the AI (they are not in networkControlledPlayerIds_).
+        const int teamSize = std::clamp(selectedTeamSize_, 1, 4);
+        std::array<int, 4> teamCounts {};
+        for (const Player& existing : matchSimulation_.Players())
         {
-            addBot(enemyTeamId);
+            const int t = existing.GetTeamId();
+            if (t >= 0 && t < 4)
+            {
+                ++teamCounts[t];
+            }
         }
-        while (botsRemaining > 0 && teamRoster[selectedTeamId_] < selectedTeamSize_)
+        int nextBotId = nextPlayerId;
+        for (const Team& team : teams_)
         {
-            addBot(selectedTeamId_);
+            if (!IsTeamActiveForMode(team.id))
+            {
+                continue;
+            }
+            while (teamCounts[team.id] < teamSize)
+            {
+                Player bot(
+                    nextBotId++,
+                    std::string(TeamName(team.id)) + " бот " + std::to_string(teamCounts[team.id] + 1),
+                    team.id,
+                    team.spawnPoint,
+                    false);
+                std::array<HeroId, HeroSystem::kHeroCount> availableHeroes {};
+                int availableHeroCount = 0;
+                for (int heroIndex = 0; heroIndex < HeroSystem::kHeroCount; ++heroIndex)
+                {
+                    const HeroId candidate = HeroSystem::IdFromIndex(heroIndex);
+                    const bool alreadyUsed = std::any_of(players_.begin(), players_.end(),
+                        [&team, candidate](const Player& other)
+                        {
+                            return other.GetTeamId() == team.id && other.GetHeroId() == candidate;
+                        });
+                    if (!alreadyUsed)
+                    {
+                        availableHeroes[availableHeroCount++] = candidate;
+                    }
+                }
+                const int heroChoice = availableHeroCount > 1 ? GetRandomValue(0, availableHeroCount - 1) : 0;
+                bot.SetHeroId(availableHeroCount > 0 ? availableHeroes[heroChoice] : HeroId::Radon);
+                bot.SetYaw(YawForTeam(team.id));
+                ApplyBotLoadout(bot);
+                matchSimulation_.Players().push_back(bot);
+                ++teamCounts[team.id];
+            }
         }
     }
     else
     {
-        bool added = true;
-        while (botsRemaining > 0 && added)
+        Player local(localPlayerId_, "Игрок", selectedTeamId_, localTeam->spawnPoint, true);
+        local.SetHeroId(selectedHeroId_);
+        local.SetYaw(YawForTeam(selectedTeamId_));
+        giveHumanLoadout(local, selectedHeroId_);
+
+        matchSimulation_.Players().push_back(local);
+
+        int nextBotId = 2;
+        std::array<int, 4> teamRoster {};
+        teamRoster[selectedTeamId_] = 1;
+        int botsRemaining = selectedBotCount_;
+        const auto addBot = [this, &nextBotId, &teamRoster, &botsRemaining](int teamId)
         {
-            added = false;
-            for (int teamId : enemyTeams)
+            const Team* team = FindTeam(teamId);
+            if (team == nullptr || botsRemaining <= 0 || teamRoster[teamId] >= selectedTeamSize_)
             {
-                if (botsRemaining <= 0)
+                return;
+            }
+
+            const bool ally = teamId == selectedTeamId_;
+            const std::string name = std::string(ally ? "Союзник" : TeamName(teamId))
+                + " бот " + std::to_string(teamRoster[teamId] + 1);
+            Player bot(nextBotId++, name, teamId, team->spawnPoint, false);
+            std::array<HeroId, HeroSystem::kHeroCount> availableHeroes {};
+            int availableHeroCount = 0;
+            for (int heroIndex = 0; heroIndex < HeroSystem::kHeroCount; ++heroIndex)
+            {
+                const HeroId candidate = HeroSystem::IdFromIndex(heroIndex);
+                const bool alreadyUsed = std::any_of(players_.begin(), players_.end(), [teamId, candidate](const Player& player)
                 {
-                    break;
-                }
-                if (teamRoster[teamId] < selectedTeamSize_)
+                    return player.GetTeamId() == teamId && player.GetHeroId() == candidate;
+                });
+                if (!alreadyUsed)
                 {
-                    addBot(teamId);
-                    added = true;
+                    availableHeroes[availableHeroCount++] = candidate;
                 }
             }
-        }
-        while (botsRemaining > 0 && teamRoster[selectedTeamId_] < selectedTeamSize_)
+            const int heroChoice = availableHeroCount > 1 ? GetRandomValue(0, availableHeroCount - 1) : 0;
+            bot.SetHeroId(availableHeroCount > 0 ? availableHeroes[heroChoice] : HeroId::Radon);
+            bot.SetYaw(YawForTeam(teamId));
+            ApplyBotLoadout(bot);
+            matchSimulation_.Players().push_back(bot);
+            ++teamRoster[teamId];
+            --botsRemaining;
+        };
+
+        std::vector<int> enemyTeams;
+        for (const Team& team : teams_)
         {
-            addBot(selectedTeamId_);
+            if (team.id != selectedTeamId_ && IsTeamActiveForMode(team.id))
+            {
+                enemyTeams.push_back(team.id);
+            }
+        }
+        if (TeamCountForMode() == 2 && !enemyTeams.empty())
+        {
+            const int enemyTeamId = enemyTeams.front();
+            while (botsRemaining > 0 && teamRoster[enemyTeamId] < selectedTeamSize_)
+            {
+                addBot(enemyTeamId);
+            }
+            while (botsRemaining > 0 && teamRoster[selectedTeamId_] < selectedTeamSize_)
+            {
+                addBot(selectedTeamId_);
+            }
+        }
+        else
+        {
+            bool added = true;
+            while (botsRemaining > 0 && added)
+            {
+                added = false;
+                for (int teamId : enemyTeams)
+                {
+                    if (botsRemaining <= 0)
+                    {
+                        break;
+                    }
+                    if (teamRoster[teamId] < selectedTeamSize_)
+                    {
+                        addBot(teamId);
+                        added = true;
+                    }
+                }
+            }
+            while (botsRemaining > 0 && teamRoster[selectedTeamId_] < selectedTeamSize_)
+            {
+                addBot(selectedTeamId_);
+            }
         }
     }
 
@@ -619,14 +739,19 @@ void Game::SetupMatch()
         localAirPeakY_ = localPlayer->GetPosition().y;
     }
 
-    AddEventMessage("Collect resources at your base generator", Color { 188, 198, 210, 255 }, 5.0f);
-    AddEventMessage("Buy blocks, bridge to center, crack enemy defenses", Color { 255, 235, 142, 255 }, 5.5f);
-    AddEventMessage("Hold LMB to break blocks or damage an EnergyCore", Color { 112, 232, 255, 255 }, 6.0f);
-    AddEventMessage("Gold crosshair = enemy in melee range", Color { 255, 235, 142, 255 }, 6.5f);
+    AddEventMessage("Собирайте ресурсы у генератора на базе", Color { 188, 198, 210, 255 }, 5.0f);
+    AddEventMessage("Покупайте блоки, стройте мост к центру и ломайте защиту врага", Color { 255, 235, 142, 255 }, 5.5f);
+    AddEventMessage("Удерживайте ЛКМ, чтобы ломать блоки или бить Кор", Color { 112, 232, 255, 255 }, 6.0f);
+    AddEventMessage("Золотой прицел = враг в радиусе ближнего боя", Color { 255, 235, 142, 255 }, 6.5f);
     if (arenaBiome_ != ArenaBiome::Arena)
     {
-        AddEventMessage(std::string("Biome rule: ") + ArenaBiomeName(), BiomeFogColor(), 6.8f);
+        AddEventMessage(std::string("Правило биома: ") + ArenaBiomeName(), BiomeFogColor(), 6.8f);
     }
+
+    // The match is set up and the simulation is live (snapshot phase). Reset()
+    // above set it to Lobby; the win condition will move it to Finished.
+    matchSimulation_.ResetBlockDeltas();
+    matchSimulation_.SetPhase(MatchPhase::Playing);
 }
 
 void Game::AddClassicArenaLayout()
@@ -947,7 +1072,7 @@ void Game::SetupGenerators()
     const auto addGenerator = [this](ResourceType type, Vector3 position, float interval, int amount, int teamId)
     {
         world_.PlaceBlock(world_.WorldToGrid(position), Block { BlockType::ResourceGenerator, teamId, false }, true);
-        generators_.emplace_back(type, position, interval, amount, teamId);
+        matchSimulation_.Generators().emplace_back(type, ToVec3(position), interval, amount, teamId);
     };
 
     if (IsTeamActiveForMode(0))
@@ -1129,7 +1254,7 @@ void Game::StartSelectedMatch()
     UpdateCamera(0.016f);
     screen_ = GameScreen::Playing;
     DisableCursor();
-    SetMessage(std::string("Mode: ") + MatchModeName() + ". Protect your EnergyCore.", 4.0f);
+    SetMessage(std::string("Режим: ") + MatchModeName() + ". Защищайте Кор.", 4.0f);
 }
 
 void Game::StartTutorialMatch()
@@ -1149,5 +1274,5 @@ void Game::StartTutorialMatch()
     UpdateCamera(0.016f);
     screen_ = GameScreen::Playing;
     DisableCursor();
-    SetMessage("Обучение: защищайте свой EnergyCore и уничтожьте вражеский.", 6.0f);
+    SetMessage("Обучение: защищайте свой Кор и уничтожьте вражеский.", 6.0f);
 }
