@@ -180,6 +180,7 @@ int main(int argc, char** argv)
         bool cliClientInputSmoke = false;
         bool cliNetworkActionsSmoke = false;
         bool cliNetworkRangedSmoke = false;
+        bool cliMovementParitySmoke = false;
         bool cliClientDynamicApplySmoke = false;
         double cliServerSeconds = 0.0; // 0 == run until interrupted
         bool cliServer = false;
@@ -270,6 +271,10 @@ int main(int argc, char** argv)
             else if (arg == "--network-ranged-smoke")
             {
                 cliNetworkRangedSmoke = true;
+            }
+            else if (arg == "--movement-parity-smoke")
+            {
+                cliMovementParitySmoke = true;
             }
             else if (arg == "--client-dynamic-apply-smoke")
             {
@@ -470,6 +475,7 @@ int main(int argc, char** argv)
         const bool headlessRun = cliAutomatch || cliAutomatchWorker
             || cliNetworkSmoke || cliPurchaseSmoke || cliLoopbackSmoke || cliMpLoopbackSmoke
             || cliClientInputSmoke || cliNetworkActionsSmoke || cliNetworkRangedSmoke
+            || cliMovementParitySmoke
             || cliClientDynamicApplySmoke
             || cliServer || cliHost;
         if (!game.Initialize(headlessRun))
@@ -584,6 +590,15 @@ int main(int argc, char** argv)
         {
             CrashLogger::LogEvent("network ranged smoke started");
             const int rc = game.RunNetworkRangedSmoke();
+            game.Shutdown();
+            CrashLogger::Shutdown();
+            return rc;
+        }
+
+        if (cliMovementParitySmoke)
+        {
+            CrashLogger::LogEvent("movement parity smoke started");
+            const int rc = game.RunMovementParitySmoke();
             game.Shutdown();
             CrashLogger::Shutdown();
             return rc;

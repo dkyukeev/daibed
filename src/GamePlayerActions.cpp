@@ -49,19 +49,20 @@ Vector3 AimDirectionFromCommandInput(const PlayerCommand& command)
 
 void Game::UseUtilityInputs(Player& player, const PlayerCommand& command)
 {
-    // shop/inventory only gate the local player; a network-controlled player on
-    // the server is never blocked by the host's UI state (mirrors how
-    // ApplyPlayerActionCommand only gates the local player).
-    if (player.IsLocal() && (shopOpen_ || inventoryOpen_))
+    const PlayerControlKind controlKind = ControlKindForPlayer(player);
+    ScopedLocalFeedbackSuppression suppressRemoteFeedback(*this, !HasLocalCamera(controlKind));
+    // UI state only gates the player with the local camera; a network-controlled
+    // player on the server is never blocked by the host's menus.
+    if (HasLocalCamera(controlKind) && (shopOpen_ || inventoryOpen_))
     {
         return;
     }
 
-    // Select a hotbar slot for whichever player owns this command: the local
-    // player uses the UI mirror, a network player carries its own slot.
-    const auto selectSlot = [this, &player](int slot)
+    // Select a hotbar slot for whichever player owns this command: the locally
+    // predicted human uses the UI mirror, remote humans carry their own slot.
+    const auto selectSlot = [this, &player, controlKind](int slot)
     {
-        if (player.IsLocal())
+        if (IsLocallyPredicted(controlKind))
         {
             selectedHotbarSlot_ = slot;
         }
@@ -70,7 +71,7 @@ void Game::UseUtilityInputs(Player& player, const PlayerCommand& command)
             player.SetSelectedSlot(slot);
         }
     };
-    const auto useHotbarUtility = [this, &player, &selectSlot, &command](UtilityType type)
+    const auto useHotbarUtility = [this, &player, &selectSlot, &command, controlKind](UtilityType type)
     {
         const ItemType itemType = ItemFromUtility(type);
         const auto& hotbar = player.GetInventory().GetHotbarSlots();
@@ -81,11 +82,15 @@ void Game::UseUtilityInputs(Player& player, const PlayerCommand& command)
                 selectSlot(i);
                 if (type == UtilityType::Fireball || type == UtilityType::Molotov)
                 {
-                    LaunchProjectile(player, type, AimDirectionFromCommandInput(command), player.IsLocal());
+                    LaunchProjectile(player, type, AimDirectionFromCommandInput(command), HasLocalCamera(controlKind));
                 }
                 else
                 {
-                    UseUtility(player, type);
+                    const UtilityActionResult result = ApplyUtility(player, type);
+                    if (HasLocalCamera(controlKind))
+                    {
+                        PresentUtilityActionResult(result);
+                    }
                 }
                 return;
             }
@@ -139,17 +144,20 @@ void Game::UseUtilityInputs(Player& player, const PlayerCommand& command)
     }
 }
 
-bool Game::UseUtility(Player& player, UtilityType type)
+Game::UtilityActionResult Game::ApplyUtility(Player& player, UtilityType type)
 {
+    UtilityActionResult result {};
+    result.handled = true;
+    result.type = type;
     if (type == UtilityType::Arrows)
     {
-        SetMessage("Стрелы используются луком: выберите лук и удерживайте ЛКМ.");
-        return false;
+        result.message = "Стрелы используются луком: выберите лук и удерживайте ЛКМ.";
+        return result;
     }
     if (type == UtilityType::Fireball || type == UtilityType::Molotov)
     {
-        LaunchProjectile(player, type);
-        return true;
+        result.handled = false;
+        return result;
     }
 
     if (type == UtilityType::Heal)
@@ -157,14 +165,19 @@ bool Game::UseUtility(Player& player, UtilityType type)
         if (SpendUtilityItem(player, UtilityType::Heal))
         {
             player.Heal(45);
-            SetMessage("Аптечка использована.");
-            AddWorldEffect(player.GetPosition(), Color { 128, 238, 166, 255 }, 0.36f, 0.35f);
-            audio_.PlayPickup();
-            return true;
+            result.success = true;
+            result.message = "Аптечка использована.";
+            result.position = player.GetPosition();
+            result.color = Color { 128, 238, 166, 255 };
+            result.radius = 0.36f;
+            result.seconds = 0.35f;
+            result.hasWorldEffect = true;
+            result.playPickupSound = true;
+            return result;
         }
-        SetMessage("Нет аптечек. Купите одну в утилитах.");
-        audio_.PlayDenied();
-        return false;
+        result.message = "Нет аптечек. Купите одну в утилитах.";
+        result.playDeniedSound = true;
+        return result;
     }
 
     if (type == UtilityType::HomeTeleport)
@@ -173,17 +186,22 @@ bool Game::UseUtility(Player& player, UtilityType type)
         if (team != nullptr && SpendUtilityItem(player, UtilityType::HomeTeleport))
         {
             player.RespawnAtHome();
-            SetMessage("Телепорт домой выполнен.");
-            AddWorldEffect(player.GetHomeSpawnPoint(), GetTeamColor(team->color), 0.42f, 0.45f);
-            audio_.PlayPickup();
-            return true;
+            result.success = true;
+            result.message = "Телепорт домой выполнен.";
+            result.position = player.GetHomeSpawnPoint();
+            result.color = GetTeamColor(team->color);
+            result.radius = 0.42f;
+            result.seconds = 0.45f;
+            result.hasWorldEffect = true;
+            result.playPickupSound = true;
+            return result;
         }
         if (team != nullptr)
         {
-            SetMessage("Нет телепортов домой. Купите один в утилитах.");
-            audio_.PlayDenied();
+            result.message = "Нет телепортов домой. Купите один в утилитах.";
+            result.playDeniedSound = true;
         }
-        return false;
+        return result;
     }
 
     if (type == UtilityType::Dash)
@@ -193,18 +211,23 @@ bool Game::UseUtility(Player& player, UtilityType type)
             // Local player dashes along the camera's flat facing; a network
             // player dashes along its own (authoritative) yaw — the server has
             // no meaningful camera for it.
-            const Vector3 forward = player.IsLocal()
+            const Vector3 forward = HasLocalCamera(ControlKindForPlayer(player))
                 ? cameraController_.GetFlatForward()
                 : player.Forward();
             player.ApplyKnockback(Vector3 { forward.x * 8.5f, 1.5f, forward.z * 8.5f });
-            SetMessage("Жемчуг рывка использован.");
-            AddWorldEffect(player.GetPosition(), Color { 112, 232, 255, 255 }, 0.30f, 0.30f);
-            audio_.PlayPickup();
-            return true;
+            result.success = true;
+            result.message = "Жемчуг рывка использован.";
+            result.position = player.GetPosition();
+            result.color = Color { 112, 232, 255, 255 };
+            result.radius = 0.30f;
+            result.seconds = 0.30f;
+            result.hasWorldEffect = true;
+            result.playPickupSound = true;
+            return result;
         }
-        SetMessage("Нет жемчуга рывка. Купите один в утилитах.");
-        audio_.PlayDenied();
-        return false;
+        result.message = "Нет жемчуга рывка. Купите один в утилитах.";
+        result.playDeniedSound = true;
+        return result;
     }
 
     if (type == UtilityType::AlarmTrap)
@@ -213,30 +236,73 @@ bool Game::UseUtility(Player& player, UtilityType type)
         if (team != nullptr && SpendUtilityItem(player, UtilityType::AlarmTrap))
         {
             alarmTraps_.push_back(AlarmTrap { team->spawnPoint, player.GetTeamId(), 5.2f, false });
-            SetMessage("Сигнальная ловушка установлена на базе.");
-            AddWorldEffect(team->spawnPoint, Color { 255, 235, 142, 255 }, 0.32f, 0.35f);
-            audio_.PlayPickup();
-            return true;
+            result.success = true;
+            result.message = "Сигнальная ловушка установлена на базе.";
+            result.position = team->spawnPoint;
+            result.color = Color { 255, 235, 142, 255 };
+            result.radius = 0.32f;
+            result.seconds = 0.35f;
+            result.hasWorldEffect = true;
+            result.playPickupSound = true;
+            return result;
         }
         if (team != nullptr)
         {
-            SetMessage("Нет сигнальных ловушек. Купите одну в утилитах.");
-            audio_.PlayDenied();
+            result.message = "Нет сигнальных ловушек. Купите одну в утилитах.";
+            result.playDeniedSound = true;
         }
-        return false;
+        return result;
     }
 
-    return false;
+    result.handled = false;
+    return result;
+}
+
+void Game::PresentUtilityActionResult(const UtilityActionResult& result)
+{
+    if (!result.handled || suppressLocalFeedback_)
+    {
+        return;
+    }
+    if (!result.message.empty())
+    {
+        SetMessage(result.message);
+    }
+    if (result.hasWorldEffect)
+    {
+        AddWorldEffect(result.position, result.color, result.radius, result.seconds);
+    }
+    if (result.playPickupSound)
+    {
+        audio_.PlayPickup();
+    }
+    if (result.playDeniedSound)
+    {
+        audio_.PlayDenied();
+    }
+}
+
+bool Game::UseUtility(Player& player, UtilityType type)
+{
+    const UtilityActionResult result = ApplyUtility(player, type);
+    if (!result.handled && (type == UtilityType::Fireball || type == UtilityType::Molotov))
+    {
+        LaunchProjectile(player, type);
+        return true;
+    }
+    PresentUtilityActionResult(result);
+    return result.success;
 }
 
 bool Game::SpendUtilityItem(Player& player, UtilityType type)
 {
     Inventory& inventory = player.GetInventory();
-    // Prefer spending from the owner's selected slot (local or network-controlled)
-    // so the held stack drains; fall back to spending the item by type anywhere.
-    if (player.IsLocal() || IsNetworkControlledPlayer(player.GetId()))
+    // Prefer spending from a human owner's selected slot so the held stack
+    // drains; fall back to spending the item by type anywhere.
+    const PlayerControlKind controlKind = ControlKindForPlayer(player);
+    if (IsHumanControlled(controlKind))
     {
-        const int slot = player.IsLocal() ? selectedHotbarSlot_ : player.GetSelectedSlot();
+        const int slot = IsLocallyPredicted(controlKind) ? selectedHotbarSlot_ : player.GetSelectedSlot();
         const ItemType selectedType = GetSelectedHotbarStack(player).type;
         if (ItemToUtility(selectedType) == type && inventory.SpendSlotItem(slot))
         {
@@ -587,7 +653,7 @@ void Game::HandleDeathInventory(Player& player, int killerId)
     {
         inventory.AddItem(ItemType::Pickaxe, 1);
     }
-    if (player.IsLocal())
+    if (IsLocallyPredicted(ControlKindForPlayer(player)))
     {
         selectedHotbarSlot_ = 0;
     }

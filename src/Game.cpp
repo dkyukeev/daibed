@@ -1250,8 +1250,18 @@ void Game::ApplyBotLoadout(Player& bot) const
     bot.GetInventory().AddBlock(BlockType::StoneBlock, botDifficulty_ == BotDifficulty::Hard ? 12 : 6);
 }
 
+PlayerControlKind Game::ControlKindForPlayer(const Player& player) const
+{
+    if (IsNetworkControlledPlayer(player.GetId()))
+    {
+        return PlayerControlKind::RemoteHumanAuthoritative;
+    }
+    return player.GetControlKind();
+}
+
 float Game::TerrainSpeedMultiplier(const Player& player) const
 {
+    const PlayerControlKind controlKind = ControlKindForPlayer(player);
     const Vector3 pos = player.GetPosition();
     const GridPos underFeet = world_.WorldToGrid(Vector3 { pos.x, pos.y - 1.05f, pos.z });
     const Block* block = world_.GetBlock(underFeet);
@@ -1269,7 +1279,7 @@ float Game::TerrainSpeedMultiplier(const Player& player) const
     }
     if (arenaBiome_ == ArenaBiome::Ice)
     {
-        return player.IsLocal() ? 1.08f : 1.03f;
+        return IsHumanControlled(controlKind) ? 1.08f : 1.03f;
     }
     return 1.0f;
 }
@@ -1286,16 +1296,17 @@ float Game::BiomeJumpMultiplier() const
 
 float Game::BiomeGroundControlMultiplier(const Player& player) const
 {
+    const PlayerControlKind controlKind = ControlKindForPlayer(player);
     const Vector3 pos = player.GetPosition();
     const GridPos underFeet = world_.WorldToGrid(Vector3 { pos.x, pos.y - 1.05f, pos.z });
     const Block* block = world_.GetBlock(underFeet);
     if (block != nullptr && block->type == BlockType::IceBlock)
     {
-        return player.IsLocal() ? 0.38f : 0.58f;
+        return IsHumanControlled(controlKind) ? 0.38f : 0.58f;
     }
     if (arenaBiome_ == ArenaBiome::Ice)
     {
-        return player.IsLocal() ? 0.58f : 0.76f;
+        return IsHumanControlled(controlKind) ? 0.58f : 0.76f;
     }
     if (arenaBiome_ == ArenaBiome::Space)
     {
@@ -1314,7 +1325,7 @@ float Game::BiomeKnockbackMultiplier() const
     return arenaBiome_ == ArenaBiome::Space ? 1.18f : 1.0f;
 }
 
-void Game::ApplyStandingBlockEffects(Player& player, bool localPlayer)
+void Game::ApplyStandingBlockEffects(Player& player, bool hasLocalCamera)
 {
     const Vector3 pos = player.GetPosition();
     const GridPos underFeet = world_.WorldToGrid(Vector3 { pos.x, pos.y - 1.05f, pos.z });
@@ -1328,7 +1339,7 @@ void Game::ApplyStandingBlockEffects(Player& player, bool localPlayer)
     {
         player.ApplyKnockback(Vector3 { 0.0f, 8.8f, 0.0f });
         AddWorldEffect(world_.GridToWorld(underFeet), Color { 128, 238, 166, 255 }, 0.34f, 0.25f);
-        if (localPlayer)
+        if (hasLocalCamera)
         {
             AddCameraShake(0.10f, 0.12f);
         }
@@ -1439,7 +1450,8 @@ bool Game::LaunchBlasterShot(Player& player, Vector3 direction, bool aimed, bool
     AddWorldEffect(projectile.position, direction, Color { 98, 245, 255, 255 }, 0.50f, 0.32f, WorldEffectKind::Burst);
     if (announce)
     {
-        const bool sniper = player.IsLocal() && GetSelectedHotbarStack(player).type == ItemType::SniperRifle;
+        const bool sniper = HasLocalCamera(ControlKindForPlayer(player))
+            && GetSelectedHotbarStack(player).type == ItemType::SniperRifle;
         SetMessage(sniper
             ? "Снайперская винтовка разряжена — удерживайте ЛКМ для новой зарядки."
             : "Бластер разряжен — удерживайте ЛКМ для новой зарядки.");
@@ -1610,7 +1622,7 @@ void Game::UpdateLocalPlayer(float dt)
     }
 
     ApplyPlayerCommand(*player, command, dt);
-    ApplyStandingBlockEffects(*player, true);
+    ApplyStandingBlockEffects(*player, HasLocalCamera(ControlKindForPlayer(*player)));
     StorePredictedLocalCommand(command, *player);
 
     if (!player->IsOnGround())
@@ -1634,6 +1646,7 @@ void Game::UpdateLocalPlayer(float dt)
 
 void Game::ApplyPlayerCommand(Player& player, const PlayerCommand& command, float dt)
 {
+    const PlayerControlKind controlKind = ControlKindForPlayer(player);
     // Aim comes from the command: yaw drives both facing and the movement
     // basis. Pitch is retained for the local player for future aim-dependent
     // actions (currently unused). For the local player command.aimYaw equals
@@ -1644,7 +1657,7 @@ void Game::ApplyPlayerCommand(Player& player, const PlayerCommand& command, floa
         // The local player keeps its slot in selectedHotbarSlot_ (UI mirror);
         // network-controlled players carry their own slot so the authoritative
         // server replicates the right held item per player (Phase 0.1W).
-        if (player.IsLocal())
+        if (IsLocallyPredicted(controlKind))
         {
             selectedHotbarSlot_ = command.selectedSlot;
         }
@@ -1653,7 +1666,7 @@ void Game::ApplyPlayerCommand(Player& player, const PlayerCommand& command, floa
             player.SetSelectedSlot(command.selectedSlot);
         }
     }
-    if (player.IsLocal())
+    if (HasLocalCamera(controlKind))
     {
         localAimPitch_ = command.aimPitch;
     }
@@ -1701,7 +1714,7 @@ void Game::ApplyPlayerCommand(Player& player, const PlayerCommand& command, floa
         sprint,
         command.sneak,
         TerrainSpeedMultiplier(player),
-        !player.IsLocal(),
+        IsBotControlled(controlKind),
         BiomeGravityMultiplier(),
         BiomeJumpMultiplier(),
         BiomeGroundControlMultiplier(player),
@@ -1835,7 +1848,7 @@ void Game::HandleDeathsAndRespawns()
             {
                 ++score.finalDeaths;
             }
-            if (automatch_.active && !player.IsLocal())
+            if (automatch_.active && IsBotControlled(ControlKindForPlayer(player)))
             {
                 for (AutomatchBotStats& botStats : automatch_.botStats)
                 {
@@ -1872,7 +1885,7 @@ void Game::HandleDeathsAndRespawns()
                 finalDeath ? RED : ORANGE,
                 5.0f);
             audio_.PlayDeath();
-            if (player.IsLocal())
+            if (IsLocallyPredicted(ControlKindForPlayer(player)))
             {
                 localDeathKiller_ = killerName;
                 localDeathCause_ = deathCause;
@@ -1895,7 +1908,7 @@ void Game::HandleDeathsAndRespawns()
             {
                 player.Kill(true);
                 ++GetPlayerScore(player.GetId()).finalDeaths;
-                if (automatch_.active && !player.IsLocal())
+                if (automatch_.active && IsBotControlled(ControlKindForPlayer(player)))
                 {
                     automatch_.currentTimeline.push_back(AutomatchTimelineEvent {
                         matchSimulation_.MatchTimeSeconds(),
@@ -1909,7 +1922,7 @@ void Game::HandleDeathsAndRespawns()
                     });
                 }
                 SetMessage(player.GetName() + " потерял защиту респауна. Финальная смерть.");
-                if (player.IsLocal())
+                if (IsLocallyPredicted(ControlKindForPlayer(player)))
                 {
                     EnterSpectatorMode();
                 }
@@ -2333,12 +2346,13 @@ ItemStack Game::GetSelectedHotbarStack(const Player& player) const
     // controlled player reads its own replicated slot. Bots have no held-item
     // concept (their combat path doesn't use this) — keep returning empty so
     // their behaviour and automatch determinism are unchanged.
+    const PlayerControlKind controlKind = ControlKindForPlayer(player);
     int slot;
-    if (player.IsLocal())
+    if (IsLocallyPredicted(controlKind))
     {
         slot = selectedHotbarSlot_;
     }
-    else if (IsNetworkControlledPlayer(player.GetId()))
+    else if (IsHumanControlled(controlKind))
     {
         slot = player.GetSelectedSlot();
     }
@@ -2377,9 +2391,9 @@ std::optional<BlockType> Game::GetSelectedBlockType(const Player& player) const
 
 std::optional<WeaponType> Game::GetSelectedWeaponType(const Player& player) const
 {
-    // Bots have no held-item concept and always melee with a sword. The local
-    // player and network-controlled players use their actually selected item.
-    if (!player.IsLocal() && !IsNetworkControlledPlayer(player.GetId()))
+    // Bots have no held-item concept and always melee with a sword. Human
+    // players use their actually selected item.
+    if (IsBotControlled(ControlKindForPlayer(player)))
     {
         return WeaponType::Sword;
     }
@@ -2394,7 +2408,7 @@ std::optional<WeaponType> Game::GetSelectedWeaponType(const Player& player) cons
 
 int Game::EffectiveToolLevel(const Player& player) const
 {
-    if (!player.IsLocal() && !IsNetworkControlledPlayer(player.GetId()))
+    if (IsBotControlled(ControlKindForPlayer(player)))
     {
         return player.GetInventory().GetToolLevel();
     }
@@ -2426,8 +2440,36 @@ void Game::AddEventMessage(std::string message, Color color, float seconds)
     }
 }
 
+Game::ScopedLocalFeedbackSuppression::ScopedLocalFeedbackSuppression(Game& game, bool suppress)
+    : game_(game)
+    , active_(suppress)
+    , previousFeedback_(game.suppressLocalFeedback_)
+    , previousAudioMuted_(game.audio_.IsMuted())
+{
+    if (!active_)
+    {
+        return;
+    }
+    game_.suppressLocalFeedback_ = true;
+    game_.audio_.SetMuted(true);
+}
+
+Game::ScopedLocalFeedbackSuppression::~ScopedLocalFeedbackSuppression()
+{
+    if (!active_)
+    {
+        return;
+    }
+    game_.suppressLocalFeedback_ = previousFeedback_;
+    game_.audio_.SetMuted(previousAudioMuted_);
+}
+
 void Game::AddWorldEffect(Vector3 position, Color color, float radius, float seconds)
 {
+    if (suppressLocalFeedback_)
+    {
+        return;
+    }
     const std::size_t limit = effectsQuality_ == 0 ? 48u : (effectsQuality_ == 1 ? 96u : 192u);
     if (worldEffects_.size() >= limit)
     {
@@ -2440,6 +2482,10 @@ void Game::AddWorldEffect(Vector3 position, Color color, float radius, float sec
 
 void Game::AddWorldEffect(Vector3 position, Vector3 direction, Color color, float radius, float seconds, WorldEffectKind kind)
 {
+    if (suppressLocalFeedback_)
+    {
+        return;
+    }
     const Vector3 flatDirection = Normalize2D(direction);
     const Vector3 safeDirection = Length2D(flatDirection) > 0.0001f ? flatDirection : Vector3 { 0.0f, 0.0f, 1.0f };
     const std::size_t limit = effectsQuality_ == 0 ? 48u : (effectsQuality_ == 1 ? 96u : 192u);
@@ -2455,6 +2501,10 @@ void Game::AddWorldEffect(Vector3 position, Vector3 direction, Color color, floa
 
 void Game::AddFloatingText(std::string text, Vector3 position, Color color)
 {
+    if (suppressLocalFeedback_)
+    {
+        return;
+    }
     floatingTexts_.push_back(FloatingText { std::move(text), position, color, 0.8f, 0.0f });
 }
 
@@ -2471,26 +2521,14 @@ void Game::AddKillFeed(std::string text, Color color, float seconds)
     }
 }
 
-void Game::RegisterCombatEvent(const CombatEvent& event, const std::string& message)
+Game::CombatPresentationEvent Game::ApplyCombatGameplayEvent(const CombatEvent& event, const std::string& message)
 {
+    CombatPresentationEvent presentation {};
+    presentation.valid = true;
+    presentation.event = event;
+    presentation.message = message;
     const Vector3 targetFeetProbe { event.position.x, event.position.y - 0.75f, event.position.z };
-    const bool voidThreat = !event.coreHit && (event.voidHit || IsVoidThreatAt(targetFeetProbe));
-    SetMessage(message, event.coreDestroyed ? 4.0f : 2.2f);
-    AddEventMessage(message, event.coreDestroyed ? Color { 255, 118, 118, 255 } : Color { 255, 235, 142, 255 });
-    AddWorldEffect(event.position, event.coreHit ? Color { 112, 232, 255, 255 } : Color { 255, 224, 122, 255 }, event.coreHit ? 0.48f : 0.32f, event.coreDestroyed ? 0.9f : 0.36f);
-    AddFloatingText((event.coreHit ? "-" : "-") + std::to_string(event.damage), event.position, event.coreHit ? Color { 112, 232, 255, 255 } : Color { 255, 236, 135, 255 });
-    if (event.combo)
-    {
-        AddFloatingText("Комбо", Vector3 { event.position.x, event.position.y + 0.28f, event.position.z }, Color { 255, 235, 142, 255 });
-    }
-    else if (event.sprintReset)
-    {
-        AddFloatingText("W-tap", Vector3 { event.position.x, event.position.y + 0.28f, event.position.z }, Color { 188, 238, 255, 255 });
-    }
-    if (voidThreat)
-    {
-        AddFloatingText("Удар в воид", Vector3 { event.position.x, event.position.y + 0.52f, event.position.z }, Color { 255, 155, 118, 255 });
-    }
+    presentation.voidThreat = !event.coreHit && (event.voidHit || IsVoidThreatAt(targetFeetProbe));
     if (!event.coreHit && event.targetId >= 0)
     {
         ApplyBotHitReaction(event.targetId);
@@ -2531,7 +2569,11 @@ void Game::RegisterCombatEvent(const CombatEvent& event, const std::string& mess
             {
                 const int bonusDamage = std::max(2, event.damage / 5);
                 targetPlayer->Damage(bonusDamage);
-                AddFloatingText("НАРУШИТЕЛЬ -" + std::to_string(bonusDamage), targetPlayer->GetPosition(), HeroAccentColor(HeroId::Konvoy));
+                presentation.extraFloatingTexts.push_back(CombatFloatingTextResult {
+                    "НАРУШИТЕЛЬ -" + std::to_string(bonusDamage),
+                    targetPlayer->GetPosition(),
+                    HeroAccentColor(HeroId::Konvoy)
+                });
                 attackerPlayer->AddHeroUltimateCharge(2.0f);
             }
         }
@@ -2553,7 +2595,11 @@ void Game::RegisterCombatEvent(const CombatEvent& event, const std::string& mess
                     targetPlayer->Damage(bonusDamage);
                     NoteDamageCredit(targetPlayer->GetId(), attackerPlayer->GetId(), "ударом Лихо в спину");
                     attackerPlayer->AddHeroUltimateCharge(14.0f);
-                    AddFloatingText("в спину -" + std::to_string(bonusDamage), targetPlayer->GetPosition(), HeroAccentColor(HeroId::Likho));
+                    presentation.extraFloatingTexts.push_back(CombatFloatingTextResult {
+                        "в спину -" + std::to_string(bonusDamage),
+                        targetPlayer->GetPosition(),
+                        HeroAccentColor(HeroId::Likho)
+                    });
                 }
             }
             if (likhoState.active2.active)
@@ -2577,8 +2623,12 @@ void Game::RegisterCombatEvent(const CombatEvent& event, const std::string& mess
                     {
                         constexpr int burstDamage = 12;
                         targetPlayer->Damage(burstDamage);
-                    NoteDamageCredit(targetPlayer->GetId(), attackerPlayer->GetId(), "кровотечением Лихо");
-                    AddFloatingText("КРОВОТЕЧЕНИЕ -12", targetPlayer->GetPosition(), HeroAccentColor(HeroId::Likho));
+                        NoteDamageCredit(targetPlayer->GetId(), attackerPlayer->GetId(), "кровотечением Лихо");
+                        presentation.extraFloatingTexts.push_back(CombatFloatingTextResult {
+                            "КРОВОТЕЧЕНИЕ -12",
+                            targetPlayer->GetPosition(),
+                            HeroAccentColor(HeroId::Likho)
+                        });
                         found->successfulHits = 0;
                     }
                 }
@@ -2674,6 +2724,39 @@ void Game::RegisterCombatEvent(const CombatEvent& event, const std::string& mess
         }
     }
 
+    return presentation;
+}
+
+void Game::PresentCombatEvent(const CombatPresentationEvent& presentation)
+{
+    if (!presentation.valid || suppressLocalFeedback_)
+    {
+        return;
+    }
+
+    const CombatEvent& event = presentation.event;
+    const std::string& message = presentation.message;
+    SetMessage(message, event.coreDestroyed ? 4.0f : 2.2f);
+    AddEventMessage(message, event.coreDestroyed ? Color { 255, 118, 118, 255 } : Color { 255, 235, 142, 255 });
+    AddWorldEffect(event.position, event.coreHit ? Color { 112, 232, 255, 255 } : Color { 255, 224, 122, 255 }, event.coreHit ? 0.48f : 0.32f, event.coreDestroyed ? 0.9f : 0.36f);
+    AddFloatingText("-" + std::to_string(event.damage), event.position, event.coreHit ? Color { 112, 232, 255, 255 } : Color { 255, 236, 135, 255 });
+    if (event.combo)
+    {
+        AddFloatingText("Комбо", Vector3 { event.position.x, event.position.y + 0.28f, event.position.z }, Color { 255, 235, 142, 255 });
+    }
+    else if (event.sprintReset)
+    {
+        AddFloatingText("W-tap", Vector3 { event.position.x, event.position.y + 0.28f, event.position.z }, Color { 188, 238, 255, 255 });
+    }
+    if (presentation.voidThreat)
+    {
+        AddFloatingText("Удар в воид", Vector3 { event.position.x, event.position.y + 0.52f, event.position.z }, Color { 255, 155, 118, 255 });
+    }
+    for (const CombatFloatingTextResult& floatingText : presentation.extraFloatingTexts)
+    {
+        AddFloatingText(floatingText.text, floatingText.position, floatingText.color);
+    }
+
     if (event.attackerId == localPlayerId_)
     {
         hitMarkerTimer_ = 0.22f;
@@ -2748,6 +2831,12 @@ void Game::RegisterCombatEvent(const CombatEvent& event, const std::string& mess
         const std::string targetName = target != nullptr ? target->GetName() : "Враг";
         AddKillFeed(attackerName + " устранил " + targetName, Color { 255, 235, 142, 255 }, 5.5f);
     }
+}
+
+void Game::RegisterCombatEvent(const CombatEvent& event, const std::string& message)
+{
+    const CombatPresentationEvent presentation = ApplyCombatGameplayEvent(event, message);
+    PresentCombatEvent(presentation);
 }
 
 Game::PlayerMatchScore& Game::GetPlayerScore(int playerId)

@@ -599,7 +599,7 @@ BotRoleDistribution BuildRoleDistributionForTeam(
     {
         if (player.GetId() == ignorePlayerId
             || player.GetTeamId() != teamId
-            || player.IsLocal()
+            || !IsBotControlled(player.GetControlKind())
             || !player.IsAlive()
             || player.IsEliminated())
         {
@@ -3399,7 +3399,7 @@ void Game::UpdateBots(float dt)
 
     for (Player& bot : players_)
     {
-        if (!bot.IsLocal() && bot.IsAlive() && !bot.IsEliminated())
+        if (IsBotControlled(ControlKindForPlayer(bot)) && bot.IsAlive() && !bot.IsEliminated())
         {
             GetBotMemory(bot);
         }
@@ -3468,7 +3468,7 @@ void Game::UpdateBots(float dt)
                     ++teamContext.teamPlan.alliesNearCore;
                 }
 
-                if (!player->IsLocal())
+                if (IsBotControlled(ControlKindForPlayer(*player)))
                 {
                     const BotMemory* memory = FindBotMemoryByPlayerId(botMemories_, botMemoryIndexByPlayerId_, player->GetId());
                     const BotRole role = memory != nullptr ? memory->role : RoleForBotId(player->GetId());
@@ -3650,17 +3650,12 @@ void Game::UpdateBots(float dt)
     for (std::size_t botOffset = 0; botOffset < players_.size(); ++botOffset)
     {
         Player& bot = players_[(simulationOrderOffset_ + botOffset) % players_.size()];
-        if (bot.IsLocal() || !bot.IsAlive() || bot.IsEliminated())
+        if (!IsBotControlled(ControlKindForPlayer(bot)) || !bot.IsAlive() || bot.IsEliminated())
         {
             continue;
         }
         // A player driven by a remote network client is not AI-controlled — its
         // movement comes from the client's PlayerCommand (Phase 0.1S).
-        if (IsNetworkControlledPlayer(bot.GetId()))
-        {
-            continue;
-        }
-
         const auto foundTeamContext = frameContext.teamContexts.find(bot.GetTeamId());
         if (foundTeamContext == frameContext.teamContexts.end() || foundTeamContext->second.team == nullptr)
         {
@@ -3720,7 +3715,7 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
     int openingRank = 0;
     for (const Player& candidate : players_)
     {
-        if (!candidate.IsLocal()
+        if (IsBotControlled(ControlKindForPlayer(candidate))
             && candidate.GetTeamId() == bot.GetTeamId()
             && candidate.GetId() < bot.GetId())
         {
@@ -3941,7 +3936,7 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
         int openingHomeCollectorId = std::numeric_limits<int>::max();
         for (const Player& candidate : players_)
         {
-            if (!candidate.IsLocal()
+            if (IsBotControlled(ControlKindForPlayer(candidate))
                 && candidate.IsAlive()
                 && !candidate.IsEliminated()
                 && candidate.GetTeamId() == bot.GetTeamId())

@@ -172,6 +172,11 @@ void AudioSystem::SetMuted(bool muted)
     }
 }
 
+bool AudioSystem::IsMuted() const
+{
+    return muted_;
+}
+
 void AudioSystem::SetVolume(float volume)
 {
     volume_ = std::clamp(volume, 0.0f, 1.0f);

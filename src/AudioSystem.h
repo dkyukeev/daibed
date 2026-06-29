@@ -36,6 +36,7 @@ public:
     void PlayBreakBlockAt(Vector3 position) const;
     void SetListener(Vector3 position, Vector3 right);
 
+    bool IsMuted() const;
     void SetMuted(bool muted);
     void SetVolume(float volume);
     void SetCategoryVolumes(float sfx, float ambient);

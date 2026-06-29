@@ -450,9 +450,10 @@ MatchSnapshot Game::BuildNetworkSnapshot() const
         entry.alive = player.IsAlive();
         entry.eliminated = player.IsEliminated();
         entry.respawnTimer = player.GetRespawnTimer();
-        entry.selectedSlot = player.IsLocal()
+        const PlayerControlKind controlKind = ControlKindForPlayer(player);
+        entry.selectedSlot = IsLocallyPredicted(controlKind)
             ? selectedHotbarSlot_
-            : (IsNetworkControlledPlayer(player.GetId()) ? player.GetSelectedSlot() : 0);
+            : (IsHumanControlled(controlKind) ? player.GetSelectedSlot() : 0);
 
         // Owner-private inventory: the FULL snapshot carries it for everyone; the
         // per-client filter strips it for non-recipients (see SnapshotVisibility).
@@ -1546,6 +1547,69 @@ int Game::RunNetworkSmoke()
     return ok ? 0 : 4;
 }
 
+int Game::RunMovementParitySmoke()
+{
+    arenaBiome_ = ArenaBiome::Ice;
+    world_.Clear();
+    for (int x = -4; x <= 80; ++x)
+    {
+        for (int z = -3; z <= 3; ++z)
+        {
+            world_.PlaceBlock(GridPos { x, 0, z }, Block { BlockType::GrassBlock, -1, false }, true);
+        }
+    }
+    for (int x = 28; x <= 42; ++x)
+    {
+        for (int z = -3; z <= 3; ++z)
+        {
+            world_.PlaceBlock(GridPos { x, 0, z }, Block { BlockType::IceBlock, -1, false }, true);
+        }
+    }
+
+    Player localHuman(1, "local-human", 0, Vector3 { 0.0f, 1.5f, 0.0f }, true);
+    localHuman.SetControlKind(PlayerControlKind::LocalHumanPredicted);
+    Player remoteHuman(2, "remote-human", 1, Vector3 { 0.0f, 1.5f, 0.0f }, false);
+    remoteHuman.SetControlKind(PlayerControlKind::RemoteHumanAuthoritative);
+
+    PlayerCommand command;
+    command.aimYaw = 3.1415926535f * 0.5f;
+    command.moveForward = 1.0f;
+    command.sprint = true;
+    command.selectedSlot = 0;
+
+    const float fixedDt = matchSimulation_.FixedDeltaSeconds();
+    constexpr int kTicks = 180;
+    for (int i = 0; i < kTicks; ++i)
+    {
+        command.tick = static_cast<std::uint32_t>(i + 1);
+        command.controlledPlayerId = static_cast<std::uint32_t>(localHuman.GetId());
+        ApplyPlayerCommand(localHuman, command, fixedDt);
+        command.controlledPlayerId = static_cast<std::uint32_t>(remoteHuman.GetId());
+        ApplyPlayerCommand(remoteHuman, command, fixedDt);
+    }
+
+    const float positionError = (localHuman.GetPositionVec3() - remoteHuman.GetPositionVec3()).Length();
+    const float velocityError = (localHuman.GetVelocityVec3() - remoteHuman.GetVelocityVec3()).Length();
+    const bool sameRoleProfile =
+        IsHumanControlled(ControlKindForPlayer(localHuman))
+        && IsHumanControlled(ControlKindForPlayer(remoteHuman))
+        && IsLocallyPredicted(ControlKindForPlayer(localHuman))
+        && !IsLocallyPredicted(ControlKindForPlayer(remoteHuman));
+    const bool movementParity = positionError < 0.001f && velocityError < 0.001f;
+    const bool localCameraOnly = HasLocalCamera(ControlKindForPlayer(localHuman))
+        && !HasLocalCamera(ControlKindForPlayer(remoteHuman));
+    const bool ok = sameRoleProfile && movementParity && localCameraOnly;
+
+    std::cout << "movement-parity-smoke: posError=" << positionError
+              << " velError=" << velocityError
+              << " localKind=" << static_cast<int>(ControlKindForPlayer(localHuman))
+              << " remoteKind=" << static_cast<int>(ControlKindForPlayer(remoteHuman))
+              << " parity=" << (movementParity ? "ok" : "FAIL")
+              << " roles=" << (sameRoleProfile ? "ok" : "FAIL") << '\n';
+    std::cout << (ok ? "MOVEMENT_PARITY_SMOKE_OK" : "MOVEMENT_PARITY_SMOKE_FAIL") << std::endl;
+    return ok ? 0 : 4;
+}
+
 int Game::RunNetworkPurchaseSmoke()
 {
     if (networkMode_ == NetworkMode::LocalSinglePlayer)
@@ -1574,6 +1638,13 @@ int Game::RunNetworkPurchaseSmoke()
     // Stand the player on the shop so the server-side proximity gate passes.
     controlled->SetPosition(toVec3(team->shopPosition));
 
+    suppressLocalFeedback_ = false;
+    const std::string messageBefore = message_;
+    const std::size_t eventMessagesBefore = eventMessages_.size();
+    const std::size_t worldEffectsBefore = worldEffects_.size();
+    const std::size_t floatingTextsBefore = floatingTexts_.size();
+    const bool audioMutedBefore = audio_.IsMuted();
+
     // --- Case 1: a valid purchase spends resources and grants the item. ------
     // Choice 1 = 32 wood blocks for 5 Iron (no secondary cost). Guarantee funds.
     inv.AddResource(ResourceType::Iron, 5);
@@ -1582,14 +1653,16 @@ int Game::RunNetworkPurchaseSmoke()
 
     QueueEconomyAction(PlayerActionType::BuyItem, /*choice*/ 1, /*repeat*/ 1);
     PlayerCommand buy = BuildLocalPlayerCommand();
-    const bool bought = ApplyPlayerEconomyCommand(*controlled, buy);
+    const PlayerActionResult buyResult = ApplyPlayerEconomyCommand(*controlled, buy);
     const int ironAfter = inv.GetResource(ResourceType::Iron);
     const int woodAfter = inv.GetBlockCount(BlockType::WoodBlock);
-    const bool buyOk = bought && ironAfter == ironBefore - 5 && woodAfter == woodBefore + 32;
+    const bool buyOk = buyResult.handled && buyResult.success
+        && !buyResult.message.empty()
+        && ironAfter == ironBefore - 5 && woodAfter == woodBefore + 32;
 
     // --- Case 2: re-sending the SAME command (same seq) must NOT buy again. ---
-    const bool reApplied = ApplyPlayerEconomyCommand(*controlled, buy);
-    const bool dedupeOk = !reApplied
+    const PlayerActionResult duplicateResult = ApplyPlayerEconomyCommand(*controlled, buy);
+    const bool dedupeOk = !duplicateResult.handled && !duplicateResult.success
         && inv.GetResource(ResourceType::Iron) == ironAfter
         && inv.GetBlockCount(BlockType::WoodBlock) == woodAfter;
 
@@ -1599,8 +1672,9 @@ int Game::RunNetworkPurchaseSmoke()
     const int ironBeforeBroke = inv.GetResource(ResourceType::Iron);
     QueueEconomyAction(PlayerActionType::BuyItem, /*choice 4 = obsidian, costs Gold+Crystal*/ 4, 1);
     PlayerCommand brokeBuy = BuildLocalPlayerCommand();
-    const bool brokeBought = ApplyPlayerEconomyCommand(*controlled, brokeBuy);
-    const bool deniedFundsOk = !brokeBought
+    const PlayerActionResult brokeResult = ApplyPlayerEconomyCommand(*controlled, brokeBuy);
+    const bool deniedFundsOk = brokeResult.handled && !brokeResult.success
+        && !brokeResult.message.empty()
         && inv.GetResource(ResourceType::Iron) == ironBeforeBroke
         && inv.GetResource(ResourceType::Gold) == 0
         && inv.GetResource(ResourceType::Crystal) == 0;
@@ -1613,18 +1687,27 @@ int Game::RunNetworkPurchaseSmoke()
     const int woodBeforeFar = inv.GetBlockCount(BlockType::WoodBlock);
     QueueEconomyAction(PlayerActionType::BuyItem, 1, 1);
     PlayerCommand farBuy = BuildLocalPlayerCommand();
-    const bool farBought = ApplyPlayerEconomyCommand(*controlled, farBuy);
-    const bool deniedRangeOk = !farBought
+    const PlayerActionResult farResult = ApplyPlayerEconomyCommand(*controlled, farBuy);
+    const bool deniedRangeOk = farResult.handled && !farResult.success
+        && !farResult.message.empty()
         && inv.GetResource(ResourceType::Iron) == ironBeforeFar
         && inv.GetBlockCount(BlockType::WoodBlock) == woodBeforeFar;
 
-    const bool ok = buyOk && dedupeOk && deniedFundsOk && deniedRangeOk;
+    const bool presentationClean =
+        message_ == messageBefore
+        && eventMessages_.size() == eventMessagesBefore
+        && worldEffects_.size() == worldEffectsBefore
+        && floatingTexts_.size() == floatingTextsBefore
+        && audio_.IsMuted() == audioMutedBefore;
+
+    const bool ok = buyOk && dedupeOk && deniedFundsOk && deniedRangeOk && presentationClean;
     std::cout << "purchase-smoke: buy=" << (buyOk ? "ok" : "FAIL")
               << " (iron " << ironBefore << "->" << ironAfter
               << ", wood " << woodBefore << "->" << woodAfter << ")"
               << " dedupe=" << (dedupeOk ? "ok" : "FAIL")
               << " deniedFunds=" << (deniedFundsOk ? "ok" : "FAIL")
-              << " deniedRange=" << (deniedRangeOk ? "ok" : "FAIL") << '\n';
+              << " deniedRange=" << (deniedRangeOk ? "ok" : "FAIL")
+              << " presentation=" << (presentationClean ? "ok" : "FAIL") << '\n';
     std::cout << (ok ? "PURCHASE_SMOKE_OK" : "PURCHASE_SMOKE_FAIL") << std::endl;
     return ok ? 0 : 4;
 }
@@ -1913,6 +1996,22 @@ bool Game::IsNetworkControlledPlayer(int playerId) const
         != networkControlledPlayerIds_.end();
 }
 
+void Game::MarkNetworkControlledPlayer(int playerId)
+{
+    if (playerId < 0)
+    {
+        return;
+    }
+    if (!IsNetworkControlledPlayer(playerId))
+    {
+        networkControlledPlayerIds_.push_back(playerId);
+    }
+    if (Player* player = matchSimulation_.GetPlayer(playerId))
+    {
+        player->SetControlKind(PlayerControlKind::RemoteHumanAuthoritative);
+    }
+}
+
 void Game::SetupNetworkMatchFromLobby(ServerTransport& transport, const std::vector<LobbyPlayerState>& roster)
 {
     selectedMode_ = MatchMode::FourTeams;
@@ -1939,7 +2038,7 @@ void Game::SetupNetworkMatchFromLobby(ServerTransport& transport, const std::vec
         transport.AssignPlayer(roster[i].clientId, playerId);
         if (transport.PlayerForClient(roster[i].clientId) == playerId)
         {
-            networkControlledPlayerIds_.push_back(playerId);
+            MarkNetworkControlledPlayer(playerId);
         }
     }
     networkLobbyMatchStarted_ = true;
@@ -1979,6 +2078,7 @@ void Game::ApplyNetworkPlayerActions(Player& player, const PlayerCommand& comman
     // Driven entirely by the command (aim = yaw/pitch) and the player's own state
     // — no camera, no single-instance local-player fields. The local-player path
     // (UpdateAttackOrBreak/HandlePlaceBlock) is untouched.
+    ScopedLocalFeedbackSuppression suppressRemoteFeedback(*this, !HasLocalCamera(ControlKindForPlayer(player)));
     if (!player.IsAlive() || matchSimulation_.HasWinner())
     {
         networkActionState_.erase(player.GetId());
@@ -2018,7 +2118,7 @@ void Game::ApplyNetworkPlayerActions(Player& player, const PlayerCommand& comman
             }
             if (haveTarget)
             {
-                TryPlaceBlockForPlayer(player, placePos, false);
+                ApplyPlaceBlockForPlayer(player, placePos);
             }
             state.placeCooldown = command.bridgeMode ? 0.16f : 0.22f;
         }
@@ -2158,19 +2258,22 @@ void Game::ApplyNetworkPlayerActions(Player& player, const PlayerCommand& comman
     progress.fraction += dt / std::max(0.001f, requiredSeconds);
     if (progress.fraction >= 1.0f)
     {
-        CompleteBreakProgress(player, progress);
+        ApplyCompletedBreakProgress(player, progress);
         state.breakProgress = BreakProgress {};
     }
 }
 
-bool Game::ApplyPlayerEconomyCommand(Player& player, const PlayerCommand& command)
+Game::PlayerActionResult Game::ApplyPlayerEconomyCommand(Player& player, const PlayerCommand& command)
 {
+    PlayerActionResult result {};
     // No discrete action requested on this command.
     if (command.actionSeq == 0
         || command.actionType == static_cast<int>(PlayerActionType::None))
     {
-        return false;
+        return result;
     }
+    result.handled = true;
+    result.type = static_cast<PlayerActionType>(command.actionType);
 
     // Exactly-once: a resent/duplicate action (seq already seen) is ignored, so a
     // command that rides several ticks — or a UDP duplicate — never buys twice.
@@ -2179,13 +2282,17 @@ bool Game::ApplyPlayerEconomyCommand(Player& player, const PlayerCommand& comman
     std::uint32_t& lastSeq = economyActionSeq_[player.GetId()];
     if (command.actionSeq <= lastSeq)
     {
-        return false;
+        result.handled = false;
+        result.type = PlayerActionType::None;
+        return result;
     }
     lastSeq = command.actionSeq;
 
     if (!player.IsAlive() || matchSimulation_.HasWinner())
     {
-        return false;
+        result.message = "Action denied.";
+        result.color = Color { 255, 130, 130, 255 };
+        return result;
     }
 
     switch (static_cast<PlayerActionType>(command.actionType))
@@ -2198,22 +2305,17 @@ bool Game::ApplyPlayerEconomyCommand(Player& player, const PlayerCommand& comman
         Team* team = FindTeam(player.GetTeamId());
         if (team == nullptr || !shop_.IsPlayerInShop(player, *team))
         {
-            return false;
+            result.message = "Too far from the shop.";
+            result.color = Color { 255, 130, 130, 255 };
+            return result;
         }
         const int repeat = std::clamp(command.actionParamB, 1, 4);
         std::string message;
         const bool bought = TryShopPurchase(player, *team, command.actionParamA, repeat, message);
-        // The resulting resources/items/team-upgrades replicate through the
-        // snapshot's owner-private inventory; host-side event message for
-        // visibility. Per-client purchase feedback replication is a follow-up
-        // (see docs/NETWORK_PREP_PLAN.md, Phase A "deferred").
-        if (!message.empty())
-        {
-            AddEventMessage(player.GetName() + ": " + message,
-                            bought ? Color { 128, 238, 166, 255 } : Color { 255, 130, 130, 255 },
-                            1.6f);
-        }
-        return bought;
+        result.success = bought;
+        result.message = message.empty() ? "Purchase denied." : message;
+        result.color = bought ? Color { 128, 238, 166, 255 } : Color { 255, 130, 130, 255 };
+        return result;
     }
     case PlayerActionType::DropItem:
     case PlayerActionType::MoveInventory:
@@ -2222,7 +2324,9 @@ bool Game::ApplyPlayerEconomyCommand(Player& player, const PlayerCommand& comman
     default:
         // Reserved for the next economy increment (drop / inventory move / chest
         // transfer) over this same deduped channel.
-        return false;
+        result.message = "Unsupported action.";
+        result.color = Color { 255, 130, 130, 255 };
+        return result;
     }
 }
 
@@ -2300,10 +2404,7 @@ void Game::NetworkServerTick(ServerTransport& transport, float dt)
     }
     for (const ReconnectedClient& returned : transport.TakeReconnectedClients())
     {
-        if (returned.playerId >= 0 && !IsNetworkControlledPlayer(returned.playerId))
-        {
-            networkControlledPlayerIds_.push_back(returned.playerId);
-        }
+        MarkNetworkControlledPlayer(returned.playerId);
         if (Player* player = matchSimulation_.GetPlayer(returned.playerId))
         {
             std::cout << "server: " << player->GetName()
@@ -2329,6 +2430,7 @@ void Game::NetworkServerTick(ServerTransport& transport, float dt)
         Player* target = matchSimulation_.GetPlayer(static_cast<int>(received.command.controlledPlayerId));
         if (target != nullptr && target->IsAlive())
         {
+            ScopedLocalFeedbackSuppression suppressServerFeedback(*this, true);
             // Movement/aim/slot, then discrete actions: hero abilities, utility
             // items, and attack/break/place (B1). These only gate on shop/inventory
             // for the local player, so a network player is never silenced by the
@@ -4845,7 +4947,7 @@ int Game::RunNetworkRangedSmoke()
 
     Player& controlled = matchSimulation_.Players().front();
     const int controlledId = controlled.GetId();
-    networkControlledPlayerIds_.push_back(controlledId);
+    MarkNetworkControlledPlayer(controlledId);
     controlled.SetPosition(Vec3 { 0.0f, 38.0f, 0.0f });
 
     const auto normalized = [](Vector3 value)
@@ -5001,7 +5103,7 @@ int Game::RunNetworkActionsSmoke()
     Player* controlledPtr = nullptr;
     for (Player& candidate : matchSimulation_.Players())
     {
-        if (!candidate.IsLocal())
+        if (IsBotControlled(ControlKindForPlayer(candidate)))
         {
             controlledPtr = &candidate;
             break;
@@ -5015,7 +5117,7 @@ int Game::RunNetworkActionsSmoke()
     }
     Player& controlled = *controlledPtr;
     const int controlledId = controlled.GetId();
-    networkControlledPlayerIds_.push_back(controlledId);
+    MarkNetworkControlledPlayer(controlledId);
 
     Player* enemy = nullptr;
     for (Player& candidate : matchSimulation_.Players())
@@ -5036,6 +5138,7 @@ int Game::RunNetworkActionsSmoke()
     // A clear patch of air well above the arena so existing geometry can't
     // interfere with the raycasts.
     controlled.SetPosition(Vec3 { 0.0f, 40.0f, 0.0f });
+    controlled.SetHeroId(HeroId::Likho);
     const float aimYaw = PI / 2.0f; // Forward() = (+1, 0, 0)
     controlled.SetYaw(aimYaw);
 
@@ -5045,6 +5148,147 @@ int Game::RunNetworkActionsSmoke()
     base.aimPitch = 0.0f;
     const Vector3 forward = AimDirectionFromCommand(base);
     const Vector3 eye { 0.0f, 40.0f + 0.78f, 0.0f };
+
+    // Phase 2 bridge: authoritative remote-human actions must mutate gameplay
+    // without writing host-local presentation buffers. Force feedback on in this
+    // headless smoke so the scoped server suppression is what keeps these stable.
+    suppressLocalFeedback_ = false;
+    const std::string messageBefore = message_;
+    const std::size_t eventMessagesBefore = eventMessages_.size();
+    const std::size_t worldEffectsBefore = worldEffects_.size();
+    const std::size_t floatingTextsBefore = floatingTexts_.size();
+    const bool audioMutedBefore = audio_.IsMuted();
+    const int localPlayerIdBefore = localPlayerId_;
+    localPlayerId_ = controlledId;
+    const MatchStats statsBefore = stats_;
+    const float hitMarkerBefore = hitMarkerTimer_;
+    const float damageFlashBefore = damageFlashTimer_;
+    const float fovKickBefore = fovKick_;
+
+    // --- Hero abilities: remote actions mutate authoritative state only. ------
+    controlled.SetHeroId(HeroId::Radon);
+    enemy->SetPosition(Vec3 { eye.x + forward.x * 3.0f, 40.0f, eye.z + forward.z * 3.0f });
+    enemy->UpdateTimers(2.0f);
+    const int radonPulseHpBefore = enemy->GetHealth();
+    PlayerCommand radonPulseCmd = base;
+    radonPulseCmd.useAbility1 = true;
+    const bool radonPulseApplied = ApplyPlayerActionCommand(controlled, radonPulseCmd);
+    const bool radonPulseWorked = radonPulseApplied && enemy->GetHealth() < radonPulseHpBefore;
+
+    const std::size_t radonProjectilesBefore = projectiles_.size();
+    PlayerCommand radonMolotovCmd = base;
+    radonMolotovCmd.useAbility2 = true;
+    const bool radonMolotovApplied = ApplyPlayerActionCommand(controlled, radonMolotovCmd);
+    const bool radonMolotovWorked = radonMolotovApplied && projectiles_.size() == radonProjectilesBefore + 1;
+
+    controlled.SetHeroId(HeroId::Likho);
+    const float ability1CooldownBefore = controlled.GetHeroState().active1.cooldownRemaining;
+    PlayerCommand hero1Cmd = base;
+    hero1Cmd.useAbility1 = true;
+    const bool hero1Applied = ApplyPlayerActionCommand(controlled, hero1Cmd);
+    const float ability1CooldownAfter = controlled.GetHeroState().active1.cooldownRemaining;
+    const bool hero1Worked = hero1Applied
+        && ability1CooldownBefore <= 0.0f
+        && ability1CooldownAfter > ability1CooldownBefore;
+
+    const bool ability2ActiveBefore = controlled.GetHeroState().active2.active;
+    PlayerCommand hero2Cmd = base;
+    hero2Cmd.useAbility2 = true;
+    const bool hero2Applied = ApplyPlayerActionCommand(controlled, hero2Cmd);
+    const bool ability2ActiveAfter = controlled.GetHeroState().active2.active;
+    const bool hero2Worked = hero2Applied && !ability2ActiveBefore && ability2ActiveAfter;
+
+    controlled.SetHeroId(HeroId::Svidetel);
+    const std::size_t echoesBefore = svidetelEchoes_.size();
+    PlayerCommand svidetelEchoCmd = base;
+    svidetelEchoCmd.useAbility1 = true;
+    const bool svidetelEchoApplied = ApplyPlayerActionCommand(controlled, svidetelEchoCmd);
+    const bool svidetelEchoWorked = svidetelEchoApplied && svidetelEchoes_.size() == echoesBefore + 1;
+
+    const GridPos phaseCell = world_.WorldToGrid(Vector3 {
+        eye.x + forward.x * 3.0f, eye.y, eye.z + forward.z * 3.0f });
+    world_.PlaceBlock(phaseCell, Block { BlockType::StoneBlock, -1, true }, true);
+    const std::size_t phaseBlocksBefore = svidetelPhaseBlocks_.size();
+    PlayerCommand svidetelPhaseCmd = base;
+    svidetelPhaseCmd.useAbility2 = true;
+    const bool svidetelPhaseApplied = ApplyPlayerActionCommand(controlled, svidetelPhaseCmd);
+    const bool svidetelPhaseWorked = svidetelPhaseApplied
+        && svidetelPhaseBlocks_.size() > phaseBlocksBefore
+        && world_.GetBlock(phaseCell) == nullptr;
+
+    controlled.SetHeroUltimateCharge(100.0f);
+    const float svidetelUltimateCooldownBefore = controlled.GetHeroState().ultimate.cooldownRemaining;
+    PlayerCommand svidetelUltimateCmd = base;
+    svidetelUltimateCmd.useUltimate = true;
+    const bool svidetelUltimateApplied = ApplyPlayerActionCommand(controlled, svidetelUltimateCmd);
+    const float svidetelUltimateCooldownAfter = controlled.GetHeroState().ultimate.cooldownRemaining;
+    const bool svidetelUltimateWorked = svidetelUltimateApplied
+        && svidetelUltimateCooldownBefore <= 0.0f
+        && svidetelUltimateCooldownAfter > svidetelUltimateCooldownBefore;
+
+    controlled.SetHeroId(HeroId::Konvoy);
+    const Vector3 trapDesired {
+        controlled.GetPosition().x + forward.x * 1.15f,
+        controlled.GetPosition().y,
+        controlled.GetPosition().z + forward.z * 1.15f
+    };
+    const GridPos trapColumn = world_.WorldToGrid(trapDesired);
+    const int playerGridY = world_.WorldToGrid(controlled.GetPosition()).y;
+    world_.PlaceBlock(GridPos { trapColumn.x, playerGridY - 1, trapColumn.z }, Block { BlockType::StoneBlock, -1, true }, true);
+    const std::size_t konvoyTrapsBefore = konvoyTraps_.size();
+    PlayerCommand konvoyTrapCmd = base;
+    konvoyTrapCmd.useAbility1 = true;
+    const bool konvoyTrapApplied = ApplyPlayerActionCommand(controlled, konvoyTrapCmd);
+    const bool konvoyTrapWorked = konvoyTrapApplied && konvoyTraps_.size() == konvoyTrapsBefore + 1;
+
+    enemy->SetPosition(Vec3 { eye.x + forward.x * 3.0f, 40.0f, eye.z + forward.z * 3.0f });
+    const std::size_t konvoyTethersBefore = konvoyTethers_.size();
+    PlayerCommand konvoyTetherCmd = base;
+    konvoyTetherCmd.useAbility2 = true;
+    const bool konvoyTetherApplied = ApplyPlayerActionCommand(controlled, konvoyTetherCmd);
+    const bool konvoyTetherWorked = konvoyTetherApplied && konvoyTethers_.size() == konvoyTethersBefore + 1;
+
+    controlled.SetHeroUltimateCharge(100.0f);
+    const std::size_t konvoyDomesBefore = konvoyDomes_.size();
+    PlayerCommand konvoyDomeCmd = base;
+    konvoyDomeCmd.useUltimate = true;
+    const bool konvoyDomeApplied = ApplyPlayerActionCommand(controlled, konvoyDomeCmd);
+    const bool konvoyDomeWorked = konvoyDomeApplied && konvoyDomes_.size() == konvoyDomesBefore + 1;
+
+    controlled.SetHeroId(HeroId::Brom);
+    controlled.GetInventory().AddResource(ResourceType::Iron, 48);
+    controlled.GetInventory().AddResource(ResourceType::Gold, 12);
+    const std::size_t bromVacuumBefore = bromVacuumBots_.size();
+    PlayerCommand bromVacuumCmd = base;
+    bromVacuumCmd.useAbility1 = true;
+    const bool bromVacuumApplied = ApplyPlayerActionCommand(controlled, bromVacuumCmd);
+    const bool bromVacuumWorked = bromVacuumApplied && bromVacuumBots_.size() == bromVacuumBefore + 1;
+
+    const std::size_t bromTurretBefore = bromTurretDrones_.size();
+    PlayerCommand bromTurretCmd = base;
+    bromTurretCmd.useAbility2 = true;
+    const bool bromTurretApplied = ApplyPlayerActionCommand(controlled, bromTurretCmd);
+    const bool bromTurretWorked = bromTurretApplied && bromTurretDrones_.size() == bromTurretBefore + 1;
+
+    const bool heroAbilityWorked = radonPulseWorked && radonMolotovWorked
+        && hero1Worked && hero2Worked
+        && svidetelEchoWorked && svidetelPhaseWorked && svidetelUltimateWorked
+        && konvoyTrapWorked && konvoyTetherWorked && konvoyDomeWorked
+        && bromVacuumWorked && bromTurretWorked;
+
+    // --- Utility: a remote dash mutates authoritative movement only. ---
+    ItemStack dashPearl;
+    dashPearl.type = ItemFromUtility(UtilityType::Dash);
+    dashPearl.count = 1;
+    controlled.GetInventory().SwapSlot(2, dashPearl);
+    controlled.SetSelectedSlot(2);
+    const Vec3 velocityBeforeDash = controlled.GetVelocityVec3();
+    PlayerCommand dashCmd = base;
+    dashCmd.useDash = true;
+    UseUtilityInputs(controlled, dashCmd);
+    const Vec3 velocityAfterDash = controlled.GetVelocityVec3();
+    const bool dashWorked = (velocityAfterDash - velocityBeforeDash).Length() > 0.1f
+        && controlled.GetInventory().GetHotbarSlots()[2].IsEmpty();
 
     // --- Melee: an enemy lined up in front loses health on attackPressed. ---
     enemy->SetPosition(Vec3 { eye.x + forward.x * 1.6f, 40.0f, eye.z + forward.z * 1.6f });
@@ -5097,16 +5341,41 @@ int Game::RunNetworkActionsSmoke()
         }
     }
 
+    const bool presentationSuppressed =
+        message_ == messageBefore
+        && eventMessages_.size() == eventMessagesBefore
+        && worldEffects_.size() == worldEffectsBefore
+        && floatingTexts_.size() == floatingTextsBefore;
+    const bool localCombatFeedbackSuppressed =
+        stats_.hitsDealt == statsBefore.hitsDealt
+        && stats_.damageDealt == statsBefore.damageDealt
+        && stats_.kills == statsBefore.kills
+        && stats_.coreDamageDealt == statsBefore.coreDamageDealt
+        && stats_.coresDestroyed == statsBefore.coresDestroyed
+        && stats_.blocksPlaced == statsBefore.blocksPlaced
+        && stats_.blocksBroken == statsBefore.blocksBroken
+        && hitMarkerTimer_ == hitMarkerBefore
+        && damageFlashTimer_ == damageFlashBefore
+        && fovKick_ == fovKickBefore;
+    const bool audioRestored = audio_.IsMuted() == audioMutedBefore;
+    localPlayerId_ = localPlayerIdBefore;
+
     networkControlledPlayerIds_.clear();
     networkActionState_.clear();
 
     std::cout << "network-actions-smoke: meleeHp " << enemyHpBefore << "->" << enemyHpAfter
               << " melee=" << (meleeWorked ? "ok" : "FAIL")
               << " | blocks " << blocksBeforePlace << "->" << blocksAfterPlace
+              << " heroAbility=" << (heroAbilityWorked ? "ok" : "FAIL")
+              << " dash=" << (dashWorked ? "ok" : "FAIL")
               << " place=" << (placeWorked ? "ok" : "FAIL")
-              << " break=" << (breakWorked ? "ok" : "FAIL") << '\n';
+              << " break=" << (breakWorked ? "ok" : "FAIL")
+              << " presentation=" << (presentationSuppressed ? "ok" : "FAIL")
+              << " localCombat=" << (localCombatFeedbackSuppressed ? "ok" : "FAIL")
+              << " audioRestore=" << (audioRestored ? "ok" : "FAIL") << '\n';
 
-    const bool ok = meleeWorked && placeWorked && breakWorked;
+    const bool ok = meleeWorked && heroAbilityWorked && dashWorked && placeWorked && breakWorked
+        && presentationSuppressed && localCombatFeedbackSuppressed && audioRestored;
     std::cout << (ok ? "NETWORK_ACTIONS_SMOKE_OK" : "NETWORK_ACTIONS_SMOKE_FAIL") << std::endl;
     return ok ? 0 : 9;
 }

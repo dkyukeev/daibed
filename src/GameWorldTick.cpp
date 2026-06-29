@@ -455,9 +455,10 @@ void Game::UpdatePickups(float dt)
                     player.AddHeroUltimateCharge(BromUltimateChargeForResource(pickup.type, pickup.amount));
                 }
                 pickup.collected = true;
-                AddWorldEffect(ToVector3(pickup.position), player.IsLocal() ? Color { 255, 245, 170, 255 } : Color { 180, 210, 255, 255 }, 0.22f, 0.28f);
-                AddFloatingText("+" + std::to_string(pickup.amount) + " " + ToString(pickup.type), ToVector3(pickup.position), player.IsLocal() ? Color { 255, 236, 135, 255 } : Fade(WHITE, 0.85f));
-                if (player.IsLocal())
+                const bool localCamera = HasLocalCamera(ControlKindForPlayer(player));
+                AddWorldEffect(ToVector3(pickup.position), localCamera ? Color { 255, 245, 170, 255 } : Color { 180, 210, 255, 255 }, 0.22f, 0.28f);
+                AddFloatingText("+" + std::to_string(pickup.amount) + " " + ToString(pickup.type), ToVector3(pickup.position), localCamera ? Color { 255, 236, 135, 255 } : Fade(WHITE, 0.85f));
+                if (IsLocallyPredicted(ControlKindForPlayer(player)))
                 {
                     ++stats_.resourcesPicked;
                     SetMessage("Подобрано: " + std::to_string(pickup.amount) + " " + ToString(pickup.type) + ".");
@@ -565,7 +566,7 @@ void Game::UpdateDroppedItems(float dt)
                     }
                     dropped.collected = true;
                     AddWorldEffect(ToVector3(dropped.position), Color { 255, 245, 170, 255 }, 0.18f, 0.22f);
-                    if (player.IsLocal())
+                    if (HasLocalCamera(ControlKindForPlayer(player)))
                     {
                         SetMessage(std::string("Подобрано: ") + ItemDisplayName(dropped.stack.type) + ".");
                         audio_.PlayPickup();
@@ -624,7 +625,7 @@ void Game::UpdateBlockHazards(float dt)
             player.Damage(damage);
             AddWorldEffect(player.GetPosition(), block->type == BlockType::LavaBlock ? Color { 255, 88, 42, 255 } : Color { 255, 118, 118, 255 }, 0.20f, 0.20f);
             AddFloatingText(block->type == BlockType::LavaBlock ? "burn" : "spike", player.GetPosition(), block->type == BlockType::LavaBlock ? Color { 255, 128, 72, 255 } : Color { 255, 118, 118, 255 });
-            if (player.IsLocal())
+            if (HasLocalCamera(ControlKindForPlayer(player)))
             {
                 damageFlashTimer_ = std::max(damageFlashTimer_, 0.35f);
             }
@@ -638,7 +639,7 @@ void Game::UpdateBlockHazards(float dt)
                 player.Damage(5);
                 AddWorldEffect(player.GetPosition(), Color { 255, 88, 42, 255 }, 0.18f, 0.18f);
                 AddFloatingText("heat", player.GetPosition(), Color { 255, 128, 72, 255 });
-                if (player.IsLocal())
+                if (HasLocalCamera(ControlKindForPlayer(player)))
                 {
                     damageFlashTimer_ = std::max(damageFlashTimer_, 0.32f);
                     SetMessage("Жар лавового биома: поднимитесь на безопасную высоту.", 1.2f);
@@ -1036,7 +1037,7 @@ void Game::UpdateHeroPassives(float dt)
                 const bool wasCharged = heroState.orbitaMomentumStrike;
                 heroState.orbitaMomentumStrike = true;
                 heroState.orbitaPulseTimer = std::max(heroState.orbitaPulseTimer, 0.85f);
-                if (!wasCharged && player.IsLocal())
+                if (!wasCharged && HasLocalCamera(ControlKindForPlayer(player)))
                 {
                     AddFloatingText("разгон", Vector3 { player.GetPosition().x, player.GetPosition().y + 1.25f, player.GetPosition().z }, HeroAccentColor(HeroId::Orbita));
                 }
@@ -1073,7 +1074,7 @@ void Game::UpdateHeroPassives(float dt)
                         heroState.ultimate.active = false;
                         heroState.ultimate.activeTimer = 0.0f;
                         heroState.likhoDisguiseTeamId = -1;
-                        if (player.IsLocal())
+                        if (HasLocalCamera(ControlKindForPlayer(player)))
                         {
                             AddEventMessage("Кор раскрыл маскировку Лихо", HeroAccentColor(HeroId::Likho), 2.0f);
                         }
@@ -1085,7 +1086,7 @@ void Game::UpdateHeroPassives(float dt)
             {
                 player.ActivateSpeedBoost(4.0f);
                 player.AddHeroUltimateCharge(8.0f);
-                if (player.IsLocal())
+                if (HasLocalCamera(ControlKindForPlayer(player)))
                 {
                     AddFloatingText("побег", player.GetPosition(), HeroAccentColor(HeroId::Likho));
                 }
@@ -2452,7 +2453,7 @@ void Game::UpdateBaseHealing(float dt)
         }
 
         player.Heal(3 + team->healAuraLevel * 2);
-        if (player.IsLocal())
+        if (HasLocalCamera(ControlKindForPlayer(player)))
         {
             AddWorldEffect(player.GetPosition(), Color { 128, 238, 166, 255 }, 0.18f, 0.18f);
         }

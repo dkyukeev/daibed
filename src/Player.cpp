@@ -53,13 +53,36 @@ float Approach(float current, float target, float maxDelta)
 }
 }
 
+bool IsHumanControlled(PlayerControlKind kind)
+{
+    return kind == PlayerControlKind::LocalHumanPredicted
+        || kind == PlayerControlKind::RemoteHumanAuthoritative;
+}
+
+bool IsBotControlled(PlayerControlKind kind)
+{
+    return kind == PlayerControlKind::BotAuthoritative;
+}
+
+bool IsLocallyPredicted(PlayerControlKind kind)
+{
+    return kind == PlayerControlKind::LocalHumanPredicted;
+}
+
+bool HasLocalCamera(PlayerControlKind kind)
+{
+    return kind == PlayerControlKind::LocalHumanPredicted
+        || kind == PlayerControlKind::Spectator;
+}
+
 Player::Player(int id, std::string name, int teamId, Vector3 spawnPoint, bool local)
     : id_(id),
       name_(std::move(name)),
       teamId_(teamId),
       homeSpawnPoint_ { spawnPoint.x, spawnPoint.y, spawnPoint.z },
       position_ { spawnPoint.x, spawnPoint.y, spawnPoint.z },
-      local_(local)
+      local_(local),
+      controlKind_(local ? PlayerControlKind::LocalHumanPredicted : PlayerControlKind::BotAuthoritative)
 {
 }
 
@@ -152,6 +175,16 @@ bool Player::IsEliminated() const
 bool Player::IsLocal() const
 {
     return local_;
+}
+
+PlayerControlKind Player::GetControlKind() const
+{
+    return controlKind_;
+}
+
+void Player::SetControlKind(PlayerControlKind kind)
+{
+    controlKind_ = kind;
 }
 
 bool Player::IsOnGround() const

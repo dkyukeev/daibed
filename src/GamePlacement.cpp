@@ -456,12 +456,16 @@ void Game::ResetBreakProgress()
     breakProgress_ = BreakProgress {};
 }
 
-void Game::CompleteBreakProgress(Player& player, const BreakProgress& progress)
+Game::BlockActionResult Game::ApplyCompletedBreakProgress(Player& player, const BreakProgress& progress)
 {
+    BlockActionResult result {};
     if (!progress.visible)
     {
-        return;
+        return result;
     }
+    result.handled = true;
+    result.kind = BlockActionKind::Break;
+    result.blockType = progress.targetType;
 
     const GridPos target = progress.target;
     if (progress.isCore)
@@ -496,7 +500,7 @@ void Game::CompleteBreakProgress(Player& player, const BreakProgress& progress)
                 player.GetInventory().DamageTool(2);
             }
         }
-        return;
+        return result;
     }
 
     const Block* blockBeforeBreak = world_.GetBlock(target);
@@ -506,14 +510,13 @@ void Game::CompleteBreakProgress(Player& player, const BreakProgress& progress)
     if (BreakWorldBlock(target, player.GetTeamId(), BlockDeltaReason::PlayerBreak, player.GetId()))
     {
         const Vector3 center = world_.GridToWorld(target);
-        SetMessage(std::string(DisplayName(progress.targetType)) + " сломан.");
-        AddWorldEffect(center, Color { 210, 220, 235, 255 }, 0.28f, 0.25f);
-        AddFloatingText("break", center, Color { 210, 220, 235, 255 });
-        audio_.PlayBreakBlockAt(center);
-        if (player.IsLocal())
-        {
-            ++stats_.blocksBroken;
-        }
+        result.success = true;
+        result.position = center;
+        result.color = Color { 210, 220, 235, 255 };
+        result.message = std::string(DisplayName(progress.targetType)) + " сломан.";
+        result.hasWorldEffect = true;
+        result.playBreakSound = true;
+        result.incrementLocalBroken = IsLocallyPredicted(ControlKindForPlayer(player));
         if (brokenBlock.has_value())
         {
             ApplyBromBlockBreakPassive(player, *brokenBlock, center);
@@ -522,9 +525,16 @@ void Game::CompleteBreakProgress(Player& player, const BreakProgress& progress)
     }
     else
     {
-        SetMessage("Этот блок защищен.");
-        audio_.PlayDenied();
+        result.message = "Этот блок защищен.";
+        result.playDeniedSound = true;
     }
+    return result;
+}
+
+void Game::CompleteBreakProgress(Player& player, const BreakProgress& progress)
+{
+    const BlockActionResult result = ApplyCompletedBreakProgress(player, progress);
+    PresentBlockActionResult(player, result, true);
 }
 
 void Game::HandlePlaceBlock()
@@ -713,9 +723,9 @@ bool Game::HasAdjacentAnchorBlock(const GridPos& pos) const
 
 std::optional<BlockType> Game::SelectPlacementBlockForPlayer(const Player& player, const GridPos& pos) const
 {
-    // The local player and network-controlled players place their selected block;
-    // only bots fall back to the priority auto-pick (they have no selected slot).
-    if (player.IsLocal() || IsNetworkControlledPlayer(player.GetId()))
+    // Human-controlled players place their selected block; only bots fall back
+    // to the priority auto-pick (they have no selected slot).
+    if (IsHumanControlled(ControlKindForPlayer(player)))
     {
         return GetSelectedBlockType(player);
     }
@@ -754,16 +764,18 @@ std::optional<BlockType> Game::SelectPlacementBlockForPlayer(const Player& playe
     return std::nullopt;
 }
 
-bool Game::TryPlaceBlockForPlayer(Player& player, const GridPos& pos, bool announce)
+Game::BlockActionResult Game::ApplyPlaceBlockForPlayer(Player& player, const GridPos& pos)
 {
+    BlockActionResult result {};
+    result.handled = true;
+    result.kind = BlockActionKind::Place;
+    result.position = world_.GridToWorld(pos);
     std::string reason;
     if (!CanPlaceBlockAt(pos, player, &reason))
     {
-        if (announce)
-        {
-            SetMessage(reason);
-        }
-        return false;
+        result.message = reason;
+        result.playDeniedSound = true;
+        return result;
     }
 
     std::optional<BlockType> selectedBlock = SelectPlacementBlockForPlayer(player, pos);
@@ -771,33 +783,29 @@ bool Game::TryPlaceBlockForPlayer(Player& player, const GridPos& pos, bool annou
 
     if (!IsBuildableBlock(blockType))
     {
-        if (announce)
-        {
-            SetMessage("Сначала выберите блок.");
-        }
-        return false;
+        result.message = "Сначала выберите блок.";
+        result.playDeniedSound = true;
+        return result;
     }
     if (player.GetInventory().GetBlockCount(blockType) <= 0)
     {
-        if (announce)
-        {
-            SetMessage(std::string("Нет доступных блоков: ") + DisplayName(blockType) + ".");
-        }
-        return false;
+        result.message = std::string("Нет доступных блоков: ") + DisplayName(blockType) + ".";
+        result.playDeniedSound = true;
+        return result;
     }
 
     if (!PlaceWorldBlock(pos, Block { blockType, player.GetTeamId(), true }, false, BlockDeltaReason::PlayerPlace, player.GetId()))
     {
-        if (announce)
-        {
-            SetMessage("Место уже занято.");
-        }
-        return false;
+        result.message = "Место уже занято.";
+        result.playDeniedSound = true;
+        return result;
     }
 
-    if (player.IsLocal())
+    const PlayerControlKind controlKind = ControlKindForPlayer(player);
+    if (IsHumanControlled(controlKind))
     {
-        player.GetInventory().SpendSlotItem(selectedHotbarSlot_);
+        const int slot = IsLocallyPredicted(controlKind) ? selectedHotbarSlot_ : player.GetSelectedSlot();
+        player.GetInventory().SpendSlotItem(slot);
     }
     else
     {
@@ -810,22 +818,83 @@ bool Game::TryPlaceBlockForPlayer(Player& player, const GridPos& pos, bool annou
     {
         effectColor = Color { 112, 232, 255, 255 };
     }
-    AddWorldEffect(center, effectColor, 0.24f, 0.22f);
-    audio_.PlayPlaceBlockAt(center);
+    result.success = true;
+    result.blockType = blockType;
+    result.position = center;
+    result.color = effectColor;
+    result.message = std::string(DisplayName(blockType)) + " поставлен.";
+    result.hasWorldEffect = true;
+    result.playPlaceSound = true;
     if (blockType == BlockType::ExplosiveBlock)
     {
         timedExplosions_.push_back(TimedExplosion { pos, player.GetTeamId(), player.GetId(), 2.6f, 2.7f });
-        AddEventMessage("TNT активирован: 2.6 с", Color { 255, 224, 122, 255 }, 1.8f);
+        result.tntActivated = true;
     }
-    if (player.IsLocal())
+    result.incrementLocalPlaced = IsLocallyPredicted(controlKind);
+
+    return result;
+}
+
+void Game::PresentBlockActionResult(const Player& player, const BlockActionResult& result, bool announce)
+{
+    if (!result.handled || suppressLocalFeedback_)
     {
-        ++stats_.blocksPlaced;
-        SetMessage((BuildLocalPlayerCommand().bridgeMode ? "Мост: " : "") + std::string(DisplayName(blockType)) + " поставлен.");
-    }
-    else if (announce)
-    {
-        SetMessage(player.GetName() + " поставил блок.");
+        return;
     }
 
-    return true;
+    if (result.hasWorldEffect)
+    {
+        const float radius = result.kind == BlockActionKind::Break ? 0.28f : 0.24f;
+        const float seconds = result.kind == BlockActionKind::Break ? 0.25f : 0.22f;
+        AddWorldEffect(result.position, result.color, radius, seconds);
+    }
+    if (result.kind == BlockActionKind::Break && result.success)
+    {
+        AddFloatingText("break", result.position, result.color);
+    }
+    if (result.playPlaceSound)
+    {
+        audio_.PlayPlaceBlockAt(result.position);
+    }
+    if (result.playBreakSound)
+    {
+        audio_.PlayBreakBlockAt(result.position);
+    }
+    if (result.kind == BlockActionKind::Break && result.playDeniedSound)
+    {
+        audio_.PlayDenied();
+    }
+    if (result.tntActivated)
+    {
+        AddEventMessage("TNT активирован: 2.6 с", Color { 255, 224, 122, 255 }, 1.8f);
+    }
+
+    if (result.incrementLocalPlaced)
+    {
+        ++stats_.blocksPlaced;
+        SetMessage((BuildLocalPlayerCommand().bridgeMode ? "Мост: " : "") + result.message);
+    }
+    else if (result.incrementLocalBroken)
+    {
+        ++stats_.blocksBroken;
+        SetMessage(result.message);
+    }
+    else if (announce && !result.message.empty())
+    {
+        if (result.success && result.kind == BlockActionKind::Place)
+        {
+            SetMessage(player.GetName() + " поставил блок.");
+        }
+        else
+        {
+            SetMessage(result.message);
+        }
+    }
+}
+
+bool Game::TryPlaceBlockForPlayer(Player& player, const GridPos& pos, bool announce)
+{
+    const BlockActionResult result = ApplyPlaceBlockForPlayer(player, pos);
+    PresentBlockActionResult(player, result, announce);
+    return result.success;
 }

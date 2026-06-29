@@ -9,6 +9,20 @@
 
 #include <string>
 
+enum class PlayerControlKind
+{
+    LocalHumanPredicted,
+    RemoteHumanAuthoritative,
+    BotAuthoritative,
+    Replica,
+    Spectator
+};
+
+bool IsHumanControlled(PlayerControlKind kind);
+bool IsBotControlled(PlayerControlKind kind);
+bool IsLocallyPredicted(PlayerControlKind kind);
+bool HasLocalCamera(PlayerControlKind kind);
+
 class Player
 {
 public:
@@ -36,6 +50,8 @@ public:
     bool IsAlive() const;
     bool IsEliminated() const;
     bool IsLocal() const;
+    PlayerControlKind GetControlKind() const;
+    void SetControlKind(PlayerControlKind kind);
     bool IsOnGround() const;
     bool IsSprinting() const;
     bool IsSneaking() const;
@@ -146,6 +162,7 @@ private:
     bool alive_ = true;
     bool eliminated_ = false;
     bool local_ = false;
+    PlayerControlKind controlKind_ = PlayerControlKind::Replica;
     bool onGround_ = false;
     bool sprinting_ = false;
     bool sneaking_ = false;

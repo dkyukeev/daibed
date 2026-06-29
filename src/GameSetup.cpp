@@ -572,6 +572,7 @@ void Game::SetupMatch()
                 ? ("Игрок " + std::to_string(lobbyPlayer.clientId))
                 : lobbyPlayer.playerName;
             Player player(nextPlayerId++, name, teamId, team->spawnPoint, false);
+            player.SetControlKind(PlayerControlKind::RemoteHumanAuthoritative);
             player.SetHeroId(heroId);
             player.SetYaw(YawForTeam(teamId));
             giveHumanLoadout(player, heroId);

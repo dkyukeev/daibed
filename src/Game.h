@@ -160,6 +160,9 @@ public:
     // Phase B: network-controlled ranged attacks use PlayerCommand aim, not the
     // server camera. CLI: --network-ranged-smoke.
     int RunNetworkRangedSmoke();
+    // Phase 1: same PlayerCommand produces the same human movement for local
+    // predicted and remote authoritative humans. CLI: --movement-parity-smoke.
+    int RunMovementParitySmoke();
     // Phase C: applies a snapshot with dynamic entities to an empty client and
     // asserts projectiles/hazards/devices/status effects materialize.
     int RunClientDynamicApplySmoke();
@@ -192,16 +195,70 @@ private:
     void StartSelectedMatch();
     void TriggerCoreCollapse();
     void ApplyBotLoadout(Player& bot) const;
+    PlayerControlKind ControlKindForPlayer(const Player& player) const;
     float TerrainSpeedMultiplier(const Player& player) const;
     float BiomeGravityMultiplier() const;
     float BiomeJumpMultiplier() const;
     float BiomeGroundControlMultiplier(const Player& player) const;
     float BiomeAirControlMultiplier() const;
     float BiomeKnockbackMultiplier() const;
-    void ApplyStandingBlockEffects(Player& player, bool localPlayer);
+    void ApplyStandingBlockEffects(Player& player, bool hasLocalCamera);
     void DropPlayerResources(Player& player);
     void UseHeroAbilityInputs(Player& player);
+    struct HeroWorldEffectResult
+    {
+        Vector3 position {};
+        Vector3 direction { 0.0f, 0.0f, 1.0f };
+        Color color = WHITE;
+        float radius = 0.0f;
+        float seconds = 0.0f;
+        WorldEffectKind kind = WorldEffectKind::Burst;
+        bool directed = false;
+    };
+    struct HeroFloatingTextResult
+    {
+        std::string text;
+        Vector3 position {};
+        Color color = WHITE;
+    };
+    struct HeroEventMessageResult
+    {
+        std::string message;
+        Color color = WHITE;
+        float seconds = 2.0f;
+    };
+    struct HeroAbilityActionResult
+    {
+        bool handled = false;
+        bool success = false;
+        HeroId hero = HeroId::Radon;
+        HeroAbilitySlot slot = HeroAbilitySlot::Active1;
+        std::string message;
+        float messageSeconds = 1.6f;
+        Vector3 position {};
+        Vector3 direction { 0.0f, 0.0f, 1.0f };
+        Color color = WHITE;
+        float radius = 0.0f;
+        float seconds = 0.0f;
+        WorldEffectKind effectKind = WorldEffectKind::Burst;
+        bool hasWorldEffect = false;
+        bool directedWorldEffect = false;
+        std::string floatingText;
+        Vector3 floatingTextPosition {};
+        bool hasFloatingText = false;
+        std::vector<HeroWorldEffectResult> worldEffects;
+        std::vector<HeroFloatingTextResult> floatingTexts;
+        std::vector<HeroEventMessageResult> eventMessages;
+        bool playPickupSound = false;
+        bool playBuildSound = false;
+        bool playPurchaseSound = false;
+        bool playBreakBlockSound = false;
+        bool playDeniedSound = false;
+    };
+    HeroAbilityActionResult ApplyHeroAbilityAction(Player& player, HeroAbilitySlot slot);
+    void PresentHeroAbilityResult(const HeroAbilityActionResult& result);
     bool UseHeroAbility(Player& player, HeroAbilitySlot slot);
+    bool UseHeroAbilityLegacy(Player& player, HeroAbilitySlot slot);
     bool UseRadonAbility(Player& player, HeroAbilitySlot slot);
     bool UseOrbitaAbility(Player& player, HeroAbilitySlot slot);
     bool UseBromAbility(Player& player, HeroAbilitySlot slot);
@@ -227,6 +284,22 @@ private:
     void ApplyBromBlockBreakPassive(Player& player, const Block& block, Vector3 position);
     void SetHeroAnimation(Player& player, HeroAnimationState state, float seconds);
     void UseUtilityInputs(Player& player, const PlayerCommand& command);
+    struct UtilityActionResult
+    {
+        bool handled = false;
+        bool success = false;
+        UtilityType type = UtilityType::Heal;
+        std::string message;
+        Vector3 position {};
+        Color color = WHITE;
+        float radius = 0.0f;
+        float seconds = 0.0f;
+        bool hasWorldEffect = false;
+        bool playPickupSound = false;
+        bool playDeniedSound = false;
+    };
+    UtilityActionResult ApplyUtility(Player& player, UtilityType type);
+    void PresentUtilityActionResult(const UtilityActionResult& result);
     bool UseUtility(Player& player, UtilityType type);
     bool SpendUtilityItem(Player& player, UtilityType type);
     void UseSelectedItem(Player& player);
@@ -303,6 +376,29 @@ private:
     void UpdateFastPlacement(float dt);
     void UpdateAttackOrBreak(float dt);
     void ResetBreakProgress();
+    enum class BlockActionKind
+    {
+        None,
+        Place,
+        Break
+    };
+    struct BlockActionResult
+    {
+        bool handled = false;
+        bool success = false;
+        BlockActionKind kind = BlockActionKind::None;
+        BlockType blockType = BlockType::Air;
+        Vector3 position {};
+        Color color = WHITE;
+        std::string message;
+        bool hasWorldEffect = false;
+        bool playPlaceSound = false;
+        bool playBreakSound = false;
+        bool playDeniedSound = false;
+        bool incrementLocalPlaced = false;
+        bool incrementLocalBroken = false;
+        bool tntActivated = false;
+    };
     // Completes a finished break (block removal or core damage) for the given
     // progress record. Shared by the local player (breakProgress_) and network
     // players (per-player progress); the caller resets its own progress after.
@@ -311,6 +407,7 @@ private:
     void HandleDeathsAndRespawns();
     void SendMockNetworkInput();
     PlayerCommand BuildLocalPlayerCommand() const;
+    void MarkNetworkControlledPlayer(int playerId);
     void SetupNetworkMatchFromLobby(ServerTransport& transport, const std::vector<LobbyPlayerState>& roster);
     // GUI client helpers (Phase 0.1T): build the local arena from the advertised
     // lobby config, fold each authoritative snapshot into the local world, follow
@@ -362,6 +459,9 @@ private:
     PlacementPreview BuildPlacementPreview(const Player& player) const;
     bool CanPlaceBlockAt(const GridPos& pos, const Player& player, std::string* reason) const;
     bool HasAdjacentAnchorBlock(const GridPos& pos) const;
+    BlockActionResult ApplyCompletedBreakProgress(Player& player, const BreakProgress& progress);
+    BlockActionResult ApplyPlaceBlockForPlayer(Player& player, const GridPos& pos);
+    void PresentBlockActionResult(const Player& player, const BlockActionResult& result, bool announce);
     bool TryPlaceBlockForPlayer(Player& player, const GridPos& pos, bool announce);
     void RecordBlockDelta(const GridPos& pos, const Block& oldBlock, const Block& newBlock, BlockDeltaReason reason, int ownerPlayerId = -1);
     bool PlaceWorldBlock(const GridPos& pos, const Block& block, bool allowReplace, BlockDeltaReason reason, int ownerPlayerId = -1);
@@ -389,11 +489,20 @@ private:
     // B1: apply a network-controlled player's attack/break/place this tick, driven
     // by the command's aim (server-side; no camera, no global local-player state).
     void ApplyNetworkPlayerActions(Player& player, const PlayerCommand& command, float dt);
+    struct PlayerActionResult
+    {
+        bool handled = false;
+        bool success = false;
+        PlayerActionType type = PlayerActionType::None;
+        std::string message;
+        Color color = WHITE;
+        float seconds = 1.6f;
+    };
     // Phase A: server-authoritative discrete economy/inventory action (shop
     // purchase, ...). Deduped per player via economyActionSeq_; validates
-    // proximity/resources before mutating. Returns true if a new action was
-    // applied (any state change), false for "nothing to do" or a denied request.
-    bool ApplyPlayerEconomyCommand(Player& player, const PlayerCommand& command);
+    // proximity/resources before mutating. Returns result data instead of
+    // writing host-local presentation directly.
+    PlayerActionResult ApplyPlayerEconomyCommand(Player& player, const PlayerCommand& command);
     // Client-side: queue a discrete economy action to ship in the next command.
     void QueueEconomyAction(PlayerActionType type, int paramA, int paramB);
     std::optional<GridPos> FindCoreDefenseBlock(const EnergyCore& core, const Player& bot) const;
@@ -438,7 +547,35 @@ private:
     void AddWorldEffect(Vector3 position, Vector3 direction, Color color, float radius, float seconds, WorldEffectKind kind);
     void AddFloatingText(std::string text, Vector3 position, Color color);
     void AddKillFeed(std::string text, Color color = WHITE, float seconds = 5.0f);
+    struct CombatFloatingTextResult
+    {
+        std::string text;
+        Vector3 position {};
+        Color color = WHITE;
+    };
+    struct CombatPresentationEvent
+    {
+        bool valid = false;
+        CombatEvent event {};
+        std::string message;
+        bool voidThreat = false;
+        std::vector<CombatFloatingTextResult> extraFloatingTexts;
+    };
+    CombatPresentationEvent ApplyCombatGameplayEvent(const CombatEvent& event, const std::string& message);
+    void PresentCombatEvent(const CombatPresentationEvent& presentation);
     void RegisterCombatEvent(const CombatEvent& event, const std::string& message);
+    class ScopedLocalFeedbackSuppression
+    {
+    public:
+        ScopedLocalFeedbackSuppression(Game& game, bool suppress);
+        ~ScopedLocalFeedbackSuppression();
+
+    private:
+        Game& game_;
+        bool active_ = false;
+        bool previousFeedback_ = false;
+        bool previousAudioMuted_ = false;
+    };
     struct PlayerMatchScore
     {
         int playerId = -1;
