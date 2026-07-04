@@ -67,6 +67,8 @@ const char* ToString(BlockType type)
         return "IceBlock";
     case BlockType::ResourceGenerator:
         return "ResourceGenerator";
+    case BlockType::TeamChestBlock:
+        return "TeamChestBlock";
     case BlockType::EnergyCoreBlock:
         return "EnergyCoreBlock";
     }
@@ -191,6 +193,7 @@ float BreakSeconds(BlockType type, int toolLevel)
     case BlockType::DirtBlock:
     case BlockType::LeafBlock:
     case BlockType::ResourceGenerator:
+    case BlockType::TeamChestBlock:
         break;
     }
 

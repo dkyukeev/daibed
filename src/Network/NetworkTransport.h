@@ -115,6 +115,8 @@ public:
     void BroadcastSnapshot(const MatchSnapshot& snapshot);
     // Encode + send a snapshot to a single client (for per-client views).
     void SendSnapshotToClient(int clientId, const MatchSnapshot& snapshot);
+    // True when SendSnapshotToClient would consume a freshly-built snapshot now.
+    bool NeedsSnapshotForClient(int clientId) const;
 
     // Commands received since the last drain (each tagged with its clientId).
     std::vector<ReceivedCommand> DrainCommands();
@@ -132,6 +134,7 @@ public:
     std::size_t LastFullSnapshotBytes() const;
     std::size_t LastDeltaSnapshotBytes() const;
     std::uint32_t LastProcessedCommandTick(int clientId) const;
+    void AdvanceProcessedCommandTick(int clientId, std::uint32_t tick);
 
     // Player a client was assigned (-1 if unknown / not yet assigned).
     int PlayerForClient(int clientId) const;

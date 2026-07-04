@@ -907,21 +907,10 @@ void Game::StartGuiConnect()
 
     const std::string target = host + ":" + std::to_string(port);
     multiplayerStatus_ = "Подключение к " + target + "...";
-    RunNetworkClient(host, port, multiplayerPassword_, 0.0, lobbyPrefs);
-
-    if (!WindowShouldClose() && !ShouldClose())
-    {
-        SetNetworkMode(NetworkMode::LocalSinglePlayer);
-        localPlayerServerDriven_ = false;
-        clientWorldBuilt_ = false;
-        clientPaused_ = false;
-        clientAimInitialized_ = false;
-        networkAssignedPlayerId_ = -1;
-        remoteSnapshotBuffer_.clear();
-        screen_ = GameScreen::Multiplayer;
-        EnableCursor();
-        multiplayerStatus_ = "Отключено от " + target + ".";
-    }
+    // Stage 4: no nested client loop. The session starts here and the ONE
+    // standard main loop drives it from the next frame on; when it ends,
+    // StopNetworkClientSession restores the menu state and status text.
+    StartNetworkClientSession(host, port, multiplayerPassword_, 0.0, lobbyPrefs);
 }
 
 namespace
@@ -1048,14 +1037,11 @@ void Game::StartGuiHostAndConnect()
     localServerAddress_ = "127.0.0.1:" + std::to_string(port);
     multiplayerAddress_ = localServerAddress_;
     multiplayerStatus_ = "Сервер запущен на порту " + std::to_string(port) + ".";
+    // The join is a non-blocking session now (Stage 4); when it later ends,
+    // StopNetworkClientSession restores the menu and sets the status text.
+    // The background host process keeps running for reconnects (see
+    // StopLocalServer for the explicit shutdown).
     StartGuiConnect();
-
-    if (!WindowShouldClose() && !ShouldClose())
-    {
-        multiplayerStatus_ = IsServerProcessRunning(localServerProcess_)
-            ? "Сервер продолжает работать на порту " + std::to_string(port) + "."
-            : "Сервер остановлен.";
-    }
 }
 
 void Game::HandleMultiplayerInput()
@@ -1957,6 +1943,83 @@ void Game::HandlePauseInput()
     }
 }
 
+bool Game::HandleNetworkPauseInput(bool& requestMainMenu)
+{
+    constexpr int kNetworkPauseRows = 3;
+    pauseIndex_ = std::clamp(pauseIndex_, 0, kNetworkPauseRows - 1);
+
+    if (IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_S))
+    {
+        pauseIndex_ = (pauseIndex_ + 1) % kNetworkPauseRows;
+    }
+    if (IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_W))
+    {
+        pauseIndex_ = (pauseIndex_ + kNetworkPauseRows - 1) % kNetworkPauseRows;
+    }
+
+    const Vector2 mouse = GetMousePosition();
+    const Vector2 mouseMove = GetMouseDelta();
+    int hoveredRow = -1;
+    for (int i = 0; i < kNetworkPauseRows; ++i)
+    {
+        if (CheckCollisionPointRec(mouse, PauseRowRect(i)))
+        {
+            hoveredRow = i;
+            break;
+        }
+    }
+    if (hoveredRow >= 0 && (std::fabs(mouseMove.x) > 0.5f || std::fabs(mouseMove.y) > 0.5f))
+    {
+        pauseIndex_ = hoveredRow;
+    }
+
+    const float wheel = GetMouseWheelMove();
+    if (wheel < -0.01f)
+    {
+        pauseIndex_ = (pauseIndex_ + 1) % kNetworkPauseRows;
+    }
+    else if (wheel > 0.01f)
+    {
+        pauseIndex_ = (pauseIndex_ + kNetworkPauseRows - 1) % kNetworkPauseRows;
+    }
+
+    if (IsKeyPressed(KEY_ESCAPE))
+    {
+        clientPaused_ = false;
+        screen_ = GameScreen::Playing;
+        DisableCursor();
+        return true;
+    }
+
+    const bool mouseActivate = hoveredRow >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    if (mouseActivate)
+    {
+        pauseIndex_ = hoveredRow;
+    }
+    const bool activate = IsKeyPressed(KEY_ENTER) || mouseActivate;
+    if (!activate)
+    {
+        return false;
+    }
+
+    if (pauseIndex_ == 0)
+    {
+        clientPaused_ = false;
+        screen_ = GameScreen::Playing;
+        DisableCursor();
+        return true;
+    }
+    if (pauseIndex_ == 1)
+    {
+        returnScreen_ = GameScreen::Paused;
+        screen_ = GameScreen::Settings;
+        return false;
+    }
+
+    requestMainMenu = true;
+    return true;
+}
+
 void Game::RenderMainMenu() const
 {
 #if DAIBED_DEVELOPER_BUILD
@@ -2496,6 +2559,24 @@ void Game::RenderPauseOverlay() const
     }
 }
 
+void Game::RenderNetworkPauseOverlay() const
+{
+    const char* labels[] { "Продолжить", "Настройки", "Главное меню" };
+    DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Fade(BLACK, 0.55f));
+    DrawCenteredText("Пауза", GetScreenHeight() / 2 - 154, 42, kTextBright);
+
+    const Rectangle panel = PausePanelRect();
+    MenuPanel(panel);
+    for (int i = 0; i < 3; ++i)
+    {
+        const Rectangle row = PauseRowRect(i);
+        const bool selected = i == pauseIndex_;
+        MenuRow(row, selected, kAccentGold);
+        DrawText(labels[i], static_cast<int>(row.x + 20.0f), static_cast<int>(row.y + 7.0f), 20,
+                 selected ? kAccentGold : Fade(kTextBright, 0.80f));
+    }
+}
+
 void Game::RenderGameHints(const Player& localPlayer) const
 {
     const KeyBindings& bindings = input_.GetBindings();
@@ -2809,6 +2890,10 @@ void Game::RenderSpectatorOverlay() const
 
 void Game::RenderChestOverlay() const
 {
+    if (networkMode_ == NetworkMode::LocalClient && personalChestOpen_)
+    {
+        return;
+    }
     if (!teamChestOpen_ && !personalChestOpen_)
     {
         return;
@@ -2823,22 +2908,92 @@ void Game::RenderChestOverlay() const
         ? teamChests_[std::clamp(player->GetTeamId(), 0, static_cast<int>(teamChests_.size()) - 1)]
         : personalChest_;
 
-    const int x = GetScreenWidth() / 2 + 320;
-    const int y = GetScreenHeight() / 2 - 150;
-    DrawRectangle(x, y, 250, 190, Fade(BLACK, 0.76f));
-    DrawRectangleLines(x, y, 250, 190, Fade(WHITE, 0.24f));
-    DrawText(teamChestOpen_ ? "Командный сундук" : "Личный сундук", x + 14, y + 14, 20, WHITE);
-    const auto& slots = chest.GetHotbarSlots();
-    for (int i = 0; i < kHotbarSlotCount; ++i)
+
+    const int inventorySlotSize = 50;
+    const int inventoryGap = 8;
+    const int inventoryHotbarWidth = inventorySlotSize * kHotbarSlotCount + inventoryGap * (kHotbarSlotCount - 1);
+    const int inventoryPanelWidth = inventoryHotbarWidth + 42;
+    const int panelWidth = 250;
+    const int panelHeight = 322;
+    const int inventoryPanelX = GetScreenWidth() / 2 - inventoryPanelWidth / 2;
+    const int preferredX = inventoryPanelX + inventoryPanelWidth + 18;
+    const int x = std::min(preferredX, GetScreenWidth() - panelWidth - 16);
+    const int y = GetScreenHeight() / 2 - panelHeight / 2;
+    const int slotSize = 34;
+    const int gap = 5;
+    const int cols = 6;
+    const int rows = 6;
+    const int gridX = x + 14;
+    const int gridY = y + 52;
+    const Vector2 mouse = GetMousePosition();
+
+    const auto itemColor = [](ItemType type)
     {
-        const int sx = x + 14 + (i % 3) * 74;
-        const int sy = y + 52 + (i / 3) * 34;
-        DrawRectangle(sx, sy, 62, 26, Fade(Color { 24, 28, 36, 255 }, 0.80f));
-        DrawRectangleLines(sx, sy, 62, 26, Fade(WHITE, 0.18f));
-        if (!slots[i].IsEmpty())
+        if (const std::optional<ResourceType> resource = ItemToResource(type))
         {
-            std::string label = std::string(ItemShortName(slots[i].type)) + " " + std::to_string(slots[i].count);
-            DrawText(label.c_str(), sx + 5, sy + 7, 12, WHITE);
+            switch (*resource)
+            {
+            case ResourceType::Iron:
+                return Color { 210, 218, 226, 255 };
+            case ResourceType::Gold:
+                return Color { 255, 211, 94, 255 };
+            case ResourceType::Crystal:
+                return Color { 112, 232, 255, 255 };
+            }
+        }
+        if (ItemIsBlock(type))
+        {
+            return Color { 154, 186, 255, 255 };
+        }
+        if (ItemIsWeapon(type))
+        {
+            return Color { 218, 226, 238, 255 };
+        }
+        if (ItemIsUtility(type))
+        {
+            return Color { 112, 232, 255, 255 };
+        }
+        return Color { 210, 180, 96, 255 };
+    };
+
+    const auto drawSlot = [slotSize, &itemColor](const ItemStack& stack, int sx, int sy, bool hovered)
+    {
+        DrawRectangle(sx, sy, slotSize, slotSize, Fade(Color { 24, 28, 36, 255 }, 0.88f));
+        DrawRectangleLines(sx, sy, slotSize, slotSize, hovered ? Color { 112, 232, 255, 255 } : Fade(WHITE, 0.18f));
+        if (stack.IsEmpty())
+        {
+            return;
+        }
+
+        DrawRectangle(sx + 8, sy + 7, slotSize - 16, slotSize - 17, itemColor(stack.type));
+        DrawRectangleLines(sx + 8, sy + 7, slotSize - 16, slotSize - 17, Fade(WHITE, 0.38f));
+        DrawText(ItemShortName(stack.type), sx + 4, sy + slotSize - 12, 9, Fade(WHITE, 0.82f));
+        if (stack.count > 1)
+        {
+            const std::string count = std::to_string(stack.count);
+            DrawText(count.c_str(), sx + slotSize - MeasureText(count.c_str(), 12) - 3, sy + 3, 12, WHITE);
+        }
+    };
+
+    DrawRectangle(x, y, panelWidth, panelHeight, Fade(BLACK, 0.76f));
+    DrawRectangleLines(x, y, panelWidth, panelHeight, Fade(WHITE, 0.24f));
+    DrawText(teamChestOpen_ ? "Team Chest" : "Personal Chest", x + 14, y + 14, 20, WHITE);
+    DrawText(teamChestOpen_ ? "LMB: take | Shift+LMB inventory: store" : "Drag stacks between panels", x + 14, y + panelHeight - 28, 11, Fade(WHITE, 0.58f));
+
+    for (int row = 0; row < rows; ++row)
+    {
+        for (int col = 0; col < cols; ++col)
+        {
+            const int slot = row * cols + col;
+            const int sx = gridX + col * (slotSize + gap);
+            const int sy = gridY + row * (slotSize + gap);
+            const Rectangle bounds {
+                static_cast<float>(sx),
+                static_cast<float>(sy),
+                static_cast<float>(slotSize),
+                static_cast<float>(slotSize)
+            };
+            drawSlot(chest.GetSlot(slot), sx, sy, CheckCollisionPointRec(mouse, bounds));
         }
     }
 }
@@ -2893,7 +3048,7 @@ void Game::RenderBotDebug() const
 {
     for (const Player& player : players_)
     {
-        if (player.IsLocal() || !player.IsAlive())
+        if (IsLocallyPredicted(player.GetControlKind()) || !player.IsAlive())
         {
             continue;
         }

@@ -178,10 +178,13 @@ int main(int argc, char** argv)
         bool cliMpLoopbackSmoke = false;
         bool cliClientGuiSmoke = false;
         bool cliClientInputSmoke = false;
+        bool cliNetworkClientUiSmoke = false;
         bool cliNetworkActionsSmoke = false;
+        bool cliLagCompSmoke = false;
         bool cliNetworkRangedSmoke = false;
         bool cliMovementParitySmoke = false;
         bool cliClientDynamicApplySmoke = false;
+        bool cliIntegratedServerSmoke = false;
         double cliServerSeconds = 0.0; // 0 == run until interrupted
         bool cliServer = false;
         bool cliHost = false;
@@ -264,9 +267,17 @@ int main(int argc, char** argv)
             {
                 cliClientInputSmoke = true;
             }
+            else if (arg == "--network-client-ui-smoke")
+            {
+                cliNetworkClientUiSmoke = true;
+            }
             else if (arg == "--network-actions-smoke")
             {
                 cliNetworkActionsSmoke = true;
+            }
+            else if (arg == "--lag-comp-smoke")
+            {
+                cliLagCompSmoke = true;
             }
             else if (arg == "--network-ranged-smoke")
             {
@@ -279,6 +290,10 @@ int main(int argc, char** argv)
             else if (arg == "--client-dynamic-apply-smoke")
             {
                 cliClientDynamicApplySmoke = true;
+            }
+            else if (arg == "--integrated-server-smoke")
+            {
+                cliIntegratedServerSmoke = true;
             }
             else if (arg == "--server-seconds" && i + 1 < argc)
             {
@@ -474,9 +489,11 @@ int main(int argc, char** argv)
         // run without one.
         const bool headlessRun = cliAutomatch || cliAutomatchWorker
             || cliNetworkSmoke || cliPurchaseSmoke || cliLoopbackSmoke || cliMpLoopbackSmoke
-            || cliClientInputSmoke || cliNetworkActionsSmoke || cliNetworkRangedSmoke
+            || cliClientInputSmoke || cliNetworkClientUiSmoke
+            || cliNetworkActionsSmoke || cliLagCompSmoke || cliNetworkRangedSmoke
             || cliMovementParitySmoke
             || cliClientDynamicApplySmoke
+            || cliIntegratedServerSmoke
             || cliServer || cliHost;
         if (!game.Initialize(headlessRun))
         {
@@ -575,12 +592,33 @@ int main(int argc, char** argv)
             return rc;
         }
 
+        if (cliNetworkClientUiSmoke)
+        {
+            CrashLogger::LogEvent("network client ui smoke started");
+            const int rc = game.RunNetworkClientUiSmoke();
+            game.Shutdown();
+            CrashLogger::Shutdown();
+            return rc;
+        }
+
         if (cliNetworkActionsSmoke)
         {
             // B1: verifies a network-controlled player's attack/break/place mutate
             // authoritative state (enemy HP, world block count).
             CrashLogger::LogEvent("network actions smoke started");
             const int rc = game.RunNetworkActionsSmoke();
+            game.Shutdown();
+            CrashLogger::Shutdown();
+            return rc;
+        }
+
+        if (cliLagCompSmoke)
+        {
+            // #4: verifies server-side hitbox rewind — a melee that lands only
+            // against the target's PAST position (where the client saw it) hits
+            // with a rewindTick command and misses without one.
+            CrashLogger::LogEvent("lag comp smoke started");
+            const int rc = game.RunLagCompSmoke();
             game.Shutdown();
             CrashLogger::Shutdown();
             return rc;
@@ -608,6 +646,17 @@ int main(int argc, char** argv)
         {
             CrashLogger::LogEvent("client dynamic apply smoke started");
             const int rc = game.RunClientDynamicApplySmoke();
+            game.Shutdown();
+            CrashLogger::Shutdown();
+            return rc;
+        }
+
+        if (cliIntegratedServerSmoke)
+        {
+            // Phase 6: singleplayer integrated-server skeleton + the economy
+            // command crossing the same loopback pipeline multiplayer uses.
+            CrashLogger::LogEvent("integrated server smoke started");
+            const int rc = game.RunIntegratedServerSmoke();
             game.Shutdown();
             CrashLogger::Shutdown();
             return rc;
@@ -721,10 +770,19 @@ int main(int argc, char** argv)
                 cliSeed = static_cast<unsigned int>(
                     std::chrono::high_resolution_clock::now().time_since_epoch().count());
             }
+            // Print the full gameplay-relevant config: mode/team size/bot count/
+            // difficulty/layout/biome come from the mutable DaiBed.settings file
+            // unless pinned by CLI flags, so two runs with identical flags can
+            // still simulate different matches. A baseline is only comparable
+            // when this whole line matches (pin at least --difficulty).
             std::cout << "headless automatch: runs=" << cliRuns
                       << " speed=" << cliSpeed
                       << " maxMinutes=" << cliMinutes
-                      << " seed=" << cliSeed << '\n';
+                      << " seed=" << cliSeed
+                      << " mode=" << game.MatchModeName()
+                      << " difficulty=" << game.BotDifficultyName()
+                      << " layout=" << game.ArenaLayoutName()
+                      << " biome=" << game.ArenaBiomeName() << '\n';
             CrashLogger::LogEvent("automatch started");
             CrashLogger::Heartbeat("automatch");
             const bool success = game.RunAutomatchBatch(cliRuns, cliSpeed, cliMinutes, cliSeed);

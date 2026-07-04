@@ -13,6 +13,7 @@
 #include "MusicSystem.h"
 #include "Network/LocalNetworkMock.h"
 #include "Network/LocalServerSession.h"
+#include "Network/LoopbackTransport.h"
 #include "Network/NetTypes.h"
 #include "Network/NetworkSnapshot.h"
 #include "Network/PlayerCommand.h"
@@ -28,6 +29,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -37,6 +39,7 @@
 // stays free of the winsock-adjacent transport header; GameNetwork.cpp includes it.
 class ServerTransport;
 class ClientTransport;
+struct ReceivedCommand;
 
 enum class GameScreen
 {
@@ -82,6 +85,12 @@ enum class ArenaBiome
 class Game
 {
 public:
+    // Declared (defaulted in GameNetwork.cpp): the network-client session holds
+    // a unique_ptr to the forward-declared ClientTransport, so the destructor
+    // must be emitted where the complete type is visible.
+    Game() = default;
+    ~Game();
+
     bool Initialize(bool headless = false);
     void Shutdown();
     bool ShouldClose() const;
@@ -147,6 +156,15 @@ public:
     int RunNetworkClient(const std::string& host, std::uint16_t port,
                          const std::string& password, double maxSeconds,
                          const LobbyUpdate& lobbyPrefs);
+    // --- Stage 4 (one client loop): MP client as SESSION STATE -----------
+    // The network client no longer owns a nested while-loop; the ONE standard
+    // HandleInput/Update/Render loop drives it. RunNetworkClient above is now
+    // a thin CLI wrapper that starts a session and spins that same trio.
+    bool StartNetworkClientSession(const std::string& host, std::uint16_t port,
+                                   const std::string& password, double maxSeconds,
+                                   const LobbyUpdate& lobbyPrefs);
+    void StopNetworkClientSession();
+    bool NetworkClientSessionActive() const;
     // Headless server (a second Game) + this windowed client in one process:
     // renders frames and asserts the client world is in sync. CLI: --client-gui-smoke.
     int RunClientGuiSmoke();
@@ -154,9 +172,16 @@ public:
     // (moveForward + fixed aimYaw): asserts the server accepts them and the
     // assigned player's replicated position/yaw move. CLI: --client-input-smoke.
     int RunClientInputSmoke();
+    // Focused MP client UI parity: shop/inventory/team chest commands, replicated
+    // scores, and Tab scoreboard state. CLI: --network-client-ui-smoke.
+    int RunNetworkClientUiSmoke();
     // B1: asserts a network-controlled player's attack/break/place mutate
     // authoritative state (enemy HP, world block count). CLI: --network-actions-smoke.
     int RunNetworkActionsSmoke();
+    // #4: asserts server-side lag compensation — a melee lands against the
+    // target's rewound (past) position with a rewindTick, and misses the same
+    // geometry without one. CLI: --lag-comp-smoke.
+    int RunLagCompSmoke();
     // Phase B: network-controlled ranged attacks use PlayerCommand aim, not the
     // server camera. CLI: --network-ranged-smoke.
     int RunNetworkRangedSmoke();
@@ -166,10 +191,24 @@ public:
     // Phase C: applies a snapshot with dynamic entities to an empty client and
     // asserts projectiles/hazards/devices/status effects materialize.
     int RunClientDynamicApplySmoke();
+    // Phase 6: singleplayer integrated-server skeleton — the local human is a
+    // loopback client of the same command/server/snapshot pipeline multiplayer
+    // uses; asserts the per-tick channel is live and a shop purchase crosses the
+    // transport (validated/deduped server-side). CLI: --integrated-server-smoke.
+    int RunIntegratedServerSmoke();
 
     void HandleInput();
     void Update(float dt);
     void Render();
+
+    // Display names for the gameplay-relevant match config (mode/difficulty/
+    // layout/biome). Public so CLI runners (automatch header) can print a
+    // self-describing config line — these values come from the mutable
+    // DaiBed.settings file, so logs must record them for reproducibility.
+    const char* MatchModeName() const;
+    const char* BotDifficultyName() const;
+    const char* ArenaLayoutName() const;
+    const char* ArenaBiomeName() const;
 
 private:
     struct BotTeamFrameContext;
@@ -249,38 +288,24 @@ private:
         std::vector<HeroWorldEffectResult> worldEffects;
         std::vector<HeroFloatingTextResult> floatingTexts;
         std::vector<HeroEventMessageResult> eventMessages;
+        bool hasCameraShake = false;
+        float cameraShakeStrength = 0.0f;
+        float cameraShakeSeconds = 0.0f;
         bool playPickupSound = false;
         bool playBuildSound = false;
         bool playPurchaseSound = false;
         bool playBreakBlockSound = false;
+        bool playCoreDestroyedSound = false;
         bool playDeniedSound = false;
     };
-    HeroAbilityActionResult ApplyHeroAbilityAction(Player& player, HeroAbilitySlot slot);
+    HeroAbilityActionResult ApplyHeroAbilityAction(Player& player, HeroAbilitySlot slot, const PlayerCommand* command = nullptr);
     void PresentHeroAbilityResult(const HeroAbilityActionResult& result);
-    bool UseHeroAbility(Player& player, HeroAbilitySlot slot);
-    bool UseHeroAbilityLegacy(Player& player, HeroAbilitySlot slot);
-    bool UseRadonAbility(Player& player, HeroAbilitySlot slot);
-    bool UseOrbitaAbility(Player& player, HeroAbilitySlot slot);
-    bool UseBromAbility(Player& player, HeroAbilitySlot slot);
-    bool UseKonvoyAbility(Player& player, HeroAbilitySlot slot);
-    bool UseLikhoAbility(Player& player, HeroAbilitySlot slot);
-    bool UseSvidetelAbility(Player& player, HeroAbilitySlot slot);
-    void UseRadonForcePulse(Player& player, bool pull);
-    void UseRadonMolotov(Player& player);
-    void UseRadonDestroyedCoreUltimate(Player& player);
     bool TryRadonCoreSacrifice(EnergyCore& core);
     void EmitRadonCoreWave(Vector3 position, int ownerTeamId, int ownerPlayerId, float radius, float damage, float force);
-    void UseOrbitaDash(Player& player);
-    bool UseOrbitaPhantomBlocks(Player& player);
-    bool UseOrbitaTeleport(Player& player);
+    bool PredictOrbitaDashAction(Player& player, const PlayerCommand& command);
+    bool StepOrbitaDash(Player& player, float dt);
     bool IsOrbitaCoreRestrictedPosition(Vector3 position, int teamId) const;
     bool IsOrbitaTeleportDestinationSafe(Vector3 position, int teamId, std::string* reason) const;
-    bool UseBromVacuumBot(Player& player, bool temporary, float lifetimeSeconds);
-    bool UseBromTurretDrone(Player& player, bool temporary, float lifetimeSeconds);
-    bool UseBromUltimate(Player& player);
-    bool UseKonvoyTrap(Player& player, float lifetimeSeconds);
-    bool UseKonvoyHandcuffs(Player& player, float lifetimeSeconds);
-    bool UseKonvoyDome(Player& player, float lifetimeSeconds);
     void ApplyBromBlockBreakPassive(Player& player, const Block& block, Vector3 position);
     void SetHeroAnimation(Player& player, HeroAnimationState state, float seconds);
     void UseUtilityInputs(Player& player, const PlayerCommand& command);
@@ -296,11 +321,12 @@ private:
         float seconds = 0.0f;
         bool hasWorldEffect = false;
         bool playPickupSound = false;
+        bool playBreakBlockSound = false;
         bool playDeniedSound = false;
     };
     UtilityActionResult ApplyUtility(Player& player, UtilityType type);
+    UtilityActionResult ApplyProjectileUtility(Player& player, UtilityType type, Vector3 direction);
     void PresentUtilityActionResult(const UtilityActionResult& result);
-    bool UseUtility(Player& player, UtilityType type);
     bool SpendUtilityItem(Player& player, UtilityType type);
     void UseSelectedItem(Player& player);
     void LaunchProjectile(Player& player, UtilityType type);
@@ -308,6 +334,15 @@ private:
     void LaunchProjectileDirected(Player& player, UtilityType type, Vector3 direction, bool announce);
     bool LaunchBlasterShot(Player& player, Vector3 direction, bool aimed, bool announce);
     bool LaunchBowShot(Player& player, Vector3 direction, float drawPower, bool announce);
+    // Stable per-spawn id for a new EnergyProjectile (see EnergyProjectile::id).
+    int NextProjectileId();
+    // Stable per-spawn ids for a new TimedExplosion / HazardZone (see their id fields).
+    int NextExplosiveId();
+    int NextHazardZoneId();
+    // Stable per-spawn id for a new hero device (Brom/Konvoy/Svidetel structs
+    // that funnel into HeroDeviceSnapshot's shared id-space; see their id fields).
+    int NextHeroDeviceId();
+    int NextDroppedItemId();
     bool BotUseUtility(Player& bot, Team& team, Player* enemy, EnergyCore* enemyCore, float dt);
     bool BotUseHeroAbility(Player& bot, Team& team, Player* enemy, EnergyCore* enemyCore);
     bool BotCastHeroAbility(Player& bot, HeroAbilitySlot slot);
@@ -319,8 +354,13 @@ private:
     void NoteDamageCredit(int targetId, int attackerId, std::string cause = "урон");
     int DeathCreditFor(int targetId) const;
     void UpdateDamageCredits(float dt);
-    void TryOpenBaseChest(Player& player);
+    // THE chest-UI opener/entry for every local human (Stage 4.3): SP cycles
+    // team → personal → closed; a network client only opens the team chest —
+    // the personal chest is a local-only stash, not replicated yet.
+    bool OpenTeamChestUi(Player& player);
+    bool TryOpenAimedTeamChest(Player& player);
     void CloseChest();
+    Vector3 TeamChestDepositPosition(const Team& team) const;
     bool TryShopPurchase(Player& player, Team& team, int choice, int repeat, std::string& message);
     void UpdateAlarmTraps();
     void RenderKillFeed() const;
@@ -337,6 +377,8 @@ private:
     void UpdateSpectator(float dt);
     void UpdateLocalPlayer(float dt);
     void ApplyPlayerCommand(Player& player, const PlayerCommand& command, float dt);
+    void ApplyPredictedPlayerCommand(Player& player, const PlayerCommand& command, float dt);
+    void ApplyBatchedServerCommands(const std::vector<ReceivedCommand>& receivedCommands, float dt);
     bool ApplyPlayerActionCommand(Player& player, const PlayerCommand& command);
     void UpdateBots(float dt);
     void UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameContext& frameContext);
@@ -372,9 +414,14 @@ private:
     void UpdatePlacementPreview();
     void UpdateCombatPreview();
     OrbitaTeleportPreview BuildOrbitaTeleportPreview(const Player& player) const;
+    OrbitaTeleportPreview BuildOrbitaTeleportPreviewFromAim(const Player& player, Vector3 origin, Vector3 direction) const;
     std::vector<HeroDeviceVisual> BuildHeroDeviceVisuals() const;
     void UpdateFastPlacement(float dt);
     void UpdateAttackOrBreak(float dt);
+    // THE break-time rule (tool level + Likho modifiers), shared by the
+    // authoritative break path and the client prediction HUD. May register a
+    // Likho persistent cut as a side effect (part of the rule).
+    float ComputeBreakRequiredSeconds(Player& player, const RaycastHit& hit, bool isCore);
     void ResetBreakProgress();
     enum class BlockActionKind
     {
@@ -427,8 +474,19 @@ private:
     // tick rate so the authoritative server applies ~one input per tick. While
     // paused/unfocused the command is neutral so the character does not move.
     void SampleClientInput();
+    void HandleNetworkClientUiInput();
+    void HandleNetworkClientLookAndHotbarInput(Player& player);
+    // Shared frame-input handlers (Stage 4.2): ONE implementation for the SP
+    // frame path and the MP client session. Shop browsing queues purchases
+    // through the single economy pipeline; hotbar selection owns the wheel /
+    // number keys / sniper-magnification adjustments.
+    bool HandleShopBrowseInput(Player& player);
+    void HandleHotbarSelectionInput(Player& player);
+    void HandleNetworkClientShopInput(Player& player);
+    bool IsPlayerNearTeamChestAccess(const Player& player) const;
     void StepClientPredictionAndSend(ClientTransport& client, float fixedDt);
-    void UpdateClientCamera(float dt);
+    void UpdatePredictedRangedCharge(Player& player, const PlayerCommand& command, float dt);
+    void UpdatePredictedBreakProgress(Player& player, const PlayerCommand& command, float dt);
     void RenderNetworkLobby(const LobbySnapshot& lobby, int localClientId, const LobbyUpdate& localPrefs) const;
     void StorePredictedLocalCommand(const PlayerCommand& command, const Player& player);
     void PushRemoteSnapshot(const MatchSnapshot& snapshot);
@@ -436,18 +494,28 @@ private:
     void UpdatePredictionStats(float dt);
     bool TryGetInterpolatedRemotePlayerPosition(int playerId, float interpolationDelaySeconds, Vec3& out) const;
     bool TryGetInterpolatedRemotePlayerYaw(int playerId, float interpolationDelaySeconds, float& out) const;
+    // Network-client session internals (Stage 4). Update runs one frame of the
+    // session state machine; the overlay renderer returns true when it fully
+    // drew the frame (message/lobby/waiting screens) and false when the normal
+    // Render body should draw the live match.
+    void UpdateNetworkClientSession(float dt);
+    bool RenderNetworkClientSessionOverlay();
+    void FailNetworkClientSession(const char* title, std::string detail,
+                                  Color color, double seconds);
     void HandleMenuInput();
     void HandleMultiplayerInput();
     void HandleHeroSelectInput();
     void HandleSettingsInput();
     void HandleControlsInput();
     void HandlePauseInput();
+    bool HandleNetworkPauseInput(bool& requestMainMenu);
     void RenderMainMenu() const;
     void RenderMultiplayerMenu() const;
     void RenderHeroSelect() const;
     void RenderSettings() const;
     void RenderControls() const;
     void RenderPauseOverlay() const;
+    void RenderNetworkPauseOverlay() const;
     void StartGuiHostAndConnect();
     void StartGuiConnect();
     void StopLocalServer();
@@ -467,6 +535,7 @@ private:
     bool PlaceWorldBlock(const GridPos& pos, const Block& block, bool allowReplace, BlockDeltaReason reason, int ownerPlayerId = -1);
     bool BreakWorldBlock(const GridPos& pos, int attackerTeam, BlockDeltaReason reason, int ownerPlayerId = -1);
     bool RemoveWorldBlock(const GridPos& pos, BlockDeltaReason reason, int ownerPlayerId = -1);
+    void SpawnBrokenBlockDrop(BlockType type, const GridPos& pos, int ownerPlayerId);
     std::optional<BlockType> SelectPlacementBlockForPlayer(const Player& player, const GridPos& pos) const;
     Vector3 ChooseBotWaypoint(const Player& bot, Vector3 finalTarget) const;
     Vector3 ChooseBotPathWaypoint(Player& bot, Vector3 finalTarget, float dt, const BotFrameContext& frameContext);
@@ -489,10 +558,18 @@ private:
     // B1: apply a network-controlled player's attack/break/place this tick, driven
     // by the command's aim (server-side; no camera, no global local-player state).
     void ApplyNetworkPlayerActions(Player& player, const PlayerCommand& command, float dt);
+    // Phase 6 block slice: the place portion of the authoritative action path,
+    // shared by ApplyNetworkPlayerActions and the SP integrated server. Returns
+    // true when place input consumed this tick's action processing (placing
+    // precludes attacking/breaking); *outPlaced reports an actual placement.
+    bool ApplyNetworkBlockPlace(Player& player, const PlayerCommand& command, float dt,
+                                bool* outPlaced = nullptr);
     struct PlayerActionResult
     {
         bool handled = false;
         bool success = false;
+        int playerId = -1;
+        std::uint32_t actionSeq = 0;
         PlayerActionType type = PlayerActionType::None;
         std::string message;
         Color color = WHITE;
@@ -503,8 +580,43 @@ private:
     // proximity/resources before mutating. Returns result data instead of
     // writing host-local presentation directly.
     PlayerActionResult ApplyPlayerEconomyCommand(Player& player, const PlayerCommand& command);
+    void PresentPlayerActionResult(const PlayerActionResult& result);
+    void PushActionResultSnapshot(ActionResultSnapshot snapshot);
+    void PushPlayerActionResultSnapshot(const PlayerActionResult& result);
+    void PushBlockActionResultSnapshot(const Player& player, const BlockActionResult& result, std::uint32_t actionSeq);
+    // Owner-private replicated feedback for utility items (heal/teleport/dash/
+    // fireball/molotov/alarm) and hero abilities (cast/denied/cooldown). Mirrors
+    // PushBlockActionResultSnapshot: always pushed after Apply*, regardless of
+    // local camera — a real network owner has no other feedback channel.
+    void PushUtilityActionResultSnapshot(const Player& player, const UtilityActionResult& result);
+    void PushHeroAbilityActionResultSnapshot(const Player& player, const HeroAbilityActionResult& result);
+    // Bow/blaster spawn/owner feedback (message + success/deny), independent of
+    // the projectile's own public snapshot replication. Stable spawn ids and
+    // impact events are a later pass (see docs/MULTIPLAYER_REFACTOR_PLAN.md Phase 5).
+    void PushProjectileActionResultSnapshot(const Player& player, bool success, ProjectileKind kind, bool primaryFlag, Vector3 position, const std::string& message);
+    // Public broadcast feedback (see recentWorldEvents_ above). cause is only
+    // meaningful for WorldEventKind::PlayerDied (the affected player's own
+    // death-overlay text); pass "" for every other kind.
+    void PushWorldEventSnapshot(
+        WorldEventKind kind, int actorPlayerId, int targetPlayerId, int targetTeamId,
+        Vector3 position, int subjectType = 0, int amount = 0, int flags = 0,
+        const std::string& cause = "");
     // Client-side: queue a discrete economy action to ship in the next command.
+    void QueuePlayerAction(PlayerActionType type, int paramA, int paramB);
     void QueueEconomyAction(PlayerActionType type, int paramA, int paramB);
+    void ApplyPendingLocalPlayerAction(Player& player);
+    // Phase 6: singleplayer as an integrated server. Plain SP connects the local
+    // human as a loopback client of the same authoritative pipeline multiplayer
+    // uses. ALL player actions (economy, block place/break, melee, ranged, hero
+    // abilities, utilities incl. right-click use of the selected item) cross
+    // this transport; only movement is still applied directly each tick in
+    // UpdateLocalPlayer via the shared ApplyPlayerCommand (loopback-predicted
+    // and authoritative are the same machine, so the math is identical). The
+    // old direct SP action paths are removed, not gated.
+    void StartIntegratedServer();
+    void StopIntegratedServer();
+    void IntegratedServerTick(float dt);
+    void ApplyIntegratedServerCommand(const PlayerCommand& command, float dt);
     std::optional<GridPos> FindCoreDefenseBlock(const EnergyCore& core, const Player& bot) const;
     std::optional<GridPos> FindMissingCoreDefenseBlock(const Team& team) const;
     std::optional<GridPos> FindUpgradeableCoreDefenseBlock(const Team& team, const Player& bot) const;
@@ -562,6 +674,7 @@ private:
         std::vector<CombatFloatingTextResult> extraFloatingTexts;
     };
     CombatPresentationEvent ApplyCombatGameplayEvent(const CombatEvent& event, const std::string& message);
+    void PushCombatEventSnapshots(const CombatPresentationEvent& presentation);
     void PresentCombatEvent(const CombatPresentationEvent& presentation);
     void RegisterCombatEvent(const CombatEvent& event, const std::string& message);
     class ScopedLocalFeedbackSuppression
@@ -576,6 +689,40 @@ private:
         bool previousFeedback_ = false;
         bool previousAudioMuted_ = false;
     };
+    // Lag compensation: one server tick's recorded player positions, keyed by
+    // the tick they were the authoritative state at (== the snapshot tick the
+    // client saw). RecordLagCompFrame appends one per server tick; the ring is
+    // bounded to kLagCompHistoryTicks (~0.5 s at 60 Hz).
+    struct LagCompPlayerPosition
+    {
+        int playerId = -1;
+        Vec3 position {};
+    };
+    struct LagCompFrame
+    {
+        std::uint32_t tick = 0;
+        std::vector<LagCompPlayerPosition> positions;
+    };
+    static constexpr std::size_t kLagCompHistoryTicks = 32;
+    void RecordLagCompFrame();
+    // Scoped hitbox rewind: on construction, if rewindTick is non-zero and a
+    // history frame is available, moves every player EXCEPT the attacker to
+    // their position at rewindTick (clamped to the available history); on
+    // destruction, restores their live positions. Only positions are touched —
+    // damage/knockback/velocity applied to a target during the scope persist.
+    class ScopedLagCompensation
+    {
+    public:
+        ScopedLagCompensation(Game& game, int attackerPlayerId, std::uint32_t rewindTick);
+        ~ScopedLagCompensation();
+
+        ScopedLagCompensation(const ScopedLagCompensation&) = delete;
+        ScopedLagCompensation& operator=(const ScopedLagCompensation&) = delete;
+
+    private:
+        Game& game_;
+        std::vector<LagCompPlayerPosition> restore_;
+    };
     struct PlayerMatchScore
     {
         int playerId = -1;
@@ -583,6 +730,7 @@ private:
         int deaths = 0;
         int finalDeaths = 0;
         int coreDamage = 0;
+        int coresDestroyed = 0;
     };
     struct DamageCredit
     {
@@ -655,6 +803,12 @@ private:
         float targetLockTimer = 0.0f;
         int lockedPickupIndex = -1;
         bool hasNavWaypoint = false;
+        // Stable per-spawn id (Game::NextHeroDeviceId(), shared across all 7
+        // device structs that funnel into one HeroDeviceSnapshot id-space), NOT
+        // a vector index — see EnergyProjectile::id for why. Trailing field so
+        // existing positional aggregate-init call sites that don't mention it
+        // keep defaulting to -1.
+        int id = -1;
     };
     struct BromTurretDrone
     {
@@ -674,6 +828,7 @@ private:
         float repathTimer = 0.0f;
         float targetLockTimer = 0.0f;
         int lockedTargetPlayerId = -1;
+        int id = -1; // see BromVacuumBot::id.
     };
     struct KonvoyTrap
     {
@@ -683,6 +838,7 @@ private:
         float lifetime = 0.0f;
         float flashTimer = 0.0f;
         int health = 48;
+        int id = -1; // see BromVacuumBot::id.
     };
     struct KonvoyTether
     {
@@ -693,6 +849,7 @@ private:
         float flashTimer = 0.0f;
         int ownerLastHealth = 100;
         int accumulatedOwnerDamage = 0;
+        int id = -1; // see BromVacuumBot::id.
     };
     struct KonvoyDome
     {
@@ -704,6 +861,7 @@ private:
         int health = 180;
         std::vector<int> initiallyInsideEnemyIds;
         float chargeTimer = 0.0f;
+        int id = -1; // see BromVacuumBot::id.
     };
     struct LikhoBleed
     {
@@ -714,6 +872,7 @@ private:
         float tickTimer = 0.0f;
         int stacks = 1;
         int successfulHits = 1;
+        int id = -1; // see BromVacuumBot::id.
     };
     struct SvidetelEcho
     {
@@ -726,6 +885,7 @@ private:
         Vector3 lastTarget {};
         float flashTimer = 0.0f;
         int health = 42;
+        int id = -1; // see BromVacuumBot::id.
     };
     struct SvidetelPhaseBlock
     {
@@ -838,10 +998,6 @@ private:
     void SaveSettings() const;
     void LoadBotTuning();
     const BotTuningGenome& BotTuningForTeam(int teamId) const;
-    const char* MatchModeName() const;
-    const char* BotDifficultyName() const;
-    const char* ArenaLayoutName() const;
-    const char* ArenaBiomeName() const;
     const char* ResolutionName() const;
     const char* FpsLimitName() const;
     void ApplyWindowSettings();
@@ -871,6 +1027,15 @@ private:
     GameRules rules_;
     LocalNetworkMock network_;
     LocalServerSession serverSession_;
+    // Phase 6 integrated server: in-process transport carrying the local human's
+    // commands into the authoritative path and per-client snapshots back.
+    LoopbackTransport integratedServer_;
+    bool integratedServerActive_ = false;
+    std::uint32_t integratedServerCommandsDrained_ = 0;
+    std::uint32_t integratedServerEconomyApplied_ = 0;
+    std::uint32_t integratedServerBlocksPlaced_ = 0;
+    std::uint32_t integratedServerHeroCastsApplied_ = 0;
+    static constexpr int kIntegratedServerClientId = 1;
     MatchSimulation matchSimulation_;
     NetworkMode networkMode_ = NetworkMode::LocalSinglePlayer;
     ServerConfig serverConfig_ {};
@@ -888,8 +1053,20 @@ private:
     std::vector<WorldEffect> worldEffects_;
     ParticleSystem particles_;
     std::vector<TimedExplosion> timedExplosions_;
+    // Monotonic counter for TimedExplosion::id. Reset in SetupMatch.
+    int nextExplosiveId_ = 0;
     std::vector<EnergyProjectile> projectiles_;
+    // Monotonic counter for EnergyProjectile::id (stable spawn id, not a vector
+    // index). Reset in SetupMatch alongside the other per-match state.
+    int nextProjectileId_ = 0;
     std::vector<HazardZone> hazardZones_;
+    // Monotonic counter for HazardZone::id. Reset in SetupMatch.
+    int nextHazardZoneId_ = 0;
+    // Shared monotonic counter for all 7 hero-device structs' id fields (they
+    // all funnel into one HeroDeviceSnapshot id-space in BuildNetworkSnapshot).
+    // Reset in SetupMatch.
+    int nextHeroDeviceId_ = 0;
+    int nextDroppedItemId_ = 0;
     std::vector<AlarmTrap> alarmTraps_;
     std::vector<HeroTemporaryBlock> heroTemporaryBlocks_;
     std::vector<MolotovBlockBurn> molotovBlockBurns_;
@@ -984,7 +1161,16 @@ private:
     int selectedHotbarSlot_ = 0;
     bool inventoryOpen_ = false;
     int inventoryCursorSlot_ = 0;
+    enum class HeldInventoryOrigin
+    {
+        None,
+        PlayerInventory,
+        TeamChest,
+        PersonalChest,
+    };
     ItemStack heldInventoryStack_ {};
+    HeldInventoryOrigin heldInventoryOrigin_ = HeldInventoryOrigin::None;
+    int heldInventoryOriginSlot_ = -1;
     bool teamChestOpen_ = false;
     bool personalChestOpen_ = false;
     bool attackChargeActive_ = false;
@@ -1047,10 +1233,26 @@ private:
         float placeCooldown = 0.0f;
     };
     std::unordered_map<int, NetworkActionState> networkActionState_;
+    // Lag-compensation position history (see LagCompFrame). Recorded once per
+    // authoritative server tick; consumed by ScopedLagCompensation for melee
+    // hitbox rewind. Empty in singleplayer/automatch (never recorded there).
+    std::vector<LagCompFrame> lagCompHistory_;
     // Phase A: server-side exactly-once gate for discrete economy/inventory
     // actions, keyed by playerId -> last applied PlayerCommand::actionSeq. A
     // resent command with an already-seen seq is ignored (no double purchase).
     std::unordered_map<int, std::uint32_t> economyActionSeq_;
+    std::vector<ActionResultSnapshot> recentActionResults_;
+    std::unordered_map<int, std::uint32_t> presentedActionResultSeq_;
+    std::uint32_t nextActionResultSeq_ = 0;
+    // Public broadcast events (death/respawn/victory/kill feed/pickup/alarm/DoT
+    // feedback) — everything HandleDeathsAndRespawns/UpdateMatchSimulation gets
+    // "for free" on the host but a network client never sees at all, since it
+    // never runs UpdateMatchSimulation. Mirrors recentActionResults_ but with a
+    // single global dedup high-water mark instead of per-player, since this
+    // stream is not owner-private (see WorldEventSnapshot in NetworkSnapshot.h).
+    std::vector<WorldEventSnapshot> recentWorldEvents_;
+    std::uint32_t nextWorldEventSeq_ = 0;
+    std::uint32_t presentedWorldEventSeq_ = 0;
     // Client-side pending discrete action awaiting send. BuildLocalPlayerCommand
     // copies it into the outgoing command; the client clears it after the command
     // is shipped (see StepClientPredictionAndSend). seq is client-monotonic.
@@ -1081,9 +1283,17 @@ private:
     float predictionCorrectionsPerSecond_ = 0.0f;
     int unackedCommandCount_ = 0;
     std::uint32_t lastAuthoritativeTick_ = 0;
+    // Client-side error smoothing: a decaying visual offset added to the
+    // first-person camera focus so a reconciliation correction eases in over
+    // ~100 ms instead of snapping. Cosmetic only — the player's true (corrected)
+    // position is used for all gameplay. See ApplyAuthoritativeSnapshotForPrediction
+    // and UpdateCamera.
+    Vector3 predictionSmoothingOffset_ {};
     // Player ids currently driven by a remote network client (Phase 0.1S). Bot
     // AI skips these; their movement comes from the client's PlayerCommand.
     std::vector<int> networkControlledPlayerIds_;
+    std::unordered_map<int, PlayerCommand> serverHeldPlayerCommands_;
+    std::unordered_map<int, std::uint32_t> serverEffectiveCommandTickByPlayer_;
     std::vector<LobbyPlayerState> pendingNetworkRoster_;
     bool networkLobbyMatchStarted_ = false;
     bool networkLobbyMatchStarting_ = false;
@@ -1100,6 +1310,39 @@ private:
     // the assigned player once on the first follow frame.
     bool clientPaused_ = false;
     bool clientAimInitialized_ = false;
+    bool networkClientReturnToMainMenu_ = false;
+    // --- Network-client session state (Stage 4: one client loop) --------
+    // Owned transport of the active MP session; null when no session runs.
+    std::unique_ptr<ClientTransport> netClient_;
+    enum class ClientSessionPhase
+    {
+        Inactive,
+        Lobby,          // connected, pre-match
+        Match,          // in-match: the normal Update/Render pipeline runs
+        FailureMessage, // timed full-screen message, then the session ends
+    };
+    // What the session's Update decided this frame's overlay should be; the
+    // Render dispatch consumes it (None = draw the live match normally).
+    enum class ClientSessionDraw
+    {
+        None,
+        Failure,
+        Reconnecting,
+        Lobby,
+        WaitingSync,
+    };
+    ClientSessionPhase clientSessionPhase_ = ClientSessionPhase::Inactive;
+    ClientSessionDraw clientSessionDraw_ = ClientSessionDraw::None;
+    LobbyUpdate clientSessionLobbyPrefs_ {};
+    std::string clientSessionTarget_;      // "host:port" for status messages
+    double clientSessionStartTime_ = 0.0;
+    double clientSessionMaxSeconds_ = 0.0; // <= 0 means unbounded
+    bool clientSessionReconnecting_ = false;
+    std::string clientSessionFailTitle_;
+    std::string clientSessionFailDetail_;
+    Color clientSessionFailColor_ { 255, 200, 120, 255 };
+    double clientSessionFailUntil_ = 0.0;
+    std::string clientSessionReconnectDetail_;
     // Fixed-step simulation loop (see docs/NETWORK_PREP_PLAN.md). The simulation
     // advances in fixed FixedDeltaSeconds() steps driven by an accumulator, so it
     // is decoupled from the render frame rate. renderAlpha_ is the [0,1)

@@ -81,7 +81,6 @@ Player::Player(int id, std::string name, int teamId, Vector3 spawnPoint, bool lo
       teamId_(teamId),
       homeSpawnPoint_ { spawnPoint.x, spawnPoint.y, spawnPoint.z },
       position_ { spawnPoint.x, spawnPoint.y, spawnPoint.z },
-      local_(local),
       controlKind_(local ? PlayerControlKind::LocalHumanPredicted : PlayerControlKind::BotAuthoritative)
 {
 }
@@ -170,11 +169,6 @@ bool Player::IsAlive() const
 bool Player::IsEliminated() const
 {
     return eliminated_;
-}
-
-bool Player::IsLocal() const
-{
-    return local_;
 }
 
 PlayerControlKind Player::GetControlKind() const
@@ -625,6 +619,17 @@ void Player::AdvanceBowDraw(float dt)
 void Player::ResetBowDraw()
 {
     bowDrawTimer_ = 0.0f;
+}
+
+void Player::SetBowDrawTimerReplicated(float value)
+{
+    bowDrawTimer_ = std::clamp(value, 0.0f, kBowTuning.fullDrawTime);
+}
+
+void Player::SetBlasterStateReplicated(CrossbowState state, float loadTimer)
+{
+    blasterState_ = state;
+    blasterLoadTimer_ = std::max(0.0f, loadTimer);
 }
 
 void Player::ActivateHitInvulnerability(float seconds)

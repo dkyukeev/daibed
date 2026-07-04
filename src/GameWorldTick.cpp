@@ -63,6 +63,25 @@ Vector3 Normalize(Vector3 value)
     return Vector3 { value.x / length, value.y / length, value.z / length };
 }
 
+// Nominative label for the owner-private projectile-impact CombatEvent message
+// (mirrors the instrumental-case strings NoteDamageCredit already uses just
+// below for the kill feed's "cause" text).
+const char* ProjectileImpactLabel(ProjectileKind kind, bool fireZone)
+{
+    switch (kind)
+    {
+    case ProjectileKind::Arrow:
+        return "стрела";
+    case ProjectileKind::Blaster:
+        return "болт бластера";
+    case ProjectileKind::Fireball:
+        return "фаербол";
+    case ProjectileKind::Molotov:
+        return fireZone ? "коктейль Молотова" : "снаряд";
+    }
+    return "снаряд";
+}
+
 Color HeroAccentColor(HeroId id)
 {
     switch (id)
@@ -464,6 +483,14 @@ void Game::UpdatePickups(float dt)
                     SetMessage("Подобрано: " + std::to_string(pickup.amount) + " " + ToString(pickup.type) + ".");
                     audio_.PlayPickup();
                 }
+                PushWorldEventSnapshot(
+                    WorldEventKind::ResourcePickup,
+                    player.GetId(),
+                    -1,
+                    player.GetTeamId(),
+                    ToVector3(pickup.position),
+                    static_cast<int>(pickup.type),
+                    pickup.amount);
                 break;
             }
         }
@@ -571,6 +598,14 @@ void Game::UpdateDroppedItems(float dt)
                         SetMessage(std::string("Подобрано: ") + ItemDisplayName(dropped.stack.type) + ".");
                         audio_.PlayPickup();
                     }
+                    PushWorldEventSnapshot(
+                        WorldEventKind::ItemPickup,
+                        player.GetId(),
+                        -1,
+                        player.GetTeamId(),
+                        ToVector3(dropped.position),
+                        static_cast<int>(dropped.stack.type),
+                        dropped.stack.count);
                     break;
                 }
             }
@@ -724,8 +759,35 @@ void Game::UpdateProjectiles(float dt)
                 if (EnergyCore* core = FindCoreAt(sampleBlock);
                     core != nullptr && core->IsAlive() && core->GetTeamId() != projectile.ownerTeamId)
                 {
-                    core->Damage(std::max(1, projectile.damage / 2));
+                    const int coreDamage = std::max(1, projectile.damage / 2);
+                    const bool coreDestroyed = core->Damage(coreDamage);
                     AddWorldEffect(sample, Color { 178, 245, 255, 255 }, 0.34f, 0.28f);
+                    // Owner-private replicated feedback, independent of the direct
+                    // AddWorldEffect above: pushes to the replicated event stream only
+                    // (no PresentCombatEvent call here), so a real network shooter
+                    // learns their shot hit the core without touching host presentation.
+                    if (const Player* shooter = matchSimulation_.GetPlayer(projectile.ownerId))
+                    {
+                        PlayerMatchScore& shooterScore = GetPlayerScore(projectile.ownerId);
+                        shooterScore.coreDamage += coreDamage;
+                        if (coreDestroyed)
+                        {
+                            ++shooterScore.coresDestroyed;
+                        }
+                        CombatPresentationEvent presentation {};
+                        presentation.valid = true;
+                        presentation.event.attackerId = projectile.ownerId;
+                        presentation.event.targetTeamId = core->GetTeamId();
+                        presentation.event.position = sample;
+                        presentation.event.damage = coreDamage;
+                        presentation.event.coreHit = true;
+                        presentation.event.coreDestroyed = coreDestroyed;
+                        presentation.message = shooter->GetName() + ": "
+                            + ProjectileImpactLabel(projectile.kind, projectile.fireZone)
+                            + " нанес Кору " + std::to_string(coreDamage) + " урона."
+                            + (coreDestroyed ? " Кор уничтожен!" : "");
+                        PushCombatEventSnapshots(presentation);
+                    }
                 }
                 if (projectile.explosionRadius > 0.0f)
                 {
@@ -767,6 +829,7 @@ void Game::UpdateProjectiles(float dt)
                         : (projectile.kind == ProjectileKind::Blaster ? "болтом бластера"
                             : (projectile.fireZone ? "коктейлем Молотова" : "снарядом")));
                     player.Damage(projectile.damage);
+                    const bool projectileKilledTarget = player.GetHealth() <= 0;
                     for (Player& owner : players_)
                     {
                         if (owner.GetId() == projectile.ownerId
@@ -808,6 +871,28 @@ void Game::UpdateProjectiles(float dt)
                             ? Color { 98, 245, 255, 255 }
                             : Color { 112, 232, 255, 255 }, 0.26f, 0.25f);
                         audio_.PlayHit();
+                    }
+                    // Owner-private replicated hit feedback for BOTH shooter and
+                    // victim (PushCombatEventSnapshots already fans out to both
+                    // recipients — see the melee RegisterCombatEvent path this
+                    // mirrors). Push-only: does not call PresentCombatEvent, so it
+                    // never touches the host's own local message/effects/audio,
+                    // which are the direct calls just above.
+                    if (const Player* shooter = matchSimulation_.GetPlayer(projectile.ownerId))
+                    {
+                        CombatPresentationEvent presentation {};
+                        presentation.valid = true;
+                        presentation.event.attackerId = projectile.ownerId;
+                        presentation.event.targetId = player.GetId();
+                        presentation.event.targetTeamId = player.GetTeamId();
+                        presentation.event.position = projectile.position;
+                        presentation.event.damage = projectile.damage;
+                        presentation.event.killed = projectileKilledTarget;
+                        presentation.message = shooter->GetName() + ": "
+                            + ProjectileImpactLabel(projectile.kind, projectile.fireZone)
+                            + " попадает по " + player.GetName() + ", урон "
+                            + std::to_string(projectile.damage) + ".";
+                        PushCombatEventSnapshots(presentation);
                     }
                     consumed = true;
                     break;
@@ -997,31 +1082,7 @@ void Game::UpdateHeroPassives(float dt)
         }
         else if (player.GetHeroId() == HeroId::Orbita)
         {
-            if (heroState.orbitaDashRemaining > 0.0f)
-            {
-                constexpr float dashSpeed = 42.0f;
-                const float step = std::min(heroState.orbitaDashRemaining, dashSpeed * dt);
-                const float lift = heroState.orbitaDashRemaining > 0.001f
-                    ? heroState.orbitaDashLiftRemaining * (step / heroState.orbitaDashRemaining)
-                    : 0.0f;
-                const Vector3 position = player.GetPosition();
-                const Vector3 candidate {
-                    position.x + heroState.orbitaDashDirection.x * step,
-                    position.y + lift,
-                    position.z + heroState.orbitaDashDirection.z * step
-                };
-                if (!world_.CollidesWithAABB(candidate, kPlayerCollisionHalfExtents))
-                {
-                    player.Teleport(candidate, false);
-                    heroState.orbitaDashRemaining -= step;
-                    heroState.orbitaDashLiftRemaining = std::max(0.0f, heroState.orbitaDashLiftRemaining - lift);
-                }
-                else
-                {
-                    heroState.orbitaDashRemaining = 0.0f;
-                    heroState.orbitaDashLiftRemaining = 0.0f;
-                }
-            }
+            StepOrbitaDash(player, dt);
             if (player.IsOnGround())
             {
                 heroState.orbitaAirDashLocked = false;
@@ -1110,6 +1171,43 @@ void Game::UpdateHeroPassives(float dt)
         }
         player.SetHeroDamageMultipliers(incomingMultiplier, outgoingMultiplier);
     }
+}
+
+bool Game::StepOrbitaDash(Player& player, float dt)
+{
+    if (player.GetHeroId() != HeroId::Orbita || dt <= 0.0f)
+    {
+        return false;
+    }
+
+    HeroRuntimeState& heroState = player.MutableHeroState();
+    if (heroState.orbitaDashRemaining <= 0.0f)
+    {
+        return false;
+    }
+
+    constexpr float dashSpeed = 42.0f;
+    const float step = std::min(heroState.orbitaDashRemaining, dashSpeed * dt);
+    const float lift = heroState.orbitaDashRemaining > 0.001f
+        ? heroState.orbitaDashLiftRemaining * (step / heroState.orbitaDashRemaining)
+        : 0.0f;
+    const Vector3 position = player.GetPosition();
+    const Vector3 candidate {
+        position.x + heroState.orbitaDashDirection.x * step,
+        position.y + lift,
+        position.z + heroState.orbitaDashDirection.z * step
+    };
+    if (!world_.CollidesWithAABB(candidate, kPlayerCollisionHalfExtents))
+    {
+        player.Teleport(candidate, false);
+        heroState.orbitaDashRemaining -= step;
+        heroState.orbitaDashLiftRemaining = std::max(0.0f, heroState.orbitaDashLiftRemaining - lift);
+        return true;
+    }
+
+    heroState.orbitaDashRemaining = 0.0f;
+    heroState.orbitaDashLiftRemaining = 0.0f;
+    return false;
 }
 
 void Game::UpdateHeroTemporaryBlocks(float dt)
@@ -1440,7 +1538,7 @@ void Game::UpdateBromDevices(float dt)
 
         Team* team = FindTeam(bot.ownerTeamId);
         const Vector3 basePosition = team != nullptr
-            ? Vector3 { team->shopPosition.x, team->shopPosition.y + 0.35f, team->shopPosition.z }
+            ? TeamChestDepositPosition(*team)
             : bot.position;
 
         if (bot.returning)
@@ -2323,6 +2421,7 @@ void Game::UpdateSvidetelEffects(float dt)
             const Vector3 direction = Normalize(Vector3 {
                 targetPoint.x - origin.x, targetPoint.y - origin.y, targetPoint.z - origin.z });
             EnergyProjectile projectile {};
+            projectile.id = NextProjectileId();
             projectile.position = origin;
             projectile.previousPosition = origin;
             projectile.startPosition = origin;

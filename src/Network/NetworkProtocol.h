@@ -44,13 +44,15 @@ enum class MessageType : std::uint8_t
     SnapshotDelta = 10, // server -> client: delta from a compatible baseline
     FullResyncRequest = 11, // client -> server: ask for a fresh full baseline
     ReliableAck = 12, // either direction: ack a reliable control/baseline packet
+    PlayerCommandBatch = 13, // client -> server: recent commands, ordered oldest -> newest
+    PacketFragment = 14, // either direction: one chunk of an oversized packet (see Encode below)
 };
 
 const char* ToString(MessageType type);
 
 // Protocol versioning. Bump on ANY wire-format change; decoders reject a
 // mismatch (VersionMismatch) instead of silently misparsing.
-constexpr std::uint16_t kProtocolVersion = 9;
+constexpr std::uint16_t kProtocolVersion = 23;
 // Leading magic so random/foreign bytes are rejected cleanly as BadMagic.
 constexpr std::uint32_t kProtocolMagic = 0x3142'4400u; // "DB1\0"
 // Header size on the wire: magic(4) + version(2) + type(1) + sequence(4) +
@@ -84,6 +86,8 @@ const char* ToString(DecodeStatus status);
 
 // --- Encoders: build a complete packet (header + payload) ---------------------
 std::vector<std::uint8_t> EncodePlayerCommand(std::uint32_t sequence, const PlayerCommand& command);
+std::vector<std::uint8_t> EncodePlayerCommandBatch(
+    std::uint32_t sequence, const std::vector<PlayerCommand>& commands);
 std::vector<std::uint8_t> EncodeMatchSnapshot(std::uint32_t sequence, const MatchSnapshot& snapshot);
 std::vector<std::uint8_t> EncodeSnapshotDelta(std::uint32_t sequence, const MatchSnapshotDelta& delta);
 // Header-only control packets (Connect / Disconnect / Heartbeat). `type` must be
@@ -112,12 +116,31 @@ std::vector<std::uint8_t> EncodeReliableAck(
 DecodeStatus DecodeReliableAck(
     const std::uint8_t* data, std::size_t size, PacketHeader& header,
     std::uint32_t& ackedSequence, MessageType& ackedType);
+// PacketFragment: transport-level split of an oversized datagram. Any encoded
+// packet larger than the transport's safe-MTU threshold is sent as N fragment
+// datagrams instead of one huge UDP datagram (which would be IP-fragmented or
+// silently rejected past 64 KB). fragmentId is the ORIGINAL packet's header
+// sequence — stable across reliable retries, so reassembly is idempotent.
+// Chunks use a FIXED layout (chunk i covers bytes [i*chunkBytes, ...) of the
+// original packet), carried as a length-prefixed byte array. The reassembled
+// bytes are a complete ordinary packet and re-enter the normal dispatch.
+std::vector<std::uint8_t> EncodePacketFragment(
+    std::uint32_t sequence, std::uint32_t fragmentId, std::uint16_t fragmentIndex,
+    std::uint16_t fragmentCount, std::uint32_t totalSize,
+    const std::uint8_t* chunk, std::size_t chunkSize);
+DecodeStatus DecodePacketFragment(
+    const std::uint8_t* data, std::size_t size, PacketHeader& header,
+    std::uint32_t& fragmentId, std::uint16_t& fragmentIndex, std::uint16_t& fragmentCount,
+    std::uint32_t& totalSize, std::vector<std::uint8_t>& chunk);
 
 // --- Decoders: validate the header, then parse the payload --------------------
 // On a non-Ok status `out` is left untouched/partial; `header` is filled as far
 // as it was validly read (so VersionMismatch still reports the wire version).
 DecodeStatus DecodeHeader(const std::uint8_t* data, std::size_t size, PacketHeader& header);
 DecodeStatus DecodePlayerCommand(const std::uint8_t* data, std::size_t size, PacketHeader& header, PlayerCommand& out);
+DecodeStatus DecodePlayerCommandBatch(
+    const std::uint8_t* data, std::size_t size, PacketHeader& header,
+    std::vector<PlayerCommand>& out);
 DecodeStatus DecodeMatchSnapshot(const std::uint8_t* data, std::size_t size, PacketHeader& header, MatchSnapshot& out);
 DecodeStatus DecodeSnapshotDelta(const std::uint8_t* data, std::size_t size, PacketHeader& header, MatchSnapshotDelta& out);
 

@@ -49,7 +49,6 @@ public:
     int GetMaxHealth() const;
     bool IsAlive() const;
     bool IsEliminated() const;
-    bool IsLocal() const;
     PlayerControlKind GetControlKind() const;
     void SetControlKind(PlayerControlKind kind);
     bool IsOnGround() const;
@@ -140,6 +139,13 @@ public:
     float GetBowDrawTimer() const;
     void AdvanceBowDraw(float dt);
     void ResetBowDraw();
+    // Client-side visual sync only: a network client's own weapon-charge
+    // fields are never advanced locally (charging only ever runs
+    // authoritatively via ApplyNetworkPlayerActions on the server), so
+    // without these setters the client's combat-charge HUD reads stuck
+    // defaults regardless of the server's true state. Not used server-side.
+    void SetBowDrawTimerReplicated(float value);
+    void SetBlasterStateReplicated(CrossbowState state, float loadTimer);
 
 private:
     bool HasGroundSupportAt(Vector3 position, const World& world) const;
@@ -161,7 +167,11 @@ private:
     int health_ = 100;
     bool alive_ = true;
     bool eliminated_ = false;
-    bool local_ = false;
+    // The single source of truth for "who drives this player" — there is no
+    // separate local_ flag. The ctor's `local` argument maps to
+    // LocalHumanPredicted/BotAuthoritative; SetControlKind refines it (remote
+    // humans, replicas). Query via IsLocallyPredicted/IsHumanControlled/
+    // IsBotControlled/HasLocalCamera, never a bespoke bool.
     PlayerControlKind controlKind_ = PlayerControlKind::Replica;
     bool onGround_ = false;
     bool sprinting_ = false;

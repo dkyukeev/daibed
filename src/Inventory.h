@@ -75,6 +75,7 @@ struct DroppedItem
     float lifetime = 45.0f;
     float age = 0.0f;
     bool collected = false;
+    int id = -1;
 };
 
 const char* ItemDisplayName(ItemType type);
@@ -141,6 +142,7 @@ public:
     ItemStack TakeSlot(int slot);
     bool PlaceStack(int slot, ItemStack& stack);
     ItemStack SwapSlot(int slot, ItemStack incoming);
+    bool SetSlot(int slot, ItemStack stack);
     bool IsValidSlot(int slot) const;
 
     void UpgradeSword();

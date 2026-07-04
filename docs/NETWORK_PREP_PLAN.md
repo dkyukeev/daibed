@@ -1979,3 +1979,58 @@ reliability-resend команды при потере пакета (Phase D); б
    (0.1S: `Connect` token → `ValidatePassword` → `ConnectDenied`); осталось:
    хешированный токен/challenge вместо plain, real slot/team policy (сейчас assign
    = первый свободный бот), join/leave UI, max-players enforcement.
+
+---
+
+## Phase 6 slice — integrated singleplayer server (skeleton + экономика)
+
+Первый шаг «singleplayer = integrated server» из
+`docs/MULTIPLAYER_REFACTOR_PLAN.md` (Фаза 6, пункты 9–10). **Hybrid**: скелет
+живёт рядом с прямым SP-путём; direct gameplay mutations из `Game::Update`
+**не** удалялись — мигрирована только экономика.
+
+**Скелет (`StartIntegratedServer`):**
+- Обычный singleplayer (не automatch) в конце `SetupMatch` поднимает
+  in-process сервер поверх существующего `LoopbackTransport` и подключает
+  локального человека как loopback-клиента (`kIntegratedServerClientId` ↔
+  `localPlayerId_`). Automatch остаётся direct — там нет human-клиента.
+- `IntegratedServerTick()` (вызывается per-tick из `UpdateMatchSimulation`,
+  рядом с `SendMockNetworkInput`): client шлёт `BuildLocalPlayerCommand()` →
+  server `DrainCommands` → применяет **мигрированные** системы → публикует
+  per-client visibility-filtered снапшот (`BuildNetworkSnapshotForClient`).
+  Movement и остальной gameplay пока применяет прямой SP-путь (drain этих
+  полей инертен — ничего не применяется дважды).
+
+**Мигрированная система — shop/economy:**
+- `ApplyPendingLocalPlayerAction` теперь при активном integrated server
+  отправляет команду через `LoopbackTransport` и синхронно дренирует её на
+  «серверной» стороне (`ApplyIntegratedServerCommand` →
+  `ApplyPlayerEconomyCommand` — тот же валидированный/dedup метод, что у
+  multiplayer в `NetworkServerTick`). Фоллбэк на прямой вызов остаётся, если
+  транспорт не активен. Фидбэк — `PresentPlayerActionResult` прямо на
+  серверной стороне (integrated клиент делит презентацию хоста, пока
+  action-result snapshots не станут источником и для SP).
+- Мёртвая прямая ветка `TryShopPurchase` в shop-click хэндлере (`Game.cpp`,
+  недостижимая после command-path) удалена; у локального человека в SP больше
+  **нет** прямых вызовов `TryShopPurchase` (остались боты — осознанно, и сам
+  server-side `ApplyPlayerEconomyCommand`).
+
+**Wire-формат не менялся** — протокол не бампался (loopback, без сокетов).
+
+**`--integrated-server-smoke`** (headless, `INTEGRATED_SERVER_SMOKE_OK`):
+mapping client↔player после `SetupMatch`; 30 тиков канала (commands drained,
+snapshots published, snapshot tick/позиция = живые); покупка через транспорт
+(iron −5 / wood +32, результат-сообщение показан); resend того же `actionSeq`
+по проводу не покупает дважды; покупка вне shop-zone denied той же серверной
+валидацией.
+
+**Проверки (2026-07-01, Release):** build чисто; все smoke зелёные
+(protocol/network/actions/ranged/purchase/client-input/loopback-two-client/
+mp-loopback/client-dynamic-apply/movement-parity/integrated-server/startup);
+`--automatch --runs 2 --seed 777` идентичен базлайну до изменений
+(run1 kills=23 coreDamage=278, run2 kills=11 coreDamage=168).
+
+**Честный остаток:** integrated клиент не потребляет снапшоты/ActionResult для
+презентации (SP-рендер читает живое состояние); movement/combat/place/break/
+inventory-UI drag в SP всё ещё direct; удаление direct-путей — следующие срезы
+Фазы 6.

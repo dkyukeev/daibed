@@ -72,7 +72,7 @@ void Game::UpdateCombatPreview()
     if (ItemIsBlasterWeapon(selectedRangedItem))
     {
         const float fullCharge = BlasterChargeSeconds(inventory.GetBlasterRapidFireLevel());
-        const float fraction = std::clamp(attackChargeTimer_ / fullCharge, 0.0f, 1.0f);
+        const float fraction = std::clamp(player->GetBlasterLoadTimer() / fullCharge, 0.0f, 1.0f);
         combatPreview_.visible = true;
         combatPreview_.ready = player->GetBlasterState() == CrossbowState::Loaded;
         combatPreview_.cooldownFraction = player->GetBlasterState() == CrossbowState::Loaded ? 1.0f : fraction;
@@ -197,258 +197,78 @@ void Game::UpdateFastPlacement(float dt)
 
 void Game::UpdateAttackOrBreak(float dt)
 {
-    Player* player = GetLocalPlayer();
-    if (player == nullptr || !player->IsAlive() || shopOpen_ || inventoryOpen_ || matchSimulation_.HasWinner())
-    {
-        if (player != nullptr)
-        {
-            player->ResetBowDraw();
-            player->CancelBlasterLoading();
-        }
-        ResetBreakProgress();
-        attackChargeActive_ = false;
-        attackChargeTimer_ = 0.0f;
-        return;
-    }
-
-    const PlayerCommand command = BuildLocalPlayerCommand();
-    const ItemType rangedItem = GetSelectedHotbarStack(*player).type;
-    const bool bowSelected = rangedItem == ItemType::Bow;
-    const bool blasterSelected = ItemIsBlasterWeapon(rangedItem);
-    if (!bowSelected && player->GetBowDrawTimer() > 0.0f)
-    {
-        player->ResetBowDraw();
-    }
-    if (!blasterSelected && player->GetBlasterState() == CrossbowState::Loading)
-    {
-        player->CancelBlasterLoading();
-    }
-    if (bowSelected)
-    {
-        if (command.attackHeld)
-        {
-            const float previousPower = BowDrawPower(player->GetBowDrawTimer());
-            player->AdvanceBowDraw(dt);
-            const float drawPower = BowDrawPower(player->GetBowDrawTimer());
-            attackChargeActive_ = true;
-            attackChargeTimer_ = player->GetBowDrawTimer();
-            if (previousPower < 1.0f && drawPower >= 1.0f)
-            {
-                audio_.PlayPickup();
-                AddWorldEffect(player->GetPosition(), cameraController_.GetAimDirection(), Color { 255, 226, 96, 255 }, 0.24f, 0.18f, WorldEffectKind::Ring);
-            }
-            ResetBreakProgress();
-            return;
-        }
-        if (command.attackReleased && player->GetBowDrawTimer() > 0.0f)
-        {
-            LaunchBowShot(*player, cameraController_.GetAimDirection(), BowDrawPower(player->GetBowDrawTimer()), true);
-        }
-        player->ResetBowDraw();
-        attackChargeActive_ = false;
-        attackChargeTimer_ = 0.0f;
-        ResetBreakProgress();
-        return;
-    }
-    if (blasterSelected)
-    {
-        const float fullCharge = BlasterChargeSeconds(player->GetInventory().GetBlasterRapidFireLevel());
-        if (player->GetBlasterState() == CrossbowState::Loaded && command.attackPressed)
-        {
-            const bool aimed = rangedItem == ItemType::SniperRifle ? command.scopeHeld : command.placeHeld;
-            LaunchBlasterShot(*player, cameraController_.GetAimDirection(), aimed, true);
-            ResetBreakProgress();
-            return;
-        }
-        if (player->GetBlasterState() == CrossbowState::Unloaded && command.attackHeld)
-        {
-            player->StartBlasterLoading();
-            audio_.PlayPickup();
-        }
-        if (player->GetBlasterState() == CrossbowState::Loading && command.attackHeld)
-        {
-            blasterCharging_ = true;
-            attackChargeActive_ = true;
-            const bool becameLoaded = player->AdvanceBlasterLoading(dt, fullCharge);
-            attackChargeTimer_ = player->GetBlasterLoadTimer();
-            if (becameLoaded)
-            {
-                audio_.PlayPickup();
-                AddWorldEffect(player->GetPosition(), cameraController_.GetAimDirection(), Color { 190, 255, 255, 255 }, 0.30f, 0.22f, WorldEffectKind::Ring);
-                SetMessage("Бластер заряжен. Следующий клик — выстрел.");
-            }
-            ResetBreakProgress();
-            return;
-        }
-        if (command.attackReleased && player->GetBlasterState() == CrossbowState::Loading)
-        {
-            player->CancelBlasterLoading();
-            SetMessage("Зарядка бластера отменена.");
-        }
-        blasterCharging_ = false;
-        attackChargeActive_ = false;
-        attackChargeTimer_ = player->GetBlasterLoadTimer();
-        ResetBreakProgress();
-        return;
-    }
+    // Phase 6: melee/break/ranged for every human run through the ONE
+    // authoritative command path — ApplyNetworkPlayerActions, fed by the
+    // integrated loopback server in singleplayer and by the real transport in
+    // multiplayer. This per-tick hook only clears the single-instance local
+    // HUD mirrors; the command path repopulates them for the player with the
+    // local camera later in the same tick (IntegratedServerTick runs after
+    // this in UpdateMatchSimulation).
+    (void)dt;
+    ResetBreakProgress();
     blasterCharging_ = false;
-
-    const float chargeMultiplier = 1.0f;
-    const std::optional<WeaponType> selectedWeapon = GetSelectedWeaponType(*player);
-    float meleeRayLimit = 0.0f;
-    if (selectedWeapon.has_value())
-    {
-        const float weaponRange = CombatSystem::AttackRange(*selectedWeapon, player->GetInventory().GetSwordLevel());
-        meleeRayLimit = weaponRange;
-        const std::optional<RaycastHit> terrainHit = RaycastFromAim(*player, weaponRange);
-        if (terrainHit.has_value())
-        {
-            meleeRayLimit = std::max(0.0f, terrainHit->distance - 0.06f);
-        }
-    }
-
-    if (selectedWeapon.has_value() && command.attackPressed)
-    {
-        std::string combatMessage;
-        CombatEvent combatEvent;
-        if (combat_.Attack(*player, players_, cameraController_.GetAimDirection(), combatMessage, &combatEvent, *selectedWeapon, 1.0f, nullptr, meleeRayLimit))
-        {
-            RegisterCombatEvent(combatEvent, combatMessage);
-            ResetBreakProgress();
-            attackChargeActive_ = false;
-            attackChargeTimer_ = 0.0f;
-            return;
-        }
-    }
-
-    if (command.attackPressed)
-    {
-        const Vector3 origin = cameraController_.GetAimOrigin();
-        const Vector3 direction = cameraController_.GetAimDirection();
-        const float range = selectedWeapon.has_value() ? std::max(3.5f, meleeRayLimit) : 4.5f;
-        const Vector3 end {
-            origin.x + direction.x * range,
-            origin.y + direction.y * range,
-            origin.z + direction.z * range
-        };
-        const bool toolAttack = EffectiveToolLevel(*player) > 0;
-        const int deviceDamage = toolAttack ? 18 + EffectiveToolLevel(*player) * 9 : 18;
-        if (DamageHeroDeviceAlongSegment(player->GetTeamId(), origin, end, deviceDamage, toolAttack))
-        {
-            player->ResetAttackCooldown(0.45f);
-            ResetBreakProgress();
-            return;
-        }
-    }
-
-    if (!command.attackHeld)
-    {
-        ResetBreakProgress();
-        attackChargeActive_ = false;
-        attackChargeTimer_ = 0.0f;
-        return;
-    }
-
-    const std::optional<CombatTargetInfo> meleeTarget = selectedWeapon.has_value()
-        ? combat_.FindMeleeTarget(*player, players_, cameraController_.GetAimDirection(), *selectedWeapon, chargeMultiplier, meleeRayLimit)
-        : std::optional<CombatTargetInfo> {};
-    if (selectedWeapon.has_value() && meleeTarget.has_value())
-    {
-        ResetBreakProgress();
-        return;
-    }
-
     attackChargeActive_ = false;
     attackChargeTimer_ = 0.0f;
+}
 
-    const std::optional<RaycastHit> hit = RaycastFromAim(*player, 4.5f);
-    if (!hit.has_value())
+float Game::ComputeBreakRequiredSeconds(Player& player, const RaycastHit& hit, bool isCore)
+{
+    // THE break-time rule: base block toughness vs. tool level, plus the Likho
+    // mining modifiers (solo speed bonus + active2 persistent cuts). Shared by
+    // the authoritative server path (ApplyNetworkPlayerActions) and the client
+    // prediction path (UpdatePredictedBreakProgress) so the predicted HUD bar
+    // fills at exactly the authoritative rate. Registering/refreshing a cut is
+    // part of the rule: on the server it is the authoritative record; on a
+    // network client it mirrors the same record for the client's own mining.
+    float requiredSeconds = BreakSeconds(hit.blockData.type, EffectiveToolLevel(player));
+    if (isCore || player.GetHeroId() != HeroId::Likho)
     {
-        ResetBreakProgress();
-        return;
+        return requiredSeconds;
     }
 
-    bool isCore = false;
-    float requiredSeconds = BreakSeconds(hit->blockData.type, EffectiveToolLevel(*player));
-    std::string label = DisplayName(hit->blockData.type);
-
-    if (hit->blockData.type == BlockType::EnergyCoreBlock)
-    {
-        EnergyCore* core = FindCoreAt(hit->block);
-        if (core == nullptr || core->GetTeamId() == player->GetTeamId())
+    const bool allyNearby = std::any_of(
+        players_.begin(), players_.end(),
+        [&player](const Player& candidate)
         {
-            ResetBreakProgress();
-            return;
-        }
-
-        isCore = true;
-        label = "Вражеский Кор";
-    }
-    else if (!hit->blockData.breakable || !IsBreakableByPlayers(hit->blockData.type))
+            return candidate.GetId() != player.GetId()
+                && candidate.GetTeamId() == player.GetTeamId()
+                && candidate.IsAlive()
+                && DistanceSquared(candidate.GetPosition(), player.GetPosition()) <= 64.0f;
+        });
+    if (!allyNearby)
     {
-        ResetBreakProgress();
-        return;
+        requiredSeconds *= 0.75f;
     }
 
-    if (!isCore && player->GetHeroId() == HeroId::Likho)
+    if (player.GetHeroState().active2.active)
     {
-        const bool allyNearby = std::any_of(
-            players_.begin(), players_.end(),
-            [player](const Player& candidate)
+        auto cut = std::find_if(likhoBlockCuts_.begin(), likhoBlockCuts_.end(),
+            [&player, &hit](const LikhoBlockCut& existing)
             {
-                return candidate.GetId() != player->GetId()
-                    && candidate.GetTeamId() == player->GetTeamId()
-                    && candidate.IsAlive()
-                    && DistanceSquared(candidate.GetPosition(), player->GetPosition()) <= 64.0f;
+                return existing.ownerPlayerId == player.GetId() && existing.position == hit.block;
             });
-        if (!allyNearby)
+        if (cut == likhoBlockCuts_.end())
         {
-            requiredSeconds *= 0.75f;
+            likhoBlockCuts_.push_back(LikhoBlockCut { hit.block, hit.blockData.type, player.GetId(), 10.0f });
         }
-        if (player->GetHeroState().active2.active)
+        else
         {
-            auto cut = std::find_if(likhoBlockCuts_.begin(), likhoBlockCuts_.end(),
-                [player, &hit](const LikhoBlockCut& existing)
-                {
-                    return existing.ownerPlayerId == player->GetId() && existing.position == hit->block;
-                });
-            if (cut == likhoBlockCuts_.end())
-            {
-                likhoBlockCuts_.push_back(LikhoBlockCut { hit->block, hit->blockData.type, player->GetId(), 10.0f });
-            }
-            else
-            {
-                cut->lifetime = 10.0f;
-            }
-        }
-        const bool hasPersistentCut = std::any_of(likhoBlockCuts_.begin(), likhoBlockCuts_.end(),
-            [player, &hit](const LikhoBlockCut& cut)
-            {
-                return cut.ownerPlayerId == player->GetId()
-                    && cut.position == hit->block
-                    && cut.blockType == hit->blockData.type;
-            });
-        if (hasPersistentCut)
-        {
-            requiredSeconds *= 0.72f;
+            cut->lifetime = 10.0f;
         }
     }
 
-    if (!breakProgress_.visible || breakProgress_.target != hit->block || breakProgress_.isCore != isCore)
+    const bool hasPersistentCut = std::any_of(likhoBlockCuts_.begin(), likhoBlockCuts_.end(),
+        [&player, &hit](const LikhoBlockCut& cut)
+        {
+            return cut.ownerPlayerId == player.GetId()
+                && cut.position == hit.block
+                && cut.blockType == hit.blockData.type;
+        });
+    if (hasPersistentCut)
     {
-        breakProgress_ = BreakProgress { hit->block, hit->blockData.type, true, isCore, 0.0f, label };
+        requiredSeconds *= 0.72f;
     }
-
-    breakProgress_.targetType = hit->blockData.type;
-    breakProgress_.isCore = isCore;
-    breakProgress_.label = label;
-    breakProgress_.fraction += dt / std::max(0.001f, requiredSeconds);
-
-    if (breakProgress_.fraction >= 1.0f)
-    {
-        CompleteBreakProgress(*player, breakProgress_);
-        ResetBreakProgress();
-    }
+    return requiredSeconds;
 }
 
 void Game::ResetBreakProgress()
@@ -517,6 +337,7 @@ Game::BlockActionResult Game::ApplyCompletedBreakProgress(Player& player, const 
         result.hasWorldEffect = true;
         result.playBreakSound = true;
         result.incrementLocalBroken = IsLocallyPredicted(ControlKindForPlayer(player));
+        SpawnBrokenBlockDrop(progress.targetType, target, player.GetId());
         if (brokenBlock.has_value())
         {
             ApplyBromBlockBreakPassive(player, *brokenBlock, center);
@@ -529,6 +350,30 @@ Game::BlockActionResult Game::ApplyCompletedBreakProgress(Player& player, const 
         result.playDeniedSound = true;
     }
     return result;
+}
+
+void Game::SpawnBrokenBlockDrop(BlockType type, const GridPos& pos, int ownerPlayerId)
+{
+    const ItemType item = ItemFromBlock(type);
+    if (item == ItemType::None)
+    {
+        return;
+    }
+
+    const Vector3 center = world_.GridToWorld(pos);
+    const int seed = pos.x * 73856093 ^ pos.y * 19349663 ^ pos.z * 83492791;
+    const float angle = static_cast<float>(std::abs(seed % 628)) * 0.01f;
+    const float horizontalSpeed = 0.55f + static_cast<float>(std::abs((seed / 17) % 35)) * 0.01f;
+    matchSimulation_.DroppedItems().push_back(DroppedItem {
+        ItemStack { item, 1 },
+        Vec3 { center.x, center.y + 0.42f, center.z },
+        Vec3 { std::cos(angle) * horizontalSpeed, 1.85f, std::sin(angle) * horizontalSpeed },
+        ownerPlayerId,
+        0.45f,
+        45.0f,
+        0.0f,
+        false,
+        NextDroppedItemId() });
 }
 
 void Game::CompleteBreakProgress(Player& player, const BreakProgress& progress)
@@ -568,10 +413,10 @@ void Game::HandlePlaceBlock()
         return;
     }
 
-    if (!TryPlaceBlockForPlayer(*player, preview.position, true))
-    {
-        audio_.PlayDenied();
-    }
+    // The world mutation itself is always authoritative: this tick's place
+    // input reaches ApplyNetworkBlockPlace through the command path (the
+    // integrated loopback server in SP, the real server in MP). This function
+    // only supplies the immediate client-side denial feedback above.
 }
 
 PlacementPreview Game::BuildPlacementPreview(const Player& player) const
@@ -827,7 +672,7 @@ Game::BlockActionResult Game::ApplyPlaceBlockForPlayer(Player& player, const Gri
     result.playPlaceSound = true;
     if (blockType == BlockType::ExplosiveBlock)
     {
-        timedExplosions_.push_back(TimedExplosion { pos, player.GetTeamId(), player.GetId(), 2.6f, 2.7f });
+        timedExplosions_.push_back(TimedExplosion { pos, player.GetTeamId(), player.GetId(), 2.6f, 2.7f, NextExplosiveId() });
         result.tntActivated = true;
     }
     result.incrementLocalPlaced = IsLocallyPredicted(controlKind);

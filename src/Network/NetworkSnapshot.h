@@ -41,6 +41,87 @@ struct InventorySnapshot
     bool present = false;          // false once stripped by the visibility filter.
     std::array<int, 3> resources {}; // iron / gold / crystal counts.
     std::vector<ItemStackSnapshot> hotbar;
+    std::vector<ItemStackSnapshot> main;
+};
+
+// Owner-private hero ability HUD state (cooldowns/active timers/ultimate
+// charge) PLUS ranged-weapon charge state (bow draw / blaster load). Stripped
+// the same way InventorySnapshot is (present=false for everyone except the
+// recipient) — no one else needs to know your exact cooldowns. Without this,
+// a network client's own Player object never learns its true ability/weapon
+// state at all (neither HeroRuntimeState nor the bow/blaster charge fields
+// are predicted locally for a server-driven player), so its ability HUD is
+// permanently stuck on "ready" and its weapon-charge HUD never animates even
+// though the server is correctly tracking the charge.
+struct HeroAbilityHudSnapshot
+{
+    bool present = false;
+    float active1Cooldown = 0.0f;
+    float active1ActiveTimer = 0.0f;
+    float active2Cooldown = 0.0f;
+    float active2ActiveTimer = 0.0f;
+    float ultimateCooldown = 0.0f;
+    float ultimateActiveTimer = 0.0f;
+    float ultimateCharge = 0.0f;
+    // Covers both Radon's `ultimatePrimed` toggle and the generic "primed"
+    // flag AbilityStateText reads for the ultimate slot (Renderer.cpp only
+    // ever reads HeroRuntimeState::ultimatePrimed for this, regardless of
+    // hero, so one bool is enough).
+    bool ultimatePrimed = false;
+    float bowDrawTimer = 0.0f;
+    int blasterState = 0; // mirrors CrossbowState (Unloaded/Loading/Loaded).
+    float blasterLoadTimer = 0.0f;
+};
+
+// Team-scoped chest inventory. The full server snapshot carries every team
+// chest; per-client filtering keeps only the recipient team's chest.
+struct TeamChestSnapshot
+{
+    int teamId = -1;
+    std::array<int, 3> resources {}; // iron / gold / crystal counts.
+    std::vector<ItemStackSnapshot> slots; // all inventory slots, hotbar first.
+};
+
+// Public per-player match score. This is authoritative server state used by the
+// MP scoreboard; inventory/ability privacy rules do not apply to match stats.
+struct PlayerScoreSnapshot
+{
+    int playerId = -1;
+    int kills = 0;
+    int deaths = 0;
+    int finalDeaths = 0;
+    int coreDamage = 0;
+    int coresDestroyed = 0;
+};
+
+// Owner-private discrete action/event feedback. The server emits these after
+// applying exactly-once PlayerAction commands or authoritative command-side
+// events such as block place/break; the visibility filter keeps only the target
+// player's results. Clients dedupe by (playerId, resultSeq). actionSeq is the
+// original client action id when one exists.
+struct ActionResultSnapshot
+{
+    int playerId = -1;
+    std::uint32_t resultSeq = 0;
+    std::uint32_t actionSeq = 0;
+    int actionType = 0;
+    int subjectType = 0;
+    int actorPlayerId = -1;
+    int targetPlayerId = -1;
+    int targetTeamId = -1;
+    int amount = 0;
+    int flags = 0;
+    bool success = false;
+    Vec3 position {};
+    std::string message;
+    std::array<int, 4> color { 255, 255, 255, 255 };
+    float seconds = 1.6f;
+    // World-effect radius (world units). Trailing/optional: 0 for action types
+    // that don't carry a visual effect (defaults keep every existing positional
+    // ActionResultSnapshot{...} construction compiling unchanged). Currently
+    // used by PlayerActionType::HeroAbility to replicate the primary cast
+    // effect's size; see PushHeroAbilityActionResultSnapshot.
+    float radius = 0.0f;
 };
 
 // Per-player state. Position/health are public; inventory is owner-private;
@@ -70,6 +151,7 @@ struct PlayerSnapshot
     float animationTimer = 0.0f;
     float animationDuration = 0.0f;
     InventorySnapshot inventory {};
+    HeroAbilityHudSnapshot abilityHud {};
     // Identity an enemy should see while this player is a disguised Likho
     // (ultimate active). -1 when not disguised. Allies keep the real identity;
     // the filter swaps teamId/heroId to these for enemy recipients, then clears
@@ -109,9 +191,15 @@ struct PickupSnapshot
 // A dropped inventory stack lying in the world. itemType mirrors ItemType.
 struct DroppedItemSnapshot
 {
+    int id = -1;
     int itemType = 0;
     int count = 0;
     Vec3 position {};
+    Vec3 velocity {};
+    int ownerPlayerId = -1;
+    float ownerPickupDelay = 0.0f;
+    float lifetime = 45.0f;
+    float age = 0.0f;
 };
 
 // ---- Dynamic entities --------------------------------------------------------
@@ -122,11 +210,30 @@ struct DroppedItemSnapshot
 // converts spatial fields to Vec3 at the boundary. Only public state is carried
 // — no internal AI/nav/timing scratch.
 //
-// On entity ids: these gameplay entities do not yet carry stable per-spawn ids
-// in the simulation. Until they do, `id` is the entity's index within its source
-// collection at snapshot time (stable within a tick, NOT across ticks). A later
-// pass that assigns real spawn-ids (needed for interpolation/prediction) will
-// replace this; the field exists now so the snapshot shape is already correct.
+// On entity ids: PROJECTILES, EXPLOSIVES, HAZARD ZONES and HERO DEVICES now
+// carry a real stable per-spawn id (EnergyProjectile::id/TimedExplosion::id/
+// HazardZone::id, and each of the 7 device structs' own id field, assigned
+// once by Game::NextProjectileId()/NextExplosiveId()/NextHazardZoneId()/
+// NextHeroDeviceId() at creation — the 7 device structs share ONE id-space
+// since they all funnel into HeroDeviceSnapshot) — SnapshotDelta already
+// matched entries by `id` (FindById/UpsertById/RemoveIds), so this alone fixes
+// a real bug: with the old index-based id, an earlier entity expiring shifted
+// every later entity's id, so the delta saw a spurious remove+add instead of a
+// smooth continuation for a still-live entity (exactly the failure mode
+// docs/MULTIPLAYER_QUALITY_TARGET.md's "Что считается провалом" section calls
+// out). LikhoDisguise is the one device type with no persistent spawned
+// object (synthesized fresh each snapshot from player state) — it derives a
+// stable id directly from ownerPlayerId instead, offset clear of the shared
+// counter's range. STATUS EFFECTS now carry stable ids too, but via a THIRD
+// strategy: unlike everything above, a status effect is never "spawned" at
+// all — it's synthesized fresh every BuildNetworkSnapshot call straight from
+// Player timers / RadonBurn / KonvoyIntruderMark (it "exists" for a tick
+// purely because some remaining/timer is > 0). So its id is a pure function
+// of (type, targetPlayerId, ownerPlayerId) — see StatusEffectStableId in
+// GameNetwork.cpp — rather than an assigned-once counter value or a
+// derived-from-owner special case; the same conceptual effect (e.g. "player
+// 3's shield") then keeps the same id every tick it's present. All 6 dynamic
+// entity sections now have stable, index-independent ids.
 //
 // On visibility: no per-client filtering happens yet (every recipient would get
 // every entry). `visibility` is scaffolding for the future public/private split
@@ -232,6 +339,44 @@ struct StatusEffectSnapshot
     SnapshotVisibility visibility = SnapshotVisibility::Private;
 };
 
+// Public broadcast event: unlike ActionResultSnapshot (owner-private, filtered
+// to one recipient), every connected client receives every WorldEventSnapshot
+// unfiltered — kill feed, death/respawn/victory announcements, and other
+// map-wide feedback singleplayer/host gets "for free" by running
+// UpdateMatchSimulation locally, which a network client never calls at all.
+// Deduped client-side by a single monotonic eventSeq high-water mark (no
+// per-player keying needed: the stream itself is global, not per-recipient).
+// Message text is NOT sent over the wire; the client reconstructs the exact
+// same strings singleplayer builds, using replicated player/team/core state
+// plus these fields, to avoid duplicating large string payloads every tick.
+enum class WorldEventKind
+{
+    PlayerDied,
+    PlayerRespawnLost, // lost respawn protection while core already destroyed.
+    PlayerRespawned,
+    GeneratorBoost,
+    AlarmTriggered,
+    ResourcePickup,
+    ItemPickup // dropped inventory stack picked up (subjectType mirrors ItemType).
+};
+
+struct WorldEventSnapshot
+{
+    std::uint32_t eventSeq = 0;
+    int kind = 0; // WorldEventKind
+    int actorPlayerId = -1;  // killer / picking player / -1 for none/environment.
+    int targetPlayerId = -1; // victim / respawning / affected player.
+    int targetTeamId = -1;   // affected/owner team (victory winner, alarm owner).
+    Vec3 position {};
+    int subjectType = 0; // ResourceType for ResourcePickup; unused otherwise.
+    int amount = 0;       // pickup amount / damage-tick amount.
+    int flags = 0;        // bit0 finalDeath, bit1 voidDeath (PlayerDied only).
+    // Death cause text (e.g. "падение в воид", or a DamageCredit::cause like
+    // "топором Свидетеля") — free text from combat state that isn't otherwise
+    // replicated, needed for the affected player's own death-overlay text.
+    std::string cause;
+};
+
 struct MatchSnapshot
 {
     std::uint32_t tick = 0;
@@ -241,7 +386,9 @@ struct MatchSnapshot
     int winnerTeamId = -1;
 
     std::vector<PlayerSnapshot> players;
+    std::vector<PlayerScoreSnapshot> matchScores;
     std::vector<CoreSnapshot> cores;
+    std::vector<TeamChestSnapshot> teamChests;
     std::vector<GeneratorSnapshot> generators;
     // World items the server replicates. No visibility filtering yet — every
     // client would see all of these; per-client filtering (cull by distance /
@@ -260,6 +407,8 @@ struct MatchSnapshot
     std::vector<HazardZoneSnapshot> hazardZones;
     std::vector<HeroDeviceSnapshot> heroDevices;
     std::vector<StatusEffectSnapshot> statusEffects;
+    std::vector<ActionResultSnapshot> actionResults;
+    std::vector<WorldEventSnapshot> worldEvents;
 
     // Extension points for later replication passes (kept as comments so the
     // shape and intent are documented without bloating this pass):

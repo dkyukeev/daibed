@@ -35,8 +35,12 @@ struct MatchSnapshotDelta
 
     std::vector<PlayerSnapshot> players;
     std::vector<int> removedPlayerIds;
+    std::vector<PlayerScoreSnapshot> matchScores;
+    std::vector<int> removedScorePlayerIds;
     std::vector<CoreSnapshot> cores;
     std::vector<int> removedCoreTeamIds;
+    std::vector<TeamChestSnapshot> teamChests;
+    std::vector<int> removedTeamChestTeamIds;
 
     std::vector<IndexedGeneratorSnapshot> generators;
     std::vector<std::uint32_t> removedGeneratorIndices;
@@ -57,6 +61,8 @@ struct MatchSnapshotDelta
     std::vector<int> removedHeroDeviceIds;
     std::vector<StatusEffectSnapshot> statusEffects;
     std::vector<int> removedStatusEffectIds;
+    std::vector<ActionResultSnapshot> actionResults;
+    std::vector<WorldEventSnapshot> worldEvents;
 };
 
 enum class SnapshotDeltaApplyStatus

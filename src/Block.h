@@ -22,6 +22,7 @@ enum class BlockType
     LavaBlock,
     IceBlock,
     ResourceGenerator,
+    TeamChestBlock,
     EnergyCoreBlock
 };
 

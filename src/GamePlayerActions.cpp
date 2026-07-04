@@ -71,7 +71,12 @@ void Game::UseUtilityInputs(Player& player, const PlayerCommand& command)
             player.SetSelectedSlot(slot);
         }
     };
-    const auto useHotbarUtility = [this, &player, &selectSlot, &command, controlKind](UtilityType type)
+    // Push always registers the owner-private replicated result (a no-op sink
+    // for a local/singleplayer host with no client folding it back); Present
+    // shows it immediately and is itself suppressed for a non-local-camera
+    // player by the ScopedLocalFeedbackSuppression above. This is the same
+    // push-always/present-if-unsuppressed split RegisterCombatEvent uses.
+    const auto useHotbarUtility = [this, &player, &selectSlot, &command](UtilityType type)
     {
         const ItemType itemType = ItemFromUtility(type);
         const auto& hotbar = player.GetInventory().GetHotbarSlots();
@@ -82,22 +87,27 @@ void Game::UseUtilityInputs(Player& player, const PlayerCommand& command)
                 selectSlot(i);
                 if (type == UtilityType::Fireball || type == UtilityType::Molotov)
                 {
-                    LaunchProjectile(player, type, AimDirectionFromCommandInput(command), HasLocalCamera(controlKind));
+                    const UtilityActionResult result = ApplyProjectileUtility(player, type, AimDirectionFromCommandInput(command));
+                    PushUtilityActionResultSnapshot(player, result);
+                    PresentUtilityActionResult(result);
                 }
                 else
                 {
                     const UtilityActionResult result = ApplyUtility(player, type);
-                    if (HasLocalCamera(controlKind))
-                    {
-                        PresentUtilityActionResult(result);
-                    }
+                    PushUtilityActionResultSnapshot(player, result);
+                    PresentUtilityActionResult(result);
                 }
                 return;
             }
         }
 
-        SetMessage(std::string("Нет ") + ItemDisplayName(itemType) + " на панели.");
-        audio_.PlayDenied();
+        UtilityActionResult deniedResult {};
+        deniedResult.handled = true;
+        deniedResult.type = type;
+        deniedResult.message = std::string("Нет ") + ItemDisplayName(itemType) + " на панели.";
+        deniedResult.playDeniedSound = true;
+        PushUtilityActionResultSnapshot(player, deniedResult);
+        PresentUtilityActionResult(deniedResult);
     };
 
     if (command.useHeal)
@@ -258,6 +268,79 @@ Game::UtilityActionResult Game::ApplyUtility(Player& player, UtilityType type)
     return result;
 }
 
+Game::UtilityActionResult Game::ApplyProjectileUtility(Player& player, UtilityType type, Vector3 direction)
+{
+    UtilityActionResult result {};
+    result.handled = true;
+    result.type = type;
+    if (type != UtilityType::Fireball && type != UtilityType::Molotov)
+    {
+        result.handled = false;
+        return result;
+    }
+
+    if (type == UtilityType::Fireball && !player.CanAttack())
+    {
+        result.message = "Оружие перезаряжается.";
+        result.playDeniedSound = true;
+        return result;
+    }
+
+    if (!SpendUtilityItem(player, type))
+    {
+        result.message = type == UtilityType::Fireball
+            ? "Нет фаерболов. Купите один в бою."
+            : "Нет коктейлей Молотова. Купите один в утилитах.";
+        result.playDeniedSound = true;
+        return result;
+    }
+
+    const float directionLength = std::sqrt(direction.x * direction.x + direction.y * direction.y + direction.z * direction.z);
+    if (directionLength <= 0.0001f)
+    {
+        direction = player.Forward();
+    }
+    else
+    {
+        direction = Vector3 { direction.x / directionLength, direction.y / directionLength, direction.z / directionLength };
+    }
+
+    EnergyProjectile projectile {};
+    projectile.id = NextProjectileId();
+    projectile.position = Vector3 {
+        player.GetPosition().x + direction.x * 0.75f,
+        player.GetPosition().y + 0.82f + direction.y * 0.75f,
+        player.GetPosition().z + direction.z * 0.75f
+    };
+    projectile.ownerId = player.GetId();
+    projectile.ownerTeamId = player.GetTeamId();
+    const ProjectileTuning& tuning = type == UtilityType::Fireball ? kFireballTuning : kMolotovTuning;
+    projectile.kind = type == UtilityType::Fireball ? ProjectileKind::Fireball : ProjectileKind::Molotov;
+    projectile.fireZone = type == UtilityType::Molotov;
+    projectile.velocity = Vector3 { direction.x * tuning.speed, direction.y * tuning.speed, direction.z * tuning.speed };
+    if (type == UtilityType::Molotov)
+    {
+        projectile.velocity.y += 1.2f;
+    }
+    projectile.damage = tuning.damage;
+    projectile.radius = tuning.radius;
+    projectile.explosionRadius = tuning.explosionRadius;
+    projectile.gravity = tuning.gravity;
+    projectile.lifetime = tuning.lifetime;
+    projectile.previousPosition = projectile.position;
+    projectile.startPosition = projectile.position;
+    if (type == UtilityType::Fireball)
+    {
+        player.ResetAttackCooldown(tuning.cooldown);
+    }
+
+    projectiles_.push_back(projectile);
+    result.success = true;
+    result.message = type == UtilityType::Fireball ? "Фаербол запущен." : "Коктейль Молотова брошен.";
+    result.playBreakBlockSound = true;
+    return result;
+}
+
 void Game::PresentUtilityActionResult(const UtilityActionResult& result)
 {
     if (!result.handled || suppressLocalFeedback_)
@@ -276,22 +359,14 @@ void Game::PresentUtilityActionResult(const UtilityActionResult& result)
     {
         audio_.PlayPickup();
     }
+    if (result.playBreakBlockSound)
+    {
+        audio_.PlayBreakBlock();
+    }
     if (result.playDeniedSound)
     {
         audio_.PlayDenied();
     }
-}
-
-bool Game::UseUtility(Player& player, UtilityType type)
-{
-    const UtilityActionResult result = ApplyUtility(player, type);
-    if (!result.handled && (type == UtilityType::Fireball || type == UtilityType::Molotov))
-    {
-        LaunchProjectile(player, type);
-        return true;
-    }
-    PresentUtilityActionResult(result);
-    return result.success;
 }
 
 bool Game::SpendUtilityItem(Player& player, UtilityType type)
@@ -333,7 +408,10 @@ void Game::UseSelectedItem(Player& player)
     const std::optional<UtilityType> utility = ItemToUtility(stack.type);
     if (utility.has_value())
     {
-        UseUtility(player, *utility);
+        // The use rides this tick's command (placePressed) into the
+        // authoritative path (ApplyNetworkPlayerActions) — the same code a
+        // real network client's right click goes through. Feedback comes back
+        // via the utility action result presentation.
         return;
     }
 
@@ -361,19 +439,11 @@ void Game::HandleInventoryInput(Player& player)
         row = mainSlot / 9;
         col = mainSlot % 9;
     };
-    const auto slotAtMouse = []() -> int
+    const auto slotAtMouse = [this]() -> int
     {
+        const Vector2 mouse = GetMousePosition();
         const int slotSize = 50;
         const int gap = 8;
-        const int hotbarWidth = slotSize * kHotbarSlotCount + gap * (kHotbarSlotCount - 1);
-        const int panelWidth = hotbarWidth + 42;
-        const int panelHeight = 322;
-        const int panelX = GetScreenWidth() / 2 - panelWidth / 2;
-        const int panelY = GetScreenHeight() / 2 - panelHeight / 2;
-        const int gridX = panelX + 21;
-        const int gridY = panelY + 58;
-        const int inventoryHotbarY = gridY + 3 * (slotSize + gap) + 14;
-        const Vector2 mouse = GetMousePosition();
 
         const auto hitGrid = [mouse, slotSize, gap](int x, int y, int cols, int rows, int firstSlot) -> int
         {
@@ -396,6 +466,14 @@ void Game::HandleInventoryInput(Player& player)
             return -1;
         };
 
+        const int hotbarWidth = slotSize * kHotbarSlotCount + gap * (kHotbarSlotCount - 1);
+        const int panelWidth = hotbarWidth + 42;
+        const int panelHeight = 322;
+        const int panelX = GetScreenWidth() / 2 - panelWidth / 2;
+        const int panelY = GetScreenHeight() / 2 - panelHeight / 2;
+        const int gridX = panelX + 21;
+        const int gridY = panelY + 58;
+        const int inventoryHotbarY = gridY + 3 * (slotSize + gap) + 14;
         const int mainSlot = hitGrid(gridX, gridY, 9, 3, kHotbarSlotCount);
         if (mainSlot >= 0)
         {
@@ -403,11 +481,51 @@ void Game::HandleInventoryInput(Player& player)
         }
         return hitGrid(gridX, inventoryHotbarY, 9, 1, 0);
     };
+    const auto chestSlotAtMouse = []() -> int
+    {
+        const Vector2 mouse = GetMousePosition();
+        const int slotSize = 34;
+        const int gap = 5;
+        const int cols = 6;
+        const int rows = 6;
+        const int chestPanelWidth = 250;
+        const int chestPanelHeight = 322;
+        const int inventorySlotSize = 50;
+        const int inventoryGap = 8;
+        const int inventoryHotbarWidth = inventorySlotSize * kHotbarSlotCount + inventoryGap * (kHotbarSlotCount - 1);
+        const int inventoryPanelWidth = inventoryHotbarWidth + 42;
+        const int inventoryPanelX = GetScreenWidth() / 2 - inventoryPanelWidth / 2;
+        const int inventoryPanelY = GetScreenHeight() / 2 - chestPanelHeight / 2;
+        const int preferredX = inventoryPanelX + inventoryPanelWidth + 18;
+        const int panelX = std::min(preferredX, GetScreenWidth() - chestPanelWidth - 16);
+        const int panelY = inventoryPanelY;
+        const int gridX = panelX + 14;
+        const int gridY = panelY + 52;
+
+        for (int row = 0; row < rows; ++row)
+        {
+            for (int col = 0; col < cols; ++col)
+            {
+                const Rectangle bounds {
+                    static_cast<float>(gridX + col * (slotSize + gap)),
+                    static_cast<float>(gridY + row * (slotSize + gap)),
+                    static_cast<float>(slotSize),
+                    static_cast<float>(slotSize)
+                };
+                if (CheckCollisionPointRec(mouse, bounds))
+                {
+                    return row * cols + col;
+                }
+            }
+        }
+        return -1;
+    };
 
     int row = 0;
     int col = 0;
     slotToVisual(inventoryCursorSlot_, row, col);
     const int hoveredSlot = slotAtMouse();
+    const int hoveredChestSlot = (teamChestOpen_ || personalChestOpen_) ? chestSlotAtMouse() : -1;
     if (hoveredSlot >= 0)
     {
         inventoryCursorSlot_ = hoveredSlot;
@@ -436,12 +554,109 @@ void Game::HandleInventoryInput(Player& player)
         inventoryCursorSlot_ = currentInput_.hotbarSlot - 1;
     }
 
+    const auto clearHeldStack = [this]()
+    {
+        heldInventoryStack_ = ItemStack {};
+        heldInventoryOrigin_ = HeldInventoryOrigin::None;
+        heldInventoryOriginSlot_ = -1;
+    };
+    const auto holdServerStack = [this](HeldInventoryOrigin origin, int slot, ItemStack stack, int amount)
+    {
+        if (amount > 0 && amount < stack.count)
+        {
+            stack.count = amount;
+        }
+        heldInventoryStack_ = stack;
+        heldInventoryOrigin_ = origin;
+        heldInventoryOriginSlot_ = slot;
+    };
+    const auto queueHeldToPlayerSlot = [this, &player, &clearHeldStack](int targetSlot)
+    {
+        if (heldInventoryOrigin_ == HeldInventoryOrigin::PlayerInventory)
+        {
+            QueuePlayerAction(
+                PlayerActionType::MoveInventory,
+                heldInventoryOriginSlot_,
+                PackPlayerActionParam(
+                    static_cast<int>(InventoryMoveOp::SlotToSlot),
+                    targetSlot,
+                    heldInventoryStack_.count));
+        }
+        else if (heldInventoryOrigin_ == HeldInventoryOrigin::TeamChest)
+        {
+            QueuePlayerAction(
+                PlayerActionType::ChestTransfer,
+                heldInventoryOriginSlot_,
+                PackPlayerActionParam(
+                    static_cast<int>(ChestTransferOp::ChestToPlayerSlot),
+                    targetSlot,
+                    heldInventoryStack_.count));
+        }
+        else
+        {
+            return false;
+        }
+
+        ApplyPendingLocalPlayerAction(player);
+        clearHeldStack();
+        return true;
+    };
+    const auto queueHeldToTeamChestSlot = [this, &player, &clearHeldStack](int targetSlot)
+    {
+        if (heldInventoryOrigin_ == HeldInventoryOrigin::PlayerInventory)
+        {
+            QueuePlayerAction(
+                PlayerActionType::ChestTransfer,
+                heldInventoryOriginSlot_,
+                PackPlayerActionParam(
+                    static_cast<int>(ChestTransferOp::PlayerToChestSlot),
+                    targetSlot,
+                    heldInventoryStack_.count));
+        }
+        else if (heldInventoryOrigin_ == HeldInventoryOrigin::TeamChest)
+        {
+            QueuePlayerAction(
+                PlayerActionType::ChestTransfer,
+                heldInventoryOriginSlot_,
+                PackPlayerActionParam(
+                    static_cast<int>(ChestTransferOp::ChestToChestSlot),
+                    targetSlot,
+                    heldInventoryStack_.count));
+        }
+        else
+        {
+            return false;
+        }
+
+        ApplyPendingLocalPlayerAction(player);
+        clearHeldStack();
+        return true;
+    };
+
     if (IsKeyPressed(KEY_C))
     {
-        TryOpenBaseChest(player);
+        OpenTeamChestUi(player);
     }
     if ((teamChestOpen_ || personalChestOpen_) && IsKeyPressed(KEY_X))
     {
+        if (teamChestOpen_)
+        {
+            if (!heldInventoryStack_.IsEmpty())
+            {
+                SetMessage("Сначала верните предмет в инвентарь.", 1.1f);
+                audio_.PlayDenied();
+                return;
+            }
+
+            const bool depositSelected = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+            QueuePlayerAction(
+                PlayerActionType::ChestTransfer,
+                depositSelected ? inventoryCursorSlot_ : 0,
+                depositSelected ? 0 : 1);
+            ApplyPendingLocalPlayerAction(player);
+            return;
+        }
+
         Inventory* chest = nullptr;
         if (teamChestOpen_)
         {
@@ -467,6 +682,8 @@ void Game::HandleInventoryInput(Player& player)
                 for (int i = 0; i < kInventorySlotCount; ++i)
                 {
                     heldInventoryStack_ = chest->TakeSlot(i);
+                    heldInventoryOrigin_ = HeldInventoryOrigin::None;
+                    heldInventoryOriginSlot_ = -1;
                     if (!heldInventoryStack_.IsEmpty())
                     {
                         SetMessage("Стак взят из сундука.", 1.1f);
@@ -478,12 +695,152 @@ void Game::HandleInventoryInput(Player& player)
         }
         return;
     }
+    if ((teamChestOpen_ || personalChestOpen_) && hoveredChestSlot >= 0)
+    {
+        const bool leftClick = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+        const bool rightClick = IsMouseButtonPressed(MOUSE_BUTTON_RIGHT);
+        const bool activate = leftClick || rightClick;
+        if (activate && teamChestOpen_)
+        {
+            const int teamId = std::clamp(player.GetTeamId(), 0, static_cast<int>(teamChests_.size()) - 1);
+            Inventory& chest = teamChests_[teamId];
+            if (heldInventoryStack_.IsEmpty())
+            {
+                const ItemStack stack = chest.GetSlot(hoveredChestSlot);
+                if (stack.IsEmpty())
+                {
+                    return;
+                }
+                if (rightClick && stack.count <= 1)
+                {
+                    return;
+                }
+                holdServerStack(
+                    HeldInventoryOrigin::TeamChest,
+                    hoveredChestSlot,
+                    stack,
+                    rightClick ? stack.count / 2 : stack.count);
+                SetMessage("Взято из командного сундука.", 1.0f);
+                audio_.PlayPickup();
+                return;
+            }
+
+            if (heldInventoryOrigin_ == HeldInventoryOrigin::TeamChest
+                && heldInventoryOriginSlot_ == hoveredChestSlot)
+            {
+                clearHeldStack();
+                return;
+            }
+
+            if (!queueHeldToTeamChestSlot(hoveredChestSlot))
+            {
+                clearHeldStack();
+            }
+            return;
+        }
+
+        if (activate && personalChestOpen_)
+        {
+            Inventory& chest = personalChest_;
+            if (rightClick && heldInventoryStack_.IsEmpty())
+            {
+                const ItemStack stack = chest.GetSlot(hoveredChestSlot);
+                if (!stack.IsEmpty() && stack.count > 1)
+                {
+                    const int taken = stack.count / 2;
+                    heldInventoryStack_ = ItemStack { stack.type, taken };
+                    heldInventoryOrigin_ = HeldInventoryOrigin::None;
+                    heldInventoryOriginSlot_ = -1;
+                    ItemStack original = chest.TakeSlot(hoveredChestSlot);
+                    original.count -= taken;
+                    chest.PlaceStack(hoveredChestSlot, original);
+                    SetMessage("Стак в сундуке разделен.", 1.0f);
+                    audio_.PlayPickup();
+                }
+                return;
+            }
+
+            if (heldInventoryStack_.IsEmpty())
+            {
+                heldInventoryStack_ = chest.TakeSlot(hoveredChestSlot);
+                heldInventoryOrigin_ = HeldInventoryOrigin::None;
+                heldInventoryOriginSlot_ = -1;
+                if (!heldInventoryStack_.IsEmpty())
+                {
+                    SetMessage("Взято из сундука.", 1.0f);
+                    audio_.PlayPickup();
+                }
+                return;
+            }
+
+            if (chest.PlaceStack(hoveredChestSlot, heldInventoryStack_))
+            {
+                SetMessage("Сложено в сундук.", 1.0f);
+                audio_.PlayPickup();
+                return;
+            }
+
+            heldInventoryStack_ = chest.SwapSlot(hoveredChestSlot, heldInventoryStack_);
+            heldInventoryOrigin_ = HeldInventoryOrigin::None;
+            heldInventoryOriginSlot_ = -1;
+            SetMessage(heldInventoryStack_.IsEmpty() ? "Сложено в сундук." : "Стаки поменяны местами.", 1.0f);
+            audio_.PlayPickup();
+            return;
+        }
+    }
+    const bool shiftDownForInventory = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+    const bool playerSlotKeyActivate = IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE);
+    if (teamChestOpen_ && !shiftDownForInventory && (hoveredSlot >= 0 || playerSlotKeyActivate))
+    {
+        const bool leftClick = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+        const bool rightClick = IsMouseButtonPressed(MOUSE_BUTTON_RIGHT);
+        const bool activate = leftClick || rightClick || playerSlotKeyActivate;
+        if (activate)
+        {
+            const int targetSlot = hoveredSlot >= 0 ? hoveredSlot : inventoryCursorSlot_;
+            Inventory& inventory = player.GetInventory();
+            if (heldInventoryStack_.IsEmpty())
+            {
+                const ItemStack stack = inventory.GetSlot(targetSlot);
+                if (stack.IsEmpty())
+                {
+                    return;
+                }
+                if (rightClick && stack.count <= 1)
+                {
+                    return;
+                }
+                holdServerStack(
+                    HeldInventoryOrigin::PlayerInventory,
+                    targetSlot,
+                    stack,
+                    rightClick ? stack.count / 2 : stack.count);
+                SetMessage(std::string("Взято: ") + ItemDisplayName(heldInventoryStack_.type) + ".", 1.0f);
+                audio_.PlayPickup();
+                return;
+            }
+
+            if (heldInventoryOrigin_ == HeldInventoryOrigin::PlayerInventory
+                && heldInventoryOriginSlot_ == targetSlot)
+            {
+                clearHeldStack();
+                return;
+            }
+
+            if (!queueHeldToPlayerSlot(targetSlot))
+            {
+                clearHeldStack();
+            }
+            return;
+        }
+    }
     if (IsKeyPressed(input_.GetBindings().drop) && heldInventoryStack_.IsEmpty() && inventoryCursorSlot_ >= 0)
     {
         const ItemStack stack = player.GetInventory().GetSlot(inventoryCursorSlot_);
         if (!stack.IsEmpty())
         {
-            TryDropInventoryStack(player, inventoryCursorSlot_, stack.count);
+            QueuePlayerAction(PlayerActionType::DropItem, inventoryCursorSlot_, stack.count);
+            ApplyPendingLocalPlayerAction(player);
         }
         return;
     }
@@ -491,24 +848,55 @@ void Game::HandleInventoryInput(Player& player)
         && heldInventoryStack_.IsEmpty()
         && (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE)))
     {
-        if (TryQuickMoveInventorySlot(player, inventoryCursorSlot_))
+        if (teamChestOpen_)
         {
-            audio_.PlayPickup();
+            QueuePlayerAction(PlayerActionType::ChestTransfer, inventoryCursorSlot_, 0);
         }
+        else if (personalChestOpen_)
+        {
+            Inventory& inventory = player.GetInventory();
+            ItemStack moving = inventory.TakeSlot(inventoryCursorSlot_);
+            for (int i = 0; i < kInventorySlotCount && !moving.IsEmpty(); ++i)
+            {
+                personalChest_.PlaceStack(i, moving);
+            }
+            if (!moving.IsEmpty())
+            {
+                inventory.PlaceStack(inventoryCursorSlot_, moving);
+            }
+            if (moving.IsEmpty())
+            {
+                SetMessage("Сложено в сундук.", 1.0f);
+                audio_.PlayPickup();
+            }
+            else
+            {
+                SetMessage("Сундук заполнен.", 1.0f);
+                audio_.PlayDenied();
+            }
+            return;
+        }
+        else
+        {
+            QueuePlayerAction(PlayerActionType::MoveInventory, inventoryCursorSlot_, 0);
+        }
+        ApplyPendingLocalPlayerAction(player);
         return;
     }
 
+    // Stage 4.4: player-inventory drags are server-style for EVERY local human
+    // — the held stack is a REFERENCE to the origin slot (nothing mutates on
+    // pick-up), and the placement queues a MoveInventory action through the
+    // ONE validated pipeline (MoveInventoryStackToSlot handles move / merge /
+    // full-stack swap / partial amounts). In SP the out-of-band apply lands
+    // the same frame; in MP it ships with the next command.
     if (hoveredSlot >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && heldInventoryStack_.IsEmpty())
     {
         Inventory& inventory = player.GetInventory();
         const ItemStack stack = inventory.GetSlot(hoveredSlot);
         if (!stack.IsEmpty() && stack.count > 1)
         {
-            const int taken = stack.count / 2;
-            heldInventoryStack_ = ItemStack { stack.type, taken };
-            ItemStack original = inventory.TakeSlot(hoveredSlot);
-            original.count -= taken;
-            inventory.PlaceStack(hoveredSlot, original);
+            holdServerStack(HeldInventoryOrigin::PlayerInventory, hoveredSlot, stack, stack.count / 2);
             SetMessage("Стак разделен.", 1.0f);
             audio_.PlayPickup();
         }
@@ -526,7 +914,8 @@ void Game::HandleInventoryInput(Player& player)
     Inventory& inventory = player.GetInventory();
     if (heldInventoryStack_.IsEmpty())
     {
-        heldInventoryStack_ = inventory.TakeSlot(inventoryCursorSlot_);
+        const ItemStack stack = inventory.GetSlot(inventoryCursorSlot_);
+        holdServerStack(HeldInventoryOrigin::PlayerInventory, inventoryCursorSlot_, stack, stack.count);
         if (!heldInventoryStack_.IsEmpty())
         {
             SetMessage(std::string("Взято: ") + ItemDisplayName(heldInventoryStack_.type) + ".", 1.2f);
@@ -535,16 +924,10 @@ void Game::HandleInventoryInput(Player& player)
         return;
     }
 
-    if (inventory.PlaceStack(inventoryCursorSlot_, heldInventoryStack_))
+    if (!queueHeldToPlayerSlot(inventoryCursorSlot_))
     {
-        SetMessage("Стак размещен.", 1.0f);
-        audio_.PlayPickup();
-        return;
+        clearHeldStack();
     }
-
-    heldInventoryStack_ = inventory.SwapSlot(inventoryCursorSlot_, heldInventoryStack_);
-    SetMessage(heldInventoryStack_.IsEmpty() ? "Стак размещен." : "Предметы поменяны местами.", 1.0f);
-    audio_.PlayPickup();
 }
 
 bool Game::TryDropInventoryStack(Player& player, int slot, int amount)
@@ -579,7 +962,8 @@ bool Game::TryDropInventoryStack(Player& player, int slot, int amount)
         0.85f,
         45.0f,
         0.0f,
-        false });
+        false,
+        NextDroppedItemId() });
     SetMessage(std::string("Выброшено: ") + ItemDisplayName(stack.type) + ".", 1.2f);
     AddFloatingText("выброс", player.GetPosition(), Fade(WHITE, 0.85f));
     return true;
@@ -711,14 +1095,37 @@ void Game::UpdateDamageCredits(float dt)
         damageCredits_.end());
 }
 
-void Game::TryOpenBaseChest(Player& player)
+bool Game::OpenTeamChestUi(Player& player)
 {
-    const Team* team = FindTeam(player.GetTeamId());
-    if (team == nullptr || DistanceSquared(player.GetPosition(), team->shopPosition) > 12.0f)
+    // THE chest-UI opener for every local human (Stage 4.3 merged the old
+    // TryOpenBaseChest/TryOpenNetworkTeamChest split). Same proximity rule the
+    // server-side ChestTransfer validation applies (shop 12 / chest 16 sq).
+    if (!IsPlayerNearTeamChestAccess(player))
     {
-    SetMessage("Вернитесь на базу, чтобы открыть сундуки.", 1.4f);
+        SetMessage("Вернитесь на базу, чтобы открыть сундуки.", 1.4f);
         audio_.PlayDenied();
-        return;
+        return false;
+    }
+
+    if (networkMode_ == NetworkMode::LocalClient)
+    {
+        // The personal chest is a local-only stash (not replicated yet), so a
+        // network client only ever opens the TEAM chest — no chest cycling.
+        inventoryOpen_ = true;
+        teamChestOpen_ = true;
+        personalChestOpen_ = false;
+        inventoryCursorSlot_ = selectedHotbarSlot_;
+        heldInventoryStack_ = ItemStack {};
+        heldInventoryOrigin_ = HeldInventoryOrigin::None;
+        heldInventoryOriginSlot_ = -1;
+        shopOpen_ = false;
+        if (!headless_)
+        {
+            EnableCursor();
+        }
+        SetMessage("Командный сундук открыт.", 1.2f);
+        audio_.PlayPickup();
+        return true;
     }
 
     if (!inventoryOpen_)
@@ -744,12 +1151,42 @@ void Game::TryOpenBaseChest(Player& player)
         SetMessage("Командный сундук открыт.", 1.2f);
     }
     audio_.PlayPickup();
+    return true;
+}
+
+bool Game::TryOpenAimedTeamChest(Player& player)
+{
+    // Aimed-chest entry shared by the SP frame path and the MP client session:
+    // a team chest under the crosshair either opens (own team) or denies
+    // (enemy team). Returns true when a team chest was aimed at — the caller
+    // consumes the input either way.
+    const std::optional<RaycastHit> chestHit = RaycastFromAim(player, 4.5f);
+    if (!chestHit.has_value() || chestHit->blockData.type != BlockType::TeamChestBlock)
+    {
+        return false;
+    }
+    if (chestHit->blockData.teamId == player.GetTeamId())
+    {
+        OpenTeamChestUi(player);
+    }
+    else
+    {
+        SetMessage("Это сундук другой команды.", 1.2f);
+        audio_.PlayDenied();
+    }
+    return true;
 }
 
 void Game::CloseChest()
 {
     teamChestOpen_ = false;
     personalChestOpen_ = false;
+}
+
+Vector3 Game::TeamChestDepositPosition(const Team& team) const
+{
+    const Vector3 chestCenter = world_.GridToWorld(team.teamChestBlock);
+    return Vector3 { chestCenter.x, chestCenter.y + 0.68f, chestCenter.z };
 }
 
 bool Game::TryShopPurchase(Player& player, Team& team, int choice, int repeat, std::string& message)
@@ -865,6 +1302,7 @@ void Game::LaunchProjectileDirected(Player& player, UtilityType type, Vector3 di
     }
 
     EnergyProjectile projectile {};
+    projectile.id = NextProjectileId();
     projectile.position = Vector3 {
         player.GetPosition().x + direction.x * 0.75f,
         player.GetPosition().y + 0.82f + direction.y * 0.75f,
@@ -969,14 +1407,33 @@ void Game::DetonateAt(Vector3 position, int ownerTeamId, int ownerPlayerId, floa
         const int scaledDamage = std::max(6, static_cast<int>(static_cast<float>(damage) * (1.0f - std::min(distance / (radius + 0.7f), 0.82f))));
         NoteDamageCredit(player.GetId(), ownerPlayerId, "взрывом");
         player.Damage(scaledDamage);
+        const bool explosionKilledTarget = player.GetHealth() <= 0;
         const Vector3 away = Normalize2D(Vector3 { player.GetPosition().x - position.x, 0.0f, player.GetPosition().z - position.z });
         const float knockback = BiomeKnockbackMultiplier();
         player.ApplyKnockback(Vector3 { away.x * 5.4f * knockback, 2.4f * knockback, away.z * 5.4f * knockback });
+        // Owner-private replicated feedback per AoE victim (push-only, mirrors the
+        // direct-hit push in UpdateProjectiles). ownerPlayerId can be -1 for a
+        // TNT block with no recorded placer — GetPlayer(-1) is nullptr, so this
+        // silently skips the push rather than crashing or inventing an owner.
+        if (const Player* owner = matchSimulation_.GetPlayer(ownerPlayerId))
+        {
+            CombatPresentationEvent presentation {};
+            presentation.valid = true;
+            presentation.event.attackerId = ownerPlayerId;
+            presentation.event.targetId = player.GetId();
+            presentation.event.targetTeamId = player.GetTeamId();
+            presentation.event.position = player.GetPosition();
+            presentation.event.damage = scaledDamage;
+            presentation.event.killed = explosionKilledTarget;
+            presentation.message = owner->GetName() + ": взрыв задел " + player.GetName()
+                + ", урон " + std::to_string(scaledDamage) + ".";
+            PushCombatEventSnapshots(presentation);
+        }
     }
 
     if (createFireZone)
     {
-        hazardZones_.push_back(HazardZone { position, ownerTeamId, ownerPlayerId, 2.4f, blueFire ? 4.0f : 5.0f, 0.0f, blueFire ? 16 : 8, blueFire });
+        hazardZones_.push_back(HazardZone { position, ownerTeamId, ownerPlayerId, 2.4f, blueFire ? 4.0f : 5.0f, 0.0f, blueFire ? 16 : 8, blueFire, NextHazardZoneId() });
     }
 
     AddWorldEffect(
@@ -1014,6 +1471,12 @@ void Game::UpdateAlarmTraps()
                 AddFloatingText("ТРЕВОГА", player.GetPosition(), Color { 255, 235, 142, 255 });
                 AddWorldEffect(player.GetPosition(), Color { 255, 235, 142, 255 }, 0.42f, 0.45f);
                 audio_.PlayDenied();
+                PushWorldEventSnapshot(
+                    WorldEventKind::AlarmTriggered,
+                    -1,
+                    player.GetId(),
+                    trap.ownerTeamId,
+                    player.GetPosition());
                 break;
             }
         }

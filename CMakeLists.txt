@@ -74,6 +74,7 @@ add_executable(DaiBed
     src/MusicSystem.cpp
     src/Player.cpp
     src/ParticleSystem.cpp
+    src/Platform/PreciseTimer.cpp
     src/Platform/ServerProcess.cpp
     src/PostProcessor.cpp
     src/Renderer.cpp

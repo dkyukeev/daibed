@@ -36,6 +36,10 @@ const char* ToString(MessageType type)
         return "FullResyncRequest";
     case MessageType::ReliableAck:
         return "ReliableAck";
+    case MessageType::PlayerCommandBatch:
+        return "PlayerCommandBatch";
+    case MessageType::PacketFragment:
+        return "PacketFragment";
     }
     return "Unknown";
 }
@@ -66,6 +70,7 @@ namespace
 // the decoder allocate or loop unboundedly (the bounds-checked reads would fail
 // eventually, but we reject early and cheaply).
 constexpr std::uint32_t kMaxArrayLen = 1u << 20;
+constexpr std::uint32_t kMaxCommandBatchLen = 8;
 
 // --- Little-endian byte writer ----------------------------------------------
 class ByteWriter
@@ -245,6 +250,7 @@ void WritePlayerCommand(ByteWriter& w, const PlayerCommand& c)
     w.I32(c.actionType);
     w.I32(c.actionParamA);
     w.I32(c.actionParamB);
+    w.U32(c.rewindTick);
 }
 void ReadPlayerCommand(ByteReader& r, PlayerCommand& c)
 {
@@ -281,6 +287,7 @@ void ReadPlayerCommand(ByteReader& r, PlayerCommand& c)
     c.actionType = r.I32();
     c.actionParamA = r.I32();
     c.actionParamB = r.I32();
+    c.rewindTick = r.U32();
 }
 
 // --- Snapshot pieces ---------------------------------------------------------
@@ -292,6 +299,12 @@ void WriteInventory(ByteWriter& w, const InventorySnapshot& inv)
     w.I32(inv.resources[2]);
     w.U32(static_cast<std::uint32_t>(inv.hotbar.size()));
     for (const ItemStackSnapshot& slot : inv.hotbar)
+    {
+        w.I32(slot.itemType);
+        w.I32(slot.count);
+    }
+    w.U32(static_cast<std::uint32_t>(inv.main.size()));
+    for (const ItemStackSnapshot& slot : inv.main)
     {
         w.I32(slot.itemType);
         w.I32(slot.count);
@@ -312,6 +325,171 @@ void ReadInventory(ByteReader& r, InventorySnapshot& inv)
         slot.count = r.I32();
         inv.hotbar.push_back(slot);
     }
+    const std::uint32_t mainCount = r.Count();
+    inv.main.clear();
+    for (std::uint32_t i = 0; i < mainCount && r.Ok(); ++i)
+    {
+        ItemStackSnapshot slot;
+        slot.itemType = r.I32();
+        slot.count = r.I32();
+        inv.main.push_back(slot);
+    }
+}
+
+void WriteAbilityHud(ByteWriter& w, const HeroAbilityHudSnapshot& hud)
+{
+    w.Bool(hud.present);
+    w.F32(hud.active1Cooldown);
+    w.F32(hud.active1ActiveTimer);
+    w.F32(hud.active2Cooldown);
+    w.F32(hud.active2ActiveTimer);
+    w.F32(hud.ultimateCooldown);
+    w.F32(hud.ultimateActiveTimer);
+    w.F32(hud.ultimateCharge);
+    w.Bool(hud.ultimatePrimed);
+    w.F32(hud.bowDrawTimer);
+    w.I32(hud.blasterState);
+    w.F32(hud.blasterLoadTimer);
+}
+void ReadAbilityHud(ByteReader& r, HeroAbilityHudSnapshot& hud)
+{
+    hud.present = r.Bool();
+    hud.active1Cooldown = r.F32();
+    hud.active1ActiveTimer = r.F32();
+    hud.active2Cooldown = r.F32();
+    hud.active2ActiveTimer = r.F32();
+    hud.ultimateCooldown = r.F32();
+    hud.ultimateActiveTimer = r.F32();
+    hud.ultimateCharge = r.F32();
+    hud.ultimatePrimed = r.Bool();
+    hud.bowDrawTimer = r.F32();
+    hud.blasterState = r.I32();
+    hud.blasterLoadTimer = r.F32();
+}
+
+void WriteTeamChestSnapshot(ByteWriter& w, const TeamChestSnapshot& chest)
+{
+    w.I32(chest.teamId);
+    w.I32(chest.resources[0]);
+    w.I32(chest.resources[1]);
+    w.I32(chest.resources[2]);
+    w.U32(static_cast<std::uint32_t>(chest.slots.size()));
+    for (const ItemStackSnapshot& slot : chest.slots)
+    {
+        w.I32(slot.itemType);
+        w.I32(slot.count);
+    }
+}
+
+void ReadTeamChestSnapshot(ByteReader& r, TeamChestSnapshot& chest)
+{
+    chest.teamId = r.I32();
+    chest.resources[0] = r.I32();
+    chest.resources[1] = r.I32();
+    chest.resources[2] = r.I32();
+    const std::uint32_t count = r.Count();
+    chest.slots.clear();
+    for (std::uint32_t i = 0; i < count && r.Ok(); ++i)
+    {
+        ItemStackSnapshot slot;
+        slot.itemType = r.I32();
+        slot.count = r.I32();
+        chest.slots.push_back(slot);
+    }
+}
+
+void WritePlayerScoreSnapshot(ByteWriter& w, const PlayerScoreSnapshot& score)
+{
+    w.I32(score.playerId);
+    w.I32(score.kills);
+    w.I32(score.deaths);
+    w.I32(score.finalDeaths);
+    w.I32(score.coreDamage);
+    w.I32(score.coresDestroyed);
+}
+
+void ReadPlayerScoreSnapshot(ByteReader& r, PlayerScoreSnapshot& score)
+{
+    score.playerId = r.I32();
+    score.kills = r.I32();
+    score.deaths = r.I32();
+    score.finalDeaths = r.I32();
+    score.coreDamage = r.I32();
+    score.coresDestroyed = r.I32();
+}
+
+void WriteActionResultSnapshot(ByteWriter& w, const ActionResultSnapshot& result)
+{
+    w.I32(result.playerId);
+    w.U32(result.resultSeq);
+    w.U32(result.actionSeq);
+    w.I32(result.actionType);
+    w.I32(result.subjectType);
+    w.I32(result.actorPlayerId);
+    w.I32(result.targetPlayerId);
+    w.I32(result.targetTeamId);
+    w.I32(result.amount);
+    w.I32(result.flags);
+    w.Bool(result.success);
+    WriteVec3(w, result.position);
+    w.Str(result.message);
+    w.I32(result.color[0]);
+    w.I32(result.color[1]);
+    w.I32(result.color[2]);
+    w.I32(result.color[3]);
+    w.F32(result.seconds);
+    w.F32(result.radius);
+}
+
+void ReadActionResultSnapshot(ByteReader& r, ActionResultSnapshot& result)
+{
+    result.playerId = r.I32();
+    result.resultSeq = r.U32();
+    result.actionSeq = r.U32();
+    result.actionType = r.I32();
+    result.subjectType = r.I32();
+    result.actorPlayerId = r.I32();
+    result.targetPlayerId = r.I32();
+    result.targetTeamId = r.I32();
+    result.amount = r.I32();
+    result.flags = r.I32();
+    result.success = r.Bool();
+    result.position = ReadVec3(r);
+    result.message = r.Str();
+    result.color[0] = r.I32();
+    result.color[1] = r.I32();
+    result.color[2] = r.I32();
+    result.color[3] = r.I32();
+    result.seconds = r.F32();
+    result.radius = r.F32();
+}
+
+void WriteWorldEventSnapshot(ByteWriter& w, const WorldEventSnapshot& event)
+{
+    w.U32(event.eventSeq);
+    w.I32(event.kind);
+    w.I32(event.actorPlayerId);
+    w.I32(event.targetPlayerId);
+    w.I32(event.targetTeamId);
+    WriteVec3(w, event.position);
+    w.I32(event.subjectType);
+    w.I32(event.amount);
+    w.I32(event.flags);
+    w.Str(event.cause);
+}
+
+void ReadWorldEventSnapshot(ByteReader& r, WorldEventSnapshot& event)
+{
+    event.eventSeq = r.U32();
+    event.kind = r.I32();
+    event.actorPlayerId = r.I32();
+    event.targetPlayerId = r.I32();
+    event.targetTeamId = r.I32();
+    event.position = ReadVec3(r);
+    event.subjectType = r.I32();
+    event.amount = r.I32();
+    event.flags = r.I32();
+    event.cause = r.Str();
 }
 
 void WritePlayerSnapshot(ByteWriter& w, const PlayerSnapshot& p)
@@ -333,6 +511,7 @@ void WritePlayerSnapshot(ByteWriter& w, const PlayerSnapshot& p)
     w.F32(p.animationTimer);
     w.F32(p.animationDuration);
     WriteInventory(w, p.inventory);
+    WriteAbilityHud(w, p.abilityHud);
     w.I32(p.disguiseTeamId);
     w.I32(p.disguiseHeroId);
 }
@@ -355,6 +534,7 @@ void ReadPlayerSnapshot(ByteReader& r, PlayerSnapshot& p)
     p.animationTimer = r.F32();
     p.animationDuration = r.F32();
     ReadInventory(r, p.inventory);
+    ReadAbilityHud(r, p.abilityHud);
     p.disguiseTeamId = r.I32();
     p.disguiseHeroId = r.I32();
 }
@@ -402,15 +582,27 @@ void ReadPickupSnapshot(ByteReader& r, PickupSnapshot& pickup)
 
 void WriteDroppedItemSnapshot(ByteWriter& w, const DroppedItemSnapshot& dropped)
 {
+    w.I32(dropped.id);
     w.I32(dropped.itemType);
     w.I32(dropped.count);
     WriteVec3(w, dropped.position);
+    WriteVec3(w, dropped.velocity);
+    w.I32(dropped.ownerPlayerId);
+    w.F32(dropped.ownerPickupDelay);
+    w.F32(dropped.lifetime);
+    w.F32(dropped.age);
 }
 void ReadDroppedItemSnapshot(ByteReader& r, DroppedItemSnapshot& dropped)
 {
+    dropped.id = r.I32();
     dropped.itemType = r.I32();
     dropped.count = r.I32();
     dropped.position = ReadVec3(r);
+    dropped.velocity = ReadVec3(r);
+    dropped.ownerPlayerId = r.I32();
+    dropped.ownerPickupDelay = r.F32();
+    dropped.lifetime = r.F32();
+    dropped.age = r.F32();
 }
 
 void WriteBlockDelta(ByteWriter& w, const BlockDelta& d)
@@ -686,10 +878,20 @@ void WriteSnapshotSections(ByteWriter& payload, const MatchSnapshot& snapshot)
     {
         WritePlayerSnapshot(payload, player);
     }
+    payload.U32(static_cast<std::uint32_t>(snapshot.matchScores.size()));
+    for (const PlayerScoreSnapshot& score : snapshot.matchScores)
+    {
+        WritePlayerScoreSnapshot(payload, score);
+    }
     payload.U32(static_cast<std::uint32_t>(snapshot.cores.size()));
     for (const CoreSnapshot& core : snapshot.cores)
     {
         WriteCoreSnapshot(payload, core);
+    }
+    payload.U32(static_cast<std::uint32_t>(snapshot.teamChests.size()));
+    for (const TeamChestSnapshot& chest : snapshot.teamChests)
+    {
+        WriteTeamChestSnapshot(payload, chest);
     }
     payload.U32(static_cast<std::uint32_t>(snapshot.generators.size()));
     for (const GeneratorSnapshot& generator : snapshot.generators)
@@ -736,6 +938,16 @@ void WriteSnapshotSections(ByteWriter& payload, const MatchSnapshot& snapshot)
     {
         WriteStatusEffectSnapshot(payload, status);
     }
+    payload.U32(static_cast<std::uint32_t>(snapshot.actionResults.size()));
+    for (const ActionResultSnapshot& result : snapshot.actionResults)
+    {
+        WriteActionResultSnapshot(payload, result);
+    }
+    payload.U32(static_cast<std::uint32_t>(snapshot.worldEvents.size()));
+    for (const WorldEventSnapshot& event : snapshot.worldEvents)
+    {
+        WriteWorldEventSnapshot(payload, event);
+    }
 }
 
 void ReadSnapshotSections(ByteReader& r, MatchSnapshot& out)
@@ -748,6 +960,14 @@ void ReadSnapshotSections(ByteReader& r, MatchSnapshot& out)
         ReadPlayerSnapshot(r, player);
         out.players.push_back(player);
     }
+    out.matchScores.clear();
+    const std::uint32_t scoreCount = r.Count();
+    for (std::uint32_t i = 0; i < scoreCount && r.Ok(); ++i)
+    {
+        PlayerScoreSnapshot score;
+        ReadPlayerScoreSnapshot(r, score);
+        out.matchScores.push_back(score);
+    }
     out.cores.clear();
     const std::uint32_t coreCount = r.Count();
     for (std::uint32_t i = 0; i < coreCount && r.Ok(); ++i)
@@ -755,6 +975,14 @@ void ReadSnapshotSections(ByteReader& r, MatchSnapshot& out)
         CoreSnapshot core;
         ReadCoreSnapshot(r, core);
         out.cores.push_back(core);
+    }
+    out.teamChests.clear();
+    const std::uint32_t teamChestCount = r.Count();
+    for (std::uint32_t i = 0; i < teamChestCount && r.Ok(); ++i)
+    {
+        TeamChestSnapshot chest;
+        ReadTeamChestSnapshot(r, chest);
+        out.teamChests.push_back(chest);
     }
     out.generators.clear();
     const std::uint32_t generatorCount = r.Count();
@@ -827,6 +1055,22 @@ void ReadSnapshotSections(ByteReader& r, MatchSnapshot& out)
         StatusEffectSnapshot effect;
         ReadStatusEffectSnapshot(r, effect);
         out.statusEffects.push_back(effect);
+    }
+    out.actionResults.clear();
+    const std::uint32_t actionResultCount = r.Count();
+    for (std::uint32_t i = 0; i < actionResultCount && r.Ok(); ++i)
+    {
+        ActionResultSnapshot result;
+        ReadActionResultSnapshot(r, result);
+        out.actionResults.push_back(result);
+    }
+    out.worldEvents.clear();
+    const std::uint32_t worldEventCount = r.Count();
+    for (std::uint32_t i = 0; i < worldEventCount && r.Ok(); ++i)
+    {
+        WorldEventSnapshot event;
+        ReadWorldEventSnapshot(r, event);
+        out.worldEvents.push_back(event);
     }
 }
 
@@ -940,6 +1184,19 @@ std::vector<std::uint8_t> EncodePlayerCommand(std::uint32_t sequence, const Play
     return FramePacket(MessageType::PlayerCommand, sequence, command.tick, payload.Bytes());
 }
 
+std::vector<std::uint8_t> EncodePlayerCommandBatch(
+    std::uint32_t sequence, const std::vector<PlayerCommand>& commands)
+{
+    ByteWriter payload;
+    payload.U32(static_cast<std::uint32_t>(commands.size()));
+    for (const PlayerCommand& command : commands)
+    {
+        WritePlayerCommand(payload, command);
+    }
+    const std::uint32_t tick = commands.empty() ? 0u : commands.back().tick;
+    return FramePacket(MessageType::PlayerCommandBatch, sequence, tick, payload.Bytes());
+}
+
 std::vector<std::uint8_t> EncodeMatchSnapshot(std::uint32_t sequence, const MatchSnapshot& snapshot)
 {
     ByteWriter payload;
@@ -966,12 +1223,26 @@ std::vector<std::uint8_t> EncodeSnapshotDelta(std::uint32_t sequence, const Matc
     }
     WriteRemovedI32(payload, delta.removedPlayerIds);
 
+    payload.U32(static_cast<std::uint32_t>(delta.matchScores.size()));
+    for (const PlayerScoreSnapshot& score : delta.matchScores)
+    {
+        WritePlayerScoreSnapshot(payload, score);
+    }
+    WriteRemovedI32(payload, delta.removedScorePlayerIds);
+
     payload.U32(static_cast<std::uint32_t>(delta.cores.size()));
     for (const CoreSnapshot& core : delta.cores)
     {
         WriteCoreSnapshot(payload, core);
     }
     WriteRemovedI32(payload, delta.removedCoreTeamIds);
+
+    payload.U32(static_cast<std::uint32_t>(delta.teamChests.size()));
+    for (const TeamChestSnapshot& chest : delta.teamChests)
+    {
+        WriteTeamChestSnapshot(payload, chest);
+    }
+    WriteRemovedI32(payload, delta.removedTeamChestTeamIds);
 
     payload.U32(static_cast<std::uint32_t>(delta.generators.size()));
     for (const IndexedGeneratorSnapshot& entry : delta.generators)
@@ -1037,6 +1308,17 @@ std::vector<std::uint8_t> EncodeSnapshotDelta(std::uint32_t sequence, const Matc
         WriteStatusEffectSnapshot(payload, status);
     }
     WriteRemovedI32(payload, delta.removedStatusEffectIds);
+
+    payload.U32(static_cast<std::uint32_t>(delta.actionResults.size()));
+    for (const ActionResultSnapshot& result : delta.actionResults)
+    {
+        WriteActionResultSnapshot(payload, result);
+    }
+    payload.U32(static_cast<std::uint32_t>(delta.worldEvents.size()));
+    for (const WorldEventSnapshot& event : delta.worldEvents)
+    {
+        WriteWorldEventSnapshot(payload, event);
+    }
 
     return FramePacket(MessageType::SnapshotDelta, sequence, delta.tick, payload.Bytes());
 }
@@ -1206,6 +1488,56 @@ DecodeStatus DecodeReliableAck(
     return r.Ok() ? DecodeStatus::Ok : DecodeStatus::BadPayload;
 }
 
+std::vector<std::uint8_t> EncodePacketFragment(
+    std::uint32_t sequence, std::uint32_t fragmentId, std::uint16_t fragmentIndex,
+    std::uint16_t fragmentCount, std::uint32_t totalSize,
+    const std::uint8_t* chunk, std::size_t chunkSize)
+{
+    ByteWriter payload;
+    payload.U32(fragmentId);
+    payload.U16(fragmentIndex);
+    payload.U16(fragmentCount);
+    payload.U32(totalSize);
+    payload.U32(static_cast<std::uint32_t>(chunkSize));
+    for (std::size_t i = 0; i < chunkSize; ++i)
+    {
+        payload.U8(chunk[i]);
+    }
+    return FramePacket(MessageType::PacketFragment, sequence, fragmentId, payload.Bytes());
+}
+
+DecodeStatus DecodePacketFragment(
+    const std::uint8_t* data, std::size_t size, PacketHeader& header,
+    std::uint32_t& fragmentId, std::uint16_t& fragmentIndex, std::uint16_t& fragmentCount,
+    std::uint32_t& totalSize, std::vector<std::uint8_t>& chunk)
+{
+    ByteReader r(data, size);
+    const DecodeStatus status = ReadAndValidateHeader(r, header);
+    if (status != DecodeStatus::Ok)
+    {
+        return status;
+    }
+    if (header.type != MessageType::PacketFragment)
+    {
+        return DecodeStatus::WrongType;
+    }
+    fragmentId = r.U32();
+    fragmentIndex = r.U16();
+    fragmentCount = r.U16();
+    totalSize = r.U32();
+    const std::uint32_t chunkSize = r.U32();
+    if (!r.Ok() || chunkSize > kMaxArrayLen || chunkSize > r.Remaining())
+    {
+        return DecodeStatus::BadPayload;
+    }
+    chunk.resize(chunkSize);
+    for (std::uint32_t i = 0; i < chunkSize; ++i)
+    {
+        chunk[i] = r.U8();
+    }
+    return r.Ok() ? DecodeStatus::Ok : DecodeStatus::BadPayload;
+}
+
 DecodeStatus DecodeConnectAck(const std::uint8_t* data, std::size_t size,
                               PacketHeader& header, int& assignedPlayerId)
 {
@@ -1245,6 +1577,41 @@ DecodeStatus DecodePlayerCommand(const std::uint8_t* data, std::size_t size,
     }
     ReadPlayerCommand(r, out);
     return r.Ok() ? DecodeStatus::Ok : DecodeStatus::BadPayload;
+}
+
+DecodeStatus DecodePlayerCommandBatch(
+    const std::uint8_t* data, std::size_t size, PacketHeader& header,
+    std::vector<PlayerCommand>& out)
+{
+    ByteReader r(data, size);
+    const DecodeStatus status = ReadAndValidateHeader(r, header);
+    if (status != DecodeStatus::Ok)
+    {
+        return status;
+    }
+    if (header.type != MessageType::PlayerCommandBatch)
+    {
+        return DecodeStatus::WrongType;
+    }
+    const std::uint32_t count = r.Count();
+    if (count > kMaxCommandBatchLen)
+    {
+        return DecodeStatus::BadPayload;
+    }
+    std::vector<PlayerCommand> commands;
+    commands.reserve(count);
+    for (std::uint32_t i = 0; i < count && r.Ok(); ++i)
+    {
+        PlayerCommand command;
+        ReadPlayerCommand(r, command);
+        commands.push_back(command);
+    }
+    if (!r.Ok())
+    {
+        return DecodeStatus::BadPayload;
+    }
+    out = std::move(commands);
+    return DecodeStatus::Ok;
 }
 
 DecodeStatus DecodeMatchSnapshot(const std::uint8_t* data, std::size_t size,
@@ -1297,6 +1664,16 @@ DecodeStatus DecodeSnapshotDelta(const std::uint8_t* data, std::size_t size,
     }
     ReadRemovedI32(r, out.removedPlayerIds);
 
+    out.matchScores.clear();
+    const std::uint32_t scoreCount = r.Count();
+    for (std::uint32_t i = 0; i < scoreCount && r.Ok(); ++i)
+    {
+        PlayerScoreSnapshot score;
+        ReadPlayerScoreSnapshot(r, score);
+        out.matchScores.push_back(score);
+    }
+    ReadRemovedI32(r, out.removedScorePlayerIds);
+
     out.cores.clear();
     const std::uint32_t coreCount = r.Count();
     for (std::uint32_t i = 0; i < coreCount && r.Ok(); ++i)
@@ -1306,6 +1683,16 @@ DecodeStatus DecodeSnapshotDelta(const std::uint8_t* data, std::size_t size,
         out.cores.push_back(core);
     }
     ReadRemovedI32(r, out.removedCoreTeamIds);
+
+    out.teamChests.clear();
+    const std::uint32_t teamChestCount = r.Count();
+    for (std::uint32_t i = 0; i < teamChestCount && r.Ok(); ++i)
+    {
+        TeamChestSnapshot chest;
+        ReadTeamChestSnapshot(r, chest);
+        out.teamChests.push_back(chest);
+    }
+    ReadRemovedI32(r, out.removedTeamChestTeamIds);
 
     out.generators.clear();
     const std::uint32_t generatorCount = r.Count();
@@ -1399,6 +1786,23 @@ DecodeStatus DecodeSnapshotDelta(const std::uint8_t* data, std::size_t size,
     }
     ReadRemovedI32(r, out.removedStatusEffectIds);
 
+    out.actionResults.clear();
+    const std::uint32_t actionResultCount = r.Count();
+    for (std::uint32_t i = 0; i < actionResultCount && r.Ok(); ++i)
+    {
+        ActionResultSnapshot result;
+        ReadActionResultSnapshot(r, result);
+        out.actionResults.push_back(result);
+    }
+    out.worldEvents.clear();
+    const std::uint32_t worldEventCount = r.Count();
+    for (std::uint32_t i = 0; i < worldEventCount && r.Ok(); ++i)
+    {
+        WorldEventSnapshot event;
+        ReadWorldEventSnapshot(r, event);
+        out.worldEvents.push_back(event);
+    }
+
     return r.Ok() ? DecodeStatus::Ok : DecodeStatus::BadPayload;
 }
 
@@ -1430,12 +1834,16 @@ bool CommandEqual(const PlayerCommand& a, const PlayerCommand& b)
         && a.useDash == b.useDash && a.useShoot == b.useShoot && a.useFireball == b.useFireball
         && a.useMolotov == b.useMolotov && a.useAlarm == b.useAlarm
         && a.actionSeq == b.actionSeq && a.actionType == b.actionType
-        && a.actionParamA == b.actionParamA && a.actionParamB == b.actionParamB;
+        && a.actionParamA == b.actionParamA && a.actionParamB == b.actionParamB
+        && a.rewindTick == b.rewindTick;
 }
 
 bool InventoryEqual(const InventorySnapshot& a, const InventorySnapshot& b)
 {
-    if (a.present != b.present || a.resources != b.resources || a.hotbar.size() != b.hotbar.size())
+    if (a.present != b.present
+        || a.resources != b.resources
+        || a.hotbar.size() != b.hotbar.size()
+        || a.main.size() != b.main.size())
     {
         return false;
     }
@@ -1446,7 +1854,63 @@ bool InventoryEqual(const InventorySnapshot& a, const InventorySnapshot& b)
             return false;
         }
     }
+    for (std::size_t i = 0; i < a.main.size(); ++i)
+    {
+        if (a.main[i].itemType != b.main[i].itemType || a.main[i].count != b.main[i].count)
+        {
+            return false;
+        }
+    }
     return true;
+}
+
+bool AbilityHudEqual(const HeroAbilityHudSnapshot& a, const HeroAbilityHudSnapshot& b)
+{
+    return a.present == b.present
+        && FloatEqual(a.active1Cooldown, b.active1Cooldown)
+        && FloatEqual(a.active1ActiveTimer, b.active1ActiveTimer)
+        && FloatEqual(a.active2Cooldown, b.active2Cooldown)
+        && FloatEqual(a.active2ActiveTimer, b.active2ActiveTimer)
+        && FloatEqual(a.ultimateCooldown, b.ultimateCooldown)
+        && FloatEqual(a.ultimateActiveTimer, b.ultimateActiveTimer)
+        && FloatEqual(a.ultimateCharge, b.ultimateCharge)
+        && a.ultimatePrimed == b.ultimatePrimed
+        && FloatEqual(a.bowDrawTimer, b.bowDrawTimer)
+        && a.blasterState == b.blasterState
+        && FloatEqual(a.blasterLoadTimer, b.blasterLoadTimer);
+}
+
+bool ItemSlotsEqual(const std::vector<ItemStackSnapshot>& a, const std::vector<ItemStackSnapshot>& b)
+{
+    if (a.size() != b.size())
+    {
+        return false;
+    }
+    for (std::size_t i = 0; i < a.size(); ++i)
+    {
+        if (a[i].itemType != b[i].itemType || a[i].count != b[i].count)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool TeamChestEqual(const TeamChestSnapshot& a, const TeamChestSnapshot& b)
+{
+    return a.teamId == b.teamId
+        && a.resources == b.resources
+        && ItemSlotsEqual(a.slots, b.slots);
+}
+
+bool PlayerScoreEqual(const PlayerScoreSnapshot& a, const PlayerScoreSnapshot& b)
+{
+    return a.playerId == b.playerId
+        && a.kills == b.kills
+        && a.deaths == b.deaths
+        && a.finalDeaths == b.finalDeaths
+        && a.coreDamage == b.coreDamage
+        && a.coresDestroyed == b.coresDestroyed;
 }
 
 bool PlayerEqual(const PlayerSnapshot& a, const PlayerSnapshot& b)
@@ -1461,6 +1925,7 @@ bool PlayerEqual(const PlayerSnapshot& a, const PlayerSnapshot& b)
         && FloatEqual(a.animationTimer, b.animationTimer)
         && FloatEqual(a.animationDuration, b.animationDuration)
         && InventoryEqual(a.inventory, b.inventory)
+        && AbilityHudEqual(a.abilityHud, b.abilityHud)
         && a.disguiseTeamId == b.disguiseTeamId && a.disguiseHeroId == b.disguiseHeroId;
 }
 
@@ -1484,8 +1949,12 @@ bool PickupEqual(const PickupSnapshot& a, const PickupSnapshot& b)
 
 bool DroppedItemEqual(const DroppedItemSnapshot& a, const DroppedItemSnapshot& b)
 {
-    return a.itemType == b.itemType && a.count == b.count
-        && VecEqual(a.position, b.position);
+    return a.id == b.id && a.itemType == b.itemType && a.count == b.count
+        && VecEqual(a.position, b.position) && VecEqual(a.velocity, b.velocity)
+        && a.ownerPlayerId == b.ownerPlayerId
+        && a.ownerPickupDelay == b.ownerPickupDelay
+        && a.lifetime == b.lifetime
+        && a.age == b.age;
 }
 
 bool DeltaEqual(const BlockDelta& a, const BlockDelta& b)
@@ -1535,12 +2004,49 @@ bool StatusEffectEqual(const StatusEffectSnapshot& a, const StatusEffectSnapshot
         && a.amount == b.amount && a.visibility == b.visibility;
 }
 
+bool ActionResultEqual(const ActionResultSnapshot& a, const ActionResultSnapshot& b)
+{
+    return a.playerId == b.playerId
+        && a.resultSeq == b.resultSeq
+        && a.actionSeq == b.actionSeq
+        && a.actionType == b.actionType
+        && a.subjectType == b.subjectType
+        && a.actorPlayerId == b.actorPlayerId
+        && a.targetPlayerId == b.targetPlayerId
+        && a.targetTeamId == b.targetTeamId
+        && a.amount == b.amount
+        && a.flags == b.flags
+        && a.success == b.success
+        && VecEqual(a.position, b.position)
+        && a.message == b.message
+        && a.color == b.color
+        && FloatEqual(a.seconds, b.seconds)
+        && FloatEqual(a.radius, b.radius);
+}
+
+bool WorldEventEqual(const WorldEventSnapshot& a, const WorldEventSnapshot& b)
+{
+    return a.eventSeq == b.eventSeq
+        && a.kind == b.kind
+        && a.actorPlayerId == b.actorPlayerId
+        && a.targetPlayerId == b.targetPlayerId
+        && a.targetTeamId == b.targetTeamId
+        && VecEqual(a.position, b.position)
+        && a.subjectType == b.subjectType
+        && a.amount == b.amount
+        && a.flags == b.flags
+        && a.cause == b.cause;
+}
+
 bool SnapshotEqual(const MatchSnapshot& a, const MatchSnapshot& b)
 {
     if (a.tick != b.tick || a.lastProcessedCommandTick != b.lastProcessedCommandTick
         || a.matchTime != b.matchTime || a.phase != b.phase
         || a.winnerTeamId != b.winnerTeamId
-        || a.players.size() != b.players.size() || a.cores.size() != b.cores.size()
+        || a.players.size() != b.players.size()
+        || a.matchScores.size() != b.matchScores.size()
+        || a.cores.size() != b.cores.size()
+        || a.teamChests.size() != b.teamChests.size()
         || a.generators.size() != b.generators.size()
         || a.pickups.size() != b.pickups.size()
         || a.droppedItems.size() != b.droppedItems.size()
@@ -1549,7 +2055,9 @@ bool SnapshotEqual(const MatchSnapshot& a, const MatchSnapshot& b)
         || a.explosives.size() != b.explosives.size()
         || a.hazardZones.size() != b.hazardZones.size()
         || a.heroDevices.size() != b.heroDevices.size()
-        || a.statusEffects.size() != b.statusEffects.size())
+        || a.statusEffects.size() != b.statusEffects.size()
+        || a.actionResults.size() != b.actionResults.size()
+        || a.worldEvents.size() != b.worldEvents.size())
     {
         return false;
     }
@@ -1560,9 +2068,23 @@ bool SnapshotEqual(const MatchSnapshot& a, const MatchSnapshot& b)
             return false;
         }
     }
+    for (std::size_t i = 0; i < a.matchScores.size(); ++i)
+    {
+        if (!PlayerScoreEqual(a.matchScores[i], b.matchScores[i]))
+        {
+            return false;
+        }
+    }
     for (std::size_t i = 0; i < a.cores.size(); ++i)
     {
         if (!CoreEqual(a.cores[i], b.cores[i]))
+        {
+            return false;
+        }
+    }
+    for (std::size_t i = 0; i < a.teamChests.size(); ++i)
+    {
+        if (!TeamChestEqual(a.teamChests[i], b.teamChests[i]))
         {
             return false;
         }
@@ -1626,6 +2148,20 @@ bool SnapshotEqual(const MatchSnapshot& a, const MatchSnapshot& b)
     for (std::size_t i = 0; i < a.statusEffects.size(); ++i)
     {
         if (!StatusEffectEqual(a.statusEffects[i], b.statusEffects[i]))
+        {
+            return false;
+        }
+    }
+    for (std::size_t i = 0; i < a.actionResults.size(); ++i)
+    {
+        if (!ActionResultEqual(a.actionResults[i], b.actionResults[i]))
+        {
+            return false;
+        }
+    }
+    for (std::size_t i = 0; i < a.worldEvents.size(); ++i)
+    {
+        if (!WorldEventEqual(a.worldEvents[i], b.worldEvents[i]))
         {
             return false;
         }
@@ -1723,6 +2259,7 @@ PlayerCommand MakeSampleCommand()
     c.actionType = static_cast<int>(PlayerActionType::BuyItem);
     c.actionParamA = 101;
     c.actionParamB = 4;
+    c.rewindTick = 1200;
     return c;
 }
 
@@ -1755,6 +2292,19 @@ MatchSnapshot MakeSampleSnapshot()
     p0.inventory.present = true;
     p0.inventory.resources = { 13, 4, 1 };
     p0.inventory.hotbar = { { 9, 64 }, { 14, 1 }, { 0, 0 } };
+    p0.inventory.main = { { 17, 2 }, { 18, 4 }, { 0, 0 } };
+    p0.abilityHud.present = true;
+    p0.abilityHud.active1Cooldown = 3.2f;
+    p0.abilityHud.active1ActiveTimer = 0.0f;
+    p0.abilityHud.active2Cooldown = 0.0f;
+    p0.abilityHud.active2ActiveTimer = 1.4f;
+    p0.abilityHud.ultimateCooldown = 12.5f;
+    p0.abilityHud.ultimateActiveTimer = 0.0f;
+    p0.abilityHud.ultimateCharge = 64.0f;
+    p0.abilityHud.ultimatePrimed = true;
+    p0.abilityHud.bowDrawTimer = 0.42f;
+    p0.abilityHud.blasterState = 1;
+    p0.abilityHud.blasterLoadTimer = 0.18f;
     p0.disguiseTeamId = -1;
     p0.disguiseHeroId = -1;
     s.players.push_back(p0);
@@ -1778,13 +2328,22 @@ MatchSnapshot MakeSampleSnapshot()
     p1.disguiseHeroId = 7;
     s.players.push_back(p1);
 
+    s.matchScores.push_back(PlayerScoreSnapshot { 1, 5, 2, 0, 128, 1 });
+    s.matchScores.push_back(PlayerScoreSnapshot { 2, 1, 4, 1, 32, 0 });
+
     s.cores.push_back(CoreSnapshot { 0, 500, 500, true });
     s.cores.push_back(CoreSnapshot { 1, 0, 500, false });
+
+    TeamChestSnapshot chest;
+    chest.teamId = 0;
+    chest.resources = { 16, 3, 1 };
+    chest.slots = { { 23, 16 }, { 24, 3 }, { 6, 12 }, { 0, 0 } };
+    s.teamChests.push_back(chest);
 
     s.generators.push_back(GeneratorSnapshot { 0, 0, Vec3 { -10.0f, 1.0f, 3.0f } });
     s.generators.push_back(GeneratorSnapshot { 2, -1, Vec3 { 0.0f, 2.0f, 0.0f } });
     s.pickups.push_back(PickupSnapshot { 0, 4, Vec3 { -9.0f, 1.2f, 3.5f } });
-    s.droppedItems.push_back(DroppedItemSnapshot { 14, 2, Vec3 { 6.0f, 1.3f, -4.0f } });
+    s.droppedItems.push_back(DroppedItemSnapshot { 401, 14, 2, Vec3 { 6.0f, 1.3f, -4.0f } });
 
     BlockDelta d;
     d.tick = 4242;
@@ -1810,6 +2369,89 @@ MatchSnapshot MakeSampleSnapshot()
     s.statusEffects.push_back(StatusEffectSnapshot {
         7, StatusEffectType::Shield, Vec3 { -38.0f, 1.5f, 0.0f },
         1, -1, 0, 3.0f, 2, SnapshotVisibility::Private });
+    s.actionResults.push_back(ActionResultSnapshot {
+        1,
+        7,
+        42,
+        static_cast<int>(PlayerActionType::BuyItem),
+        0,
+        -1,
+        -1,
+        -1,
+        0,
+        0,
+        true,
+        Vec3 { 4.0f, 5.0f, 6.0f },
+        "Purchased wood.",
+        { 128, 238, 166, 255 },
+        1.6f,
+        0.0f });
+    // Phase 4/5 slice: utility / hero ability / projectile owner-private results
+    // ride the same generic ActionResultSnapshot fields as BuyItem above (see
+    // docs/NETWORK_PREP_PLAN.md) — exercised here so the roundtrip covers the
+    // new PlayerActionType values, not just their (already generic) wire shape.
+    s.actionResults.push_back(ActionResultSnapshot {
+        1,
+        8,
+        0,
+        static_cast<int>(PlayerActionType::UtilityUse),
+        2,
+        -1,
+        -1,
+        -1,
+        0,
+        1,
+        true,
+        Vec3 { -1.0f, 2.0f, 0.5f },
+        "Dash pearl used.",
+        { 112, 232, 255, 255 },
+        0.30f,
+        0.30f });
+    s.actionResults.push_back(ActionResultSnapshot {
+        1,
+        9,
+        0,
+        static_cast<int>(PlayerActionType::HeroAbility),
+        0,
+        -1,
+        -1,
+        -1,
+        1,
+        32,
+        false,
+        Vec3 { 3.0f, 1.5f, -2.0f },
+        "Radon: active2 on cooldown.",
+        { 255, 96, 82, 255 },
+        1.7f,
+        0.95f });
+    s.actionResults.push_back(ActionResultSnapshot {
+        1,
+        10,
+        0,
+        static_cast<int>(PlayerActionType::ProjectileLaunch),
+        1,
+        -1,
+        -1,
+        -1,
+        0,
+        1,
+        true,
+        Vec3 { 0.5f, 1.2f, 3.0f },
+        "Bow: critical shot!",
+        { 255, 255, 255, 255 },
+        1.6f,
+        0.0f });
+    s.worldEvents.push_back(WorldEventSnapshot {
+        1,
+        static_cast<int>(WorldEventKind::PlayerDied),
+        2,
+        1,
+        0,
+        Vec3 { 1.0f, 1.0f, 1.0f },
+        0,
+        0,
+        0,
+        "топором Свидетеля" });
 
     return s;
 }
@@ -1879,6 +2521,29 @@ int RunProtocolSmoke()
               << " seq=" << commandHeader.sequence << " tick=" << commandHeader.tick
               << " roundtrip=" << (commandOk ? "ok" : "FAIL") << '\n';
 
+    PlayerCommand command2 = command;
+    command2.tick = command.tick + 1;
+    command2.attackPressed = false;
+    command2.placePressed = true;
+    const std::vector<PlayerCommand> commandBatch { command, command2 };
+    const std::vector<std::uint8_t> commandBatchBytes = EncodePlayerCommandBatch(98, commandBatch);
+    PacketHeader commandBatchHeader;
+    std::vector<PlayerCommand> decodedCommandBatch;
+    const DecodeStatus commandBatchStatus = DecodePlayerCommandBatch(
+        commandBatchBytes.data(), commandBatchBytes.size(), commandBatchHeader, decodedCommandBatch);
+    const bool commandBatchOk = commandBatchStatus == DecodeStatus::Ok
+        && commandBatchHeader.type == MessageType::PlayerCommandBatch
+        && commandBatchHeader.sequence == 98
+        && commandBatchHeader.tick == command2.tick
+        && decodedCommandBatch.size() == commandBatch.size()
+        && CommandEqual(decodedCommandBatch[0], command)
+        && CommandEqual(decodedCommandBatch[1], command2);
+    ok = ok && commandBatchOk;
+    std::cout << "protocol-smoke: PlayerCommandBatch bytes=" << commandBatchBytes.size()
+              << " status=" << ToString(commandBatchStatus)
+              << " count=" << decodedCommandBatch.size()
+              << " roundtrip=" << (commandBatchOk ? "ok" : "FAIL") << '\n';
+
     // 2) MatchSnapshot roundtrip (header + players + cores + block deltas).
     const MatchSnapshot snapshot = MakeSampleSnapshot();
     const std::vector<std::uint8_t> snapshotBytes = EncodeMatchSnapshot(100, snapshot);
@@ -1907,8 +2572,15 @@ int RunProtocolSmoke()
     deltaTarget.lastProcessedCommandTick = snapshot.lastProcessedCommandTick + 2;
     deltaTarget.matchTime = snapshot.matchTime + 0.05f;
     deltaTarget.players[0].position.x += 1.25f;
+    deltaTarget.players[0].inventory.main[0].count += 1;
     deltaTarget.players.pop_back();
+    deltaTarget.matchScores[0].kills += 1;
+    deltaTarget.matchScores[0].coreDamage += 9;
+    deltaTarget.matchScores.pop_back();
     deltaTarget.cores[0].health -= 25;
+    deltaTarget.teamChests[0].resources[0] += 5;
+    deltaTarget.teamChests[0].slots[0].count += 5;
+    deltaTarget.teamChests[0].slots.push_back(ItemStackSnapshot { 20, 1 });
     deltaTarget.pickups[0].amount += 2;
     deltaTarget.droppedItems.clear();
     BlockDelta d2 = snapshot.blockDeltas.front();
@@ -1921,6 +2593,9 @@ int RunProtocolSmoke()
     deltaTarget.hazardZones.clear();
     deltaTarget.heroDevices[0].health -= 3;
     deltaTarget.statusEffects[0].remaining -= 0.25f;
+    deltaTarget.actionResults[0].actionSeq += 1;
+    deltaTarget.actionResults[0].success = false;
+    deltaTarget.actionResults[0].message = "Purchase denied.";
 
     constexpr std::uint32_t kBaselineSequence = 100;
     constexpr std::uint32_t kDeltaSequence = 103;
@@ -1975,6 +2650,31 @@ int RunProtocolSmoke()
               << " gap=" << ToString(gapStatus)
               << " fullResyncRequest=" << (deltaLossOk ? "ok" : "FAIL")
               << " handled=" << (deltaLossOk ? "ok" : "FAIL") << '\n';
+
+    MatchSnapshot branchTarget = deltaTarget;
+    branchTarget.tick += 2;
+    branchTarget.matchTime += 0.033f;
+    branchTarget.players[0].position.x += 0.5f;
+    const MatchSnapshotDelta branchDelta =
+        BuildSnapshotDelta(snapshot, branchTarget, kBaselineSequence, 1);
+    MatchSnapshot currentClientState = applied;
+    std::uint32_t currentClientSequence = appliedSequence;
+    constexpr std::uint32_t kBranchDeltaSequence = 104;
+    const SnapshotDeltaApplyStatus branchCurrentStatus = ApplySnapshotDeltaIfCompatible(
+        true, currentClientState, currentClientSequence, kBranchDeltaSequence, branchDelta);
+    MatchSnapshot recoveredFromHistory = snapshot;
+    std::uint32_t recoveredSequence = kBaselineSequence;
+    const SnapshotDeltaApplyStatus branchHistoryStatus = ApplySnapshotDeltaIfCompatible(
+        true, recoveredFromHistory, recoveredSequence, kBranchDeltaSequence, branchDelta);
+    const bool deltaHistoryOk = branchCurrentStatus == SnapshotDeltaApplyStatus::BaselineMismatch
+        && branchHistoryStatus == SnapshotDeltaApplyStatus::Applied
+        && recoveredSequence == kBranchDeltaSequence
+        && SnapshotEqual(recoveredFromHistory, branchTarget);
+    ok = ok && deltaHistoryOk;
+    std::cout << "protocol-smoke: delta history recovery current="
+              << ToString(branchCurrentStatus)
+              << " history=" << ToString(branchHistoryStatus)
+              << " handled=" << (deltaHistoryOk ? "ok" : "FAIL") << '\n';
 
     // 4) Lobby packets roundtrip.
     const LobbyUpdate lobbyUpdate = MakeSampleLobbyUpdate();
@@ -2067,6 +2767,66 @@ int RunProtocolSmoke()
     ok = ok && wrongOk;
     std::cout << "protocol-smoke: wrongType status=" << ToString(wrongStatus)
               << " handled=" << (wrongOk ? "ok" : "FAIL") << '\n';
+
+    // 8) PacketFragment codec: chunk a synthetic oversized packet, decode each
+    // fragment, reassemble by the fixed layout, and compare byte-for-byte.
+    bool fragmentOk = true;
+    {
+        std::vector<std::uint8_t> big(3000);
+        for (std::size_t i = 0; i < big.size(); ++i)
+        {
+            big[i] = static_cast<std::uint8_t>((i * 31 + 7) & 0xFF);
+        }
+        constexpr std::size_t chunkBytes = 1024;
+        const std::uint16_t count =
+            static_cast<std::uint16_t>((big.size() + chunkBytes - 1) / chunkBytes);
+        std::vector<std::uint8_t> reassembled(big.size());
+        for (std::uint16_t i = 0; i < count && fragmentOk; ++i)
+        {
+            const std::size_t offset = static_cast<std::size_t>(i) * chunkBytes;
+            const std::size_t len = big.size() - offset < chunkBytes
+                ? big.size() - offset
+                : chunkBytes;
+            const std::vector<std::uint8_t> wire = EncodePacketFragment(
+                900 + i, /*fragmentId*/ 777, i, count,
+                static_cast<std::uint32_t>(big.size()), big.data() + offset, len);
+            PacketHeader fragHeader;
+            std::uint32_t fragmentId = 0;
+            std::uint16_t index = 0;
+            std::uint16_t total = 0;
+            std::uint32_t totalSize = 0;
+            std::vector<std::uint8_t> chunk;
+            const DecodeStatus status = DecodePacketFragment(
+                wire.data(), wire.size(), fragHeader, fragmentId, index, total, totalSize, chunk);
+            fragmentOk = fragmentOk
+                && status == DecodeStatus::Ok
+                && fragmentId == 777
+                && index == i
+                && total == count
+                && totalSize == big.size()
+                && chunk.size() == len;
+            if (fragmentOk)
+            {
+                std::copy(chunk.begin(), chunk.end(),
+                          reassembled.begin() + static_cast<std::ptrdiff_t>(offset));
+            }
+        }
+        fragmentOk = fragmentOk && reassembled == big;
+        // A truncated fragment must be rejected, not crash.
+        const std::vector<std::uint8_t> wire = EncodePacketFragment(
+            1, 2, 0, 1, 8, big.data(), 8);
+        PacketHeader truncHeader;
+        std::uint32_t a = 0;
+        std::uint16_t b = 0;
+        std::uint16_t c = 0;
+        std::uint32_t d = 0;
+        std::vector<std::uint8_t> e;
+        fragmentOk = fragmentOk
+            && DecodePacketFragment(wire.data(), wire.size() - 4, truncHeader, a, b, c, d, e)
+                != DecodeStatus::Ok;
+    }
+    ok = ok && fragmentOk;
+    std::cout << "protocol-smoke: packetFragment roundtrip=" << (fragmentOk ? "ok" : "FAIL") << '\n';
 
     std::cout << (ok ? "PROTOCOL_SMOKE_OK" : "PROTOCOL_SMOKE_FAIL") << std::endl;
     return ok ? 0 : 6;

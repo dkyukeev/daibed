@@ -25,6 +25,7 @@ struct Team
     int forgeLevel = 0;
     int healAuraLevel = 0;
     bool enemyTrackerUnlocked = false;
+    GridPos teamChestBlock {};
 };
 
 Color GetTeamColor(TeamColor color);

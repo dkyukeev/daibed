@@ -29,6 +29,7 @@ MatchSnapshot FilterSnapshotForClient(const MatchSnapshot& full, int clientPlaye
     MatchSnapshot view;
     // Global / scalar match state is public.
     view.tick = full.tick;
+    view.lastProcessedCommandTick = full.lastProcessedCommandTick;
     view.matchTime = full.matchTime;
     view.phase = full.phase;
     view.winnerTeamId = full.winnerTeamId;
@@ -44,6 +45,7 @@ MatchSnapshot FilterSnapshotForClient(const MatchSnapshot& full, int clientPlaye
         if (!isSelf)
         {
             entry.inventory = InventorySnapshot {}; // present=false, empty.
+            entry.abilityHud = HeroAbilityHudSnapshot {}; // present=false, empty.
         }
 
         const bool isEnemy = clientTeamId < 0 || player.teamId != clientTeamId;
@@ -59,9 +61,17 @@ MatchSnapshot FilterSnapshotForClient(const MatchSnapshot& full, int clientPlaye
         entry.disguiseHeroId = -1;
         view.players.push_back(entry);
     }
+    view.matchScores = full.matchScores;
 
     // Public world state.
     view.cores = full.cores;
+    for (const TeamChestSnapshot& chest : full.teamChests)
+    {
+        if (chest.teamId == clientTeamId)
+        {
+            view.teamChests.push_back(chest);
+        }
+    }
     view.generators = full.generators;
     view.pickups = full.pickups;
     view.droppedItems = full.droppedItems;
@@ -103,6 +113,16 @@ MatchSnapshot FilterSnapshotForClient(const MatchSnapshot& full, int clientPlaye
             view.statusEffects.push_back(e);
         }
     }
+    for (const ActionResultSnapshot& result : full.actionResults)
+    {
+        if (result.playerId == clientPlayerId)
+        {
+            view.actionResults.push_back(result);
+        }
+    }
+    // Public broadcast events (death/respawn/victory/kill feed/...): every
+    // recipient gets every entry, unlike the owner-private actionResults above.
+    view.worldEvents = full.worldEvents;
 
     return view;
 }

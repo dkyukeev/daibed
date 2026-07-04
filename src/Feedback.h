@@ -118,10 +118,20 @@ struct TimedExplosion
     int ownerPlayerId = -1;
     float timer = 2.6f;
     float radius = 2.6f;
+    // Stable per-spawn id (Game::NextExplosiveId()), NOT a vector index — see
+    // EnergyProjectile::id above for why. Trailing field so existing positional
+    // aggregate-init call sites that don't mention it keep defaulting to -1.
+    int id = -1;
 };
 
 struct EnergyProjectile
 {
+    // Stable per-spawn id (assigned once by Game::NextProjectileId() when the
+    // projectile is created), NOT a vector index — an earlier projectile
+    // expiring must not shift a still-flying projectile's identity. See
+    // docs/MULTIPLAYER_QUALITY_TARGET.md "Что считается провалом": dynamic
+    // entity id == vector index used for interpolation is an explicit failure.
+    int id = -1;
     Vector3 position {};
     Vector3 previousPosition {};
     Vector3 startPosition {};
@@ -156,6 +166,10 @@ struct HazardZone
     float tickTimer = 0.0f;
     int damagePerTick = 8;
     bool blueFire = false;
+    // Stable per-spawn id (Game::NextHazardZoneId()), NOT a vector index — see
+    // EnergyProjectile::id above for why. Trailing field so existing positional
+    // aggregate-init call sites that don't mention it keep defaulting to -1.
+    int id = -1;
 };
 
 struct AlarmTrap

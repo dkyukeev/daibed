@@ -22,7 +22,10 @@ float DistanceSq(const Vec3& a, const Vec3& b)
 
 bool InventoryEqual(const InventorySnapshot& a, const InventorySnapshot& b)
 {
-    if (a.present != b.present || a.resources != b.resources || a.hotbar.size() != b.hotbar.size())
+    if (a.present != b.present
+        || a.resources != b.resources
+        || a.hotbar.size() != b.hotbar.size()
+        || a.main.size() != b.main.size())
     {
         return false;
     }
@@ -33,7 +36,47 @@ bool InventoryEqual(const InventorySnapshot& a, const InventorySnapshot& b)
             return false;
         }
     }
+    for (std::size_t i = 0; i < a.main.size(); ++i)
+    {
+        if (a.main[i].itemType != b.main[i].itemType || a.main[i].count != b.main[i].count)
+        {
+            return false;
+        }
+    }
     return true;
+}
+
+bool ItemSlotsEqual(const std::vector<ItemStackSnapshot>& a, const std::vector<ItemStackSnapshot>& b)
+{
+    if (a.size() != b.size())
+    {
+        return false;
+    }
+    for (std::size_t i = 0; i < a.size(); ++i)
+    {
+        if (a[i].itemType != b[i].itemType || a[i].count != b[i].count)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool TeamChestEqual(const TeamChestSnapshot& a, const TeamChestSnapshot& b)
+{
+    return a.teamId == b.teamId
+        && a.resources == b.resources
+        && ItemSlotsEqual(a.slots, b.slots);
+}
+
+bool PlayerScoreEqual(const PlayerScoreSnapshot& a, const PlayerScoreSnapshot& b)
+{
+    return a.playerId == b.playerId
+        && a.kills == b.kills
+        && a.deaths == b.deaths
+        && a.finalDeaths == b.finalDeaths
+        && a.coreDamage == b.coreDamage
+        && a.coresDestroyed == b.coresDestroyed;
 }
 
 bool PlayerEqual(const PlayerSnapshot& a, const PlayerSnapshot& b)
@@ -68,8 +111,12 @@ bool PickupEqual(const PickupSnapshot& a, const PickupSnapshot& b)
 
 bool DroppedItemEqual(const DroppedItemSnapshot& a, const DroppedItemSnapshot& b)
 {
-    return a.itemType == b.itemType && a.count == b.count
-        && VecEqual(a.position, b.position);
+    return a.id == b.id && a.itemType == b.itemType && a.count == b.count
+        && VecEqual(a.position, b.position) && VecEqual(a.velocity, b.velocity)
+        && a.ownerPlayerId == b.ownerPlayerId
+        && a.ownerPickupDelay == b.ownerPickupDelay
+        && a.lifetime == b.lifetime
+        && a.age == b.age;
 }
 
 bool BlockDeltaEqual(const BlockDelta& a, const BlockDelta& b)
@@ -138,6 +185,30 @@ const CoreSnapshot* FindCore(const std::vector<CoreSnapshot>& cores, int teamId)
         if (core.teamId == teamId)
         {
             return &core;
+        }
+    }
+    return nullptr;
+}
+
+const TeamChestSnapshot* FindTeamChest(const std::vector<TeamChestSnapshot>& chests, int teamId)
+{
+    for (const TeamChestSnapshot& chest : chests)
+    {
+        if (chest.teamId == teamId)
+        {
+            return &chest;
+        }
+    }
+    return nullptr;
+}
+
+const PlayerScoreSnapshot* FindPlayerScore(const std::vector<PlayerScoreSnapshot>& scores, int playerId)
+{
+    for (const PlayerScoreSnapshot& score : scores)
+    {
+        if (score.playerId == playerId)
+        {
+            return &score;
         }
     }
     return nullptr;
@@ -256,6 +327,28 @@ void RemoveCores(std::vector<CoreSnapshot>& target, const std::vector<int>& team
         target.end());
 }
 
+void RemoveTeamChests(std::vector<TeamChestSnapshot>& target, const std::vector<int>& teamIds)
+{
+    target.erase(
+        std::remove_if(target.begin(), target.end(),
+            [&teamIds](const TeamChestSnapshot& value)
+            {
+                return std::find(teamIds.begin(), teamIds.end(), value.teamId) != teamIds.end();
+            }),
+        target.end());
+}
+
+void RemovePlayerScores(std::vector<PlayerScoreSnapshot>& target, const std::vector<int>& playerIds)
+{
+    target.erase(
+        std::remove_if(target.begin(), target.end(),
+            [&playerIds](const PlayerScoreSnapshot& value)
+            {
+                return std::find(playerIds.begin(), playerIds.end(), value.playerId) != playerIds.end();
+            }),
+        target.end());
+}
+
 template <typename T>
 void UpsertById(std::vector<T>& target, const T& value)
 {
@@ -288,6 +381,32 @@ void UpsertCore(std::vector<CoreSnapshot>& target, const CoreSnapshot& value)
     for (CoreSnapshot& existing : target)
     {
         if (existing.teamId == value.teamId)
+        {
+            existing = value;
+            return;
+        }
+    }
+    target.push_back(value);
+}
+
+void UpsertTeamChest(std::vector<TeamChestSnapshot>& target, const TeamChestSnapshot& value)
+{
+    for (TeamChestSnapshot& existing : target)
+    {
+        if (existing.teamId == value.teamId)
+        {
+            existing = value;
+            return;
+        }
+    }
+    target.push_back(value);
+}
+
+void UpsertPlayerScore(std::vector<PlayerScoreSnapshot>& target, const PlayerScoreSnapshot& value)
+{
+    for (PlayerScoreSnapshot& existing : target)
+    {
+        if (existing.playerId == value.playerId)
         {
             existing = value;
             return;
@@ -391,6 +510,22 @@ MatchSnapshotDelta BuildSnapshotDelta(
             });
     }
 
+    for (const PlayerScoreSnapshot& score : current.matchScores)
+    {
+        const PlayerScoreSnapshot* old = FindPlayerScore(baseline.matchScores, score.playerId);
+        if (old == nullptr || !PlayerScoreEqual(*old, score))
+        {
+            delta.matchScores.push_back(score);
+        }
+    }
+    for (const PlayerScoreSnapshot& score : baseline.matchScores)
+    {
+        if (FindPlayerScore(current.matchScores, score.playerId) == nullptr)
+        {
+            delta.removedScorePlayerIds.push_back(score.playerId);
+        }
+    }
+
     for (const CoreSnapshot& core : current.cores)
     {
         const CoreSnapshot* old = FindCore(baseline.cores, core.teamId);
@@ -404,6 +539,22 @@ MatchSnapshotDelta BuildSnapshotDelta(
         if (FindCore(current.cores, core.teamId) == nullptr)
         {
             delta.removedCoreTeamIds.push_back(core.teamId);
+        }
+    }
+
+    for (const TeamChestSnapshot& chest : current.teamChests)
+    {
+        const TeamChestSnapshot* old = FindTeamChest(baseline.teamChests, chest.teamId);
+        if (old == nullptr || !TeamChestEqual(*old, chest))
+        {
+            delta.teamChests.push_back(chest);
+        }
+    }
+    for (const TeamChestSnapshot& chest : baseline.teamChests)
+    {
+        if (FindTeamChest(current.teamChests, chest.teamId) == nullptr)
+        {
+            delta.removedTeamChestTeamIds.push_back(chest.teamId);
         }
     }
 
@@ -543,6 +694,8 @@ MatchSnapshotDelta BuildSnapshotDelta(
         SortByPriorityPosition(delta.statusEffects, priorityPosition);
     }
 
+    delta.actionResults = current.actionResults;
+    delta.worldEvents = current.worldEvents;
     return delta;
 }
 
@@ -550,7 +703,9 @@ bool HasSnapshotDeltaChanges(const MatchSnapshotDelta& delta)
 {
     return delta.tick != delta.baselineTick
         || !delta.players.empty() || !delta.removedPlayerIds.empty()
+        || !delta.matchScores.empty() || !delta.removedScorePlayerIds.empty()
         || !delta.cores.empty() || !delta.removedCoreTeamIds.empty()
+        || !delta.teamChests.empty() || !delta.removedTeamChestTeamIds.empty()
         || !delta.generators.empty() || !delta.removedGeneratorIndices.empty()
         || !delta.pickups.empty() || !delta.removedPickupIndices.empty()
         || !delta.droppedItems.empty() || !delta.removedDroppedItemIndices.empty()
@@ -559,7 +714,9 @@ bool HasSnapshotDeltaChanges(const MatchSnapshotDelta& delta)
         || !delta.explosives.empty() || !delta.removedExplosiveIds.empty()
         || !delta.hazardZones.empty() || !delta.removedHazardZoneIds.empty()
         || !delta.heroDevices.empty() || !delta.removedHeroDeviceIds.empty()
-        || !delta.statusEffects.empty() || !delta.removedStatusEffectIds.empty();
+        || !delta.statusEffects.empty() || !delta.removedStatusEffectIds.empty()
+        || !delta.actionResults.empty()
+        || !delta.worldEvents.empty();
 }
 
 bool ApplySnapshotDelta(MatchSnapshot& baseline, const MatchSnapshotDelta& delta)
@@ -575,10 +732,22 @@ bool ApplySnapshotDelta(MatchSnapshot& baseline, const MatchSnapshotDelta& delta
         UpsertPlayer(baseline.players, value);
     }
 
+    RemovePlayerScores(baseline.matchScores, delta.removedScorePlayerIds);
+    for (const PlayerScoreSnapshot& value : delta.matchScores)
+    {
+        UpsertPlayerScore(baseline.matchScores, value);
+    }
+
     RemoveCores(baseline.cores, delta.removedCoreTeamIds);
     for (const CoreSnapshot& value : delta.cores)
     {
         UpsertCore(baseline.cores, value);
+    }
+
+    RemoveTeamChests(baseline.teamChests, delta.removedTeamChestTeamIds);
+    for (const TeamChestSnapshot& value : delta.teamChests)
+    {
+        UpsertTeamChest(baseline.teamChests, value);
     }
 
     std::vector<std::pair<std::uint32_t, GeneratorSnapshot>> generators;
@@ -641,6 +810,8 @@ bool ApplySnapshotDelta(MatchSnapshot& baseline, const MatchSnapshotDelta& delta
     {
         UpsertById(baseline.statusEffects, value);
     }
+    baseline.actionResults = delta.actionResults;
+    baseline.worldEvents = delta.worldEvents;
 
     baseline.tick = delta.tick;
     baseline.lastProcessedCommandTick = delta.lastProcessedCommandTick;

@@ -97,6 +97,7 @@ private:
     Texture2D dirtTexture_ {};
     Texture2D leafTexture_ {};
     Texture2D woodTexture_ {};
+    Texture2D teamChestTexture_ {};
     Texture2D woolTexture_ {};
     Texture2D stoneTexture_ {};
     Texture2D obsidianTexture_ {};

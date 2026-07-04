@@ -97,6 +97,21 @@ Image MakeWoodImage()
     return image;
 }
 
+Image MakeTeamChestImage()
+{
+    Image image = MakeTextureImage(Color { 128, 76, 38, 255 }, Color { 196, 126, 58, 255 }, 15);
+    ImageDrawRectangle(&image, 0, 0, kTextureSize, 3, Color { 68, 42, 26, 255 });
+    ImageDrawRectangle(&image, 0, kTextureSize - 3, kTextureSize, 3, Color { 68, 42, 26, 255 });
+    ImageDrawRectangle(&image, 0, 0, 3, kTextureSize, Color { 68, 42, 26, 255 });
+    ImageDrawRectangle(&image, kTextureSize - 3, 0, 3, kTextureSize, Color { 68, 42, 26, 255 });
+    ImageDrawRectangle(&image, 0, 14, kTextureSize, 3, Color { 60, 64, 72, 255 });
+    ImageDrawRectangle(&image, 14, 0, 4, kTextureSize, Color { 60, 64, 72, 255 });
+    ImageDrawRectangle(&image, 11, 12, 10, 10, Color { 220, 176, 76, 255 });
+    ImageDrawRectangle(&image, 13, 14, 6, 6, Color { 255, 224, 122, 255 });
+    ImageDrawRectangle(&image, 15, 17, 2, 4, Color { 58, 42, 32, 255 });
+    return image;
+}
+
 Image MakeWoolImage()
 {
     Image image = MakeTextureImage(Color { 216, 222, 232, 255 }, Color { 170, 184, 204, 255 }, 3);
@@ -1055,7 +1070,7 @@ bool IsTransparentBlock(BlockType type, Color color)
 
 ItemStack VisibleHeldItemForPlayer(const Player& player, const ItemStack& localHeldItem)
 {
-    if (player.IsLocal())
+    if (IsLocallyPredicted(player.GetControlKind()))
     {
         return localHeldItem;
     }
@@ -1256,6 +1271,7 @@ bool Renderer::Initialize()
     dirtTexture_ = LoadCustomizableTexture("dirt_block", MakeTextureImage(Color { 112, 78, 52, 255 }, Color { 86, 58, 38, 255 }, 5));
     leafTexture_ = LoadCustomizableTexture("leaf_block", MakeTextureImage(Color { 64, 132, 62, 245 }, Color { 112, 178, 86, 255 }, 6));
     woodTexture_ = LoadCustomizableTexture("wood_block", MakeWoodImage());
+    teamChestTexture_ = LoadCustomizableTexture("team_chest_block", MakeTeamChestImage());
     woolTexture_ = LoadCustomizableTexture("wool_block", MakeWoolImage());
     stoneTexture_ = LoadCustomizableTexture("stone_block", MakeTextureImage(Color { 132, 138, 148, 255 }, Color { 88, 94, 108, 255 }, 7));
     obsidianTexture_ = LoadCustomizableTexture("obsidian_block", MakeTextureImage(Color { 38, 28, 54, 255 }, Color { 90, 52, 132, 255 }, 8));
@@ -1305,6 +1321,7 @@ void Renderer::Shutdown()
     UnloadTexture(dirtTexture_);
     UnloadTexture(leafTexture_);
     UnloadTexture(woodTexture_);
+    UnloadTexture(teamChestTexture_);
     UnloadTexture(woolTexture_);
     UnloadTexture(stoneTexture_);
     UnloadTexture(obsidianTexture_);
@@ -1431,7 +1448,7 @@ void Renderer::RenderScene(
     const Player* localPlayer = nullptr;
     for (const Player& player : players)
     {
-        if (player.IsLocal())
+        if (IsLocallyPredicted(player.GetControlKind()))
         {
             localTeamId = player.GetTeamId();
             localPlayer = &player;
@@ -1540,6 +1557,16 @@ void Renderer::RenderScene(
     {
         DrawCylinder(team.shopPosition, 1.7f, 1.7f, 0.08f, 24, Fade(GetTeamColor(team.color), 0.35f));
         DrawCylinderWires(team.shopPosition, 1.7f, 1.7f, 0.08f, 24, GetTeamColor(team.color));
+
+        const Block* chestBlock = world.GetBlock(team.teamChestBlock);
+        if (chestBlock != nullptr && chestBlock->type == BlockType::TeamChestBlock)
+        {
+            const Vector3 chestCenter = world.GridToWorld(team.teamChestBlock);
+            const Color teamColor = GetTeamColor(team.color);
+            DrawCube(Vector3 { chestCenter.x, chestCenter.y + 0.18f, chestCenter.z }, 0.86f, 0.18f, 0.86f, Fade(teamColor, 0.86f));
+            DrawCube(Vector3 { chestCenter.x, chestCenter.y + 0.05f, chestCenter.z - 0.47f }, 0.28f, 0.22f, 0.05f, Color { 255, 224, 122, 255 });
+            DrawCubeWires(chestCenter, 1.02f, 1.02f, 1.02f, Fade(teamColor, 0.92f));
+        }
     }
 
     for (const Generator& generator : generators)
@@ -1606,7 +1633,7 @@ void Renderer::RenderScene(
         {
             continue;
         }
-        if (hideLocalPlayer && player.IsLocal())
+        if (hideLocalPlayer && IsLocallyPredicted(player.GetControlKind()))
         {
             continue;
         }
@@ -1979,7 +2006,7 @@ void Renderer::RenderScene(
                 false,
                 rangedChargeFraction);
         }
-        if (player.IsLocal())
+        if (IsLocallyPredicted(player.GetControlKind()))
         {
             const float range = CombatSystem::AttackRangeForSword(player.GetInventory().GetSwordLevel());
             const Color reachColor = player.GetAttackCooldownRemaining() <= 0.0f
@@ -2265,7 +2292,7 @@ void Renderer::RenderScene(
 
     for (const Player& player : players)
     {
-        if (!player.IsAlive() || player.IsLocal())
+        if (!player.IsAlive() || IsLocallyPredicted(player.GetControlKind()))
         {
             continue;
         }
@@ -2297,7 +2324,7 @@ void Renderer::RenderScene(
         {
             if (occluder.GetId() == player.GetId()
                 || !occluder.IsAlive()
-                || (hideLocalPlayer && occluder.IsLocal()))
+                || (hideLocalPlayer && IsLocallyPredicted(occluder.GetControlKind())))
             {
                 continue;
             }
@@ -2825,6 +2852,17 @@ Color Renderer::GetBlockColor(const Block& block, const std::vector<Team>& teams
         return Color { 142, 220, 255, 210 };
     case BlockType::ResourceGenerator:
         return Color { 82, 82, 92, 255 };
+    case BlockType::TeamChestBlock:
+    {
+        const Team* team = FindTeam(teams, block.teamId);
+        const Color tint = team != nullptr ? GetTeamColor(team->color) : Color { 180, 150, 86, 255 };
+        return Color {
+            static_cast<unsigned char>((static_cast<int>(tint.r) + 108) / 2),
+            static_cast<unsigned char>((static_cast<int>(tint.g) + 74) / 2),
+            static_cast<unsigned char>((static_cast<int>(tint.b) + 42) / 2),
+            255
+        };
+    }
     case BlockType::EnergyCoreBlock:
         return WHITE;
     case BlockType::Air:
@@ -2854,6 +2892,8 @@ const Texture2D* Renderer::GetBlockTexture(BlockType type) const
         return &woolTexture_;
     case BlockType::WoodBlock:
         return &woodTexture_;
+    case BlockType::TeamChestBlock:
+        return &teamChestTexture_;
     case BlockType::Solid:
     case BlockType::StoneBlock:
         return &stoneTexture_;

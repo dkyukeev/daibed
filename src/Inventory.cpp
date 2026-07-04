@@ -827,6 +827,36 @@ ItemStack Inventory::SwapSlot(int slot, ItemStack incoming)
     return old;
 }
 
+bool Inventory::SetSlot(int slot, ItemStack stack)
+{
+    if (!IsValidSlot(slot))
+    {
+        return false;
+    }
+
+    if (stack.count <= 0 || stack.type == ItemType::None)
+    {
+        stack = ItemStack {};
+    }
+    else
+    {
+        stack.count = std::min(stack.count, ItemMaxStack(stack.type));
+    }
+
+    ItemStack& target = SlotRef(hotbar_, mainSlots_, slot);
+    if (const std::optional<ResourceType> oldResource = ItemToResource(target.type))
+    {
+        const int index = Index(*oldResource);
+        resources_[index] = std::max(0, resources_[index] - std::max(0, target.count));
+    }
+    if (const std::optional<ResourceType> newResource = ItemToResource(stack.type))
+    {
+        resources_[Index(*newResource)] += stack.count;
+    }
+    target = stack;
+    return true;
+}
+
 bool Inventory::IsValidSlot(int slot) const
 {
     return slot >= 0 && slot < kInventorySlotCount;

@@ -27,6 +27,10 @@ constexpr float kPi = 3.1415926535f;
 constexpr float kCoreCollapseSeconds = 12.0f * 60.0f;
 constexpr float kRenderScales[] { 0.60f, 0.75f, 0.85f, 1.00f };
 constexpr float kDrawDistances[] { 64.0f, 96.0f, 150.0f, 220.0f };
+// Reconciliation error smoothing (see ApplyAuthoritativeSnapshotForPrediction
+// in GameNetwork.cpp): the visual offset decays toward zero over roughly this
+// time constant so a prediction correction eases in instead of snapping.
+constexpr float kPredictionSmoothingTau = 0.05f;
 constexpr float kItemPickupRadiusSq = 1.35f;
 constexpr float kItemMagnetRadius = 2.35f;
 constexpr float kItemMagnetRadiusSq = kItemMagnetRadius * kItemMagnetRadius;
@@ -312,6 +316,7 @@ void Game::Shutdown()
         return;
     }
 
+    StopNetworkClientSession();
     SaveSettings();
     network_.Disconnect();
     network_.Stop();
@@ -384,8 +389,150 @@ void Game::SetDevKeyboard(bool enabled)
     input_.SetDevKeyboard(enabled);
 }
 
+bool Game::HandleShopBrowseInput(Player& player)
+{
+    // THE shop-browsing input for every local human (SP frame path and the MP
+    // client session): category tabs by wheel/middle-click/click, row purchase
+    // by hotkey or click. Purchases ride the single economy action pipeline
+    // (queued; applied out-of-band over the integrated loopback in SP, shipped
+    // with the next command in MP). Returns true when a purchase was queued.
+    if (!shopOpen_)
+    {
+        return false;
+    }
+
+    if (currentInput_.mouseWheel < -0.01f || currentInput_.middlePressed)
+    {
+        shopCategoryIndex_ = (shopCategoryIndex_ + 1) % shop_.GetCategoryCount();
+    }
+    if (currentInput_.mouseWheel > 0.01f)
+    {
+        shopCategoryIndex_ = (shopCategoryIndex_ + shop_.GetCategoryCount() - 1) % shop_.GetCategoryCount();
+    }
+
+    bool shopCategoryClicked = false;
+    const bool leftMousePressed = !headless_ && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    if (leftMousePressed)
+    {
+        const Vector2 mouse = GetMousePosition();
+        const int panelWidth = 790;
+        const int panelHeight = 420;
+        const int panelX = GetScreenWidth() / 2 - panelWidth / 2;
+        const int panelY = GetScreenHeight() / 2 - panelHeight / 2;
+        const int categoryCount = shop_.GetCategoryCount();
+        const int tabWidth = 118;
+        const int tabHeight = 26;
+        const int tabY = panelY + 52;
+        for (int category = 0; category < categoryCount; ++category)
+        {
+            const Rectangle tab {
+                static_cast<float>(panelX + 24 + category * (tabWidth + 8)),
+                static_cast<float>(tabY),
+                static_cast<float>(tabWidth),
+                static_cast<float>(tabHeight)
+            };
+            if (CheckCollisionPointRec(mouse, tab))
+            {
+                shopCategoryIndex_ = category;
+                shopCategoryClicked = true;
+                currentInput_.shopChoice = 0;
+                break;
+            }
+        }
+    }
+
+    if (!shopCategoryClicked && (currentInput_.shopChoice > 0 || leftMousePressed))
+    {
+        Team* team = FindTeam(player.GetTeamId());
+        if (team != nullptr)
+        {
+            const std::vector<ShopItem> items = shop_.GetItemsForCategory(shopCategoryIndex_);
+            int row = currentInput_.shopChoice - 1;
+            if (row < 0 && !headless_)
+            {
+                const Vector2 mouse = GetMousePosition();
+                const int panelWidth = 790;
+                const int panelHeight = 420;
+                const int panelX = GetScreenWidth() / 2 - panelWidth / 2;
+                const int panelY = GetScreenHeight() / 2 - panelHeight / 2;
+                const int localY = static_cast<int>(mouse.y) - (panelY + 104);
+                if (mouse.x >= panelX + 22 && mouse.x <= panelX + panelWidth - 22 && localY >= -6)
+                {
+                    row = (localY + 6) / 34;
+                }
+            }
+            const int repeat = (!headless_ && (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT))) ? 4 : 1;
+            if (row >= 0 && row < static_cast<int>(items.size()))
+            {
+                QueuePlayerAction(PlayerActionType::BuyItem, items[row].choice, repeat);
+                ApplyPendingLocalPlayerAction(player);
+                currentInput_.shopChoice = 0;
+                return true;
+            }
+            // Only an empty-row click reaches here; real purchases go through the
+            // command path above (same server method as multiplayer).
+            const std::string purchaseMessage = "В этой строке магазина нет товара.";
+            SetMessage(purchaseMessage);
+            AddEventMessage(purchaseMessage, Color { 255, 130, 130, 255 });
+            audio_.PlayDenied();
+        }
+    }
+    return false;
+}
+
+void Game::HandleHotbarSelectionInput(Player& player)
+{
+    // THE hotbar-selection input for every local human: number keys / wheel
+    // slot cycling, and the sniper-magnification wheel while scoped.
+    if (currentInput_.hotbarSlot > 0)
+    {
+        const int slot = currentInput_.hotbarSlot - 1;
+        if (slot >= 0 && slot < kHotbarSlotCount)
+        {
+            selectedHotbarSlot_ = slot;
+            const ItemStack stack = player.GetInventory().GetHotbarSlots()[slot];
+            if (stack.IsEmpty())
+            {
+                SetMessage("Выбран пустой слот.", 1.0f);
+            }
+            else
+            {
+                SetMessage(std::string("Выбрано: ") + ItemDisplayName(stack.type) + ".", 1.2f);
+            }
+        }
+    }
+    else if (std::fabs(currentInput_.mouseWheel) > 0.01f)
+    {
+        if (IsSniperScopeRequested(player))
+        {
+            sniperMagnification_ = std::clamp(
+                sniperMagnification_ + currentInput_.mouseWheel * 0.25f,
+                1.5f,
+                3.0f);
+            SetMessage("Оптика: x" + FormatTenths(sniperMagnification_), 0.7f);
+        }
+        else
+        {
+            const int direction = currentInput_.mouseWheel > 0.0f ? -1 : 1;
+            selectedHotbarSlot_ = (selectedHotbarSlot_ + direction + kHotbarSlotCount) % kHotbarSlotCount;
+            const ItemStack stack = player.GetInventory().GetHotbarSlots()[selectedHotbarSlot_];
+            if (!stack.IsEmpty())
+            {
+                SetMessage(std::string("Выбрано: ") + ItemDisplayName(stack.type) + ".", 0.8f);
+            }
+        }
+    }
+}
+
 void Game::HandleInput()
 {
+    if (NetworkClientSessionActive())
+    {
+        // The MP client session samples its own input inside
+        // UpdateNetworkClientSession (SampleClientInput and the lobby/pause
+        // handlers) — the SP frame-input path must not also run.
+        return;
+    }
     if (screen_ == GameScreen::MainMenu)
     {
         HandleMenuInput();
@@ -477,13 +624,15 @@ void Game::HandleInput()
     {
         if (currentInput_.exitPressed || currentInput_.inventoryPressed)
         {
-            if (!heldInventoryStack_.IsEmpty())
+            if (!heldInventoryStack_.IsEmpty() && heldInventoryOrigin_ == HeldInventoryOrigin::None)
             {
                 localPlayer->GetInventory().AddItem(heldInventoryStack_.type, heldInventoryStack_.count);
             }
             inventoryOpen_ = false;
             CloseChest();
             heldInventoryStack_ = ItemStack {};
+            heldInventoryOrigin_ = HeldInventoryOrigin::None;
+            heldInventoryOriginSlot_ = -1;
             DisableCursor();
             currentInput_ = PlayerInput {};
             return;
@@ -566,14 +715,23 @@ void Game::HandleInput()
         if (!stack.IsEmpty())
         {
             const int amount = (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) ? stack.count : 1;
-            TryDropInventoryStack(*localPlayer, selectedHotbarSlot_, amount);
+            QueuePlayerAction(PlayerActionType::DropItem, selectedHotbarSlot_, amount);
+            ApplyPendingLocalPlayerAction(*localPlayer);
         }
     }
 
     if (currentInput_.interactPressed)
     {
+        if (TryOpenAimedTeamChest(*localPlayer))
+        {
+            currentInput_ = PlayerInput {};
+            return;
+        }
+
         inventoryOpen_ = false;
         heldInventoryStack_ = ItemStack {};
+        heldInventoryOrigin_ = HeldInventoryOrigin::None;
+        heldInventoryOriginSlot_ = -1;
         CloseChest();
         shopOpen_ = IsLocalPlayerInShopZone() ? !shopOpen_ : false;
         if (shopOpen_)
@@ -586,130 +744,19 @@ void Game::HandleInput()
         }
     }
 
-    if (shopOpen_ && (currentInput_.mouseWheel < -0.01f || currentInput_.middlePressed))
+    // Shared with the MP client session (Stage 4.2): ONE shop-browse handler
+    // and ONE hotbar-selection handler for every local human.
+    if (shopOpen_)
     {
-        shopCategoryIndex_ = (shopCategoryIndex_ + 1) % shop_.GetCategoryCount();
-    }
-    if (shopOpen_ && currentInput_.mouseWheel > 0.01f)
-    {
-        shopCategoryIndex_ = (shopCategoryIndex_ + shop_.GetCategoryCount() - 1) % shop_.GetCategoryCount();
-    }
-
-    bool shopCategoryClicked = false;
-    if (shopOpen_ && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
-    {
-        const Vector2 mouse = GetMousePosition();
-        const int panelWidth = 790;
-        const int panelHeight = 420;
-        const int panelX = GetScreenWidth() / 2 - panelWidth / 2;
-        const int panelY = GetScreenHeight() / 2 - panelHeight / 2;
-        const int categoryCount = shop_.GetCategoryCount();
-        const int tabWidth = 118;
-        const int tabHeight = 26;
-        const int tabY = panelY + 52;
-        bool clickedCategory = false;
-        for (int category = 0; category < categoryCount; ++category)
+        if (HandleShopBrowseInput(*localPlayer))
         {
-            const Rectangle tab {
-                static_cast<float>(panelX + 24 + category * (tabWidth + 8)),
-                static_cast<float>(tabY),
-                static_cast<float>(tabWidth),
-                static_cast<float>(tabHeight)
-            };
-            if (CheckCollisionPointRec(mouse, tab))
-            {
-                shopCategoryIndex_ = category;
-                clickedCategory = true;
-                break;
-            }
-        }
-        if (clickedCategory)
-        {
-            shopCategoryClicked = true;
-            currentInput_.shopChoice = 0;
+            return;
         }
     }
-
-    if (shopOpen_ && !shopCategoryClicked && (currentInput_.shopChoice > 0 || IsMouseButtonPressed(MOUSE_BUTTON_LEFT)))
+    else
     {
-        Team* team = FindTeam(localPlayer->GetTeamId());
-        if (team != nullptr)
-        {
-            const std::vector<ShopItem> items = shop_.GetItemsForCategory(shopCategoryIndex_);
-            int row = currentInput_.shopChoice - 1;
-            if (row < 0)
-            {
-                const Vector2 mouse = GetMousePosition();
-                const int panelWidth = 790;
-                const int panelHeight = 420;
-                const int panelX = GetScreenWidth() / 2 - panelWidth / 2;
-                const int panelY = GetScreenHeight() / 2 - panelHeight / 2;
-                const int localY = static_cast<int>(mouse.y) - (panelY + 104);
-                if (mouse.x >= panelX + 22 && mouse.x <= panelX + panelWidth - 22 && localY >= -6)
-                {
-                    row = (localY + 6) / 34;
-                }
-            }
-            std::string purchaseMessage;
-            const int repeat = (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) ? 4 : 1;
-            const bool bought = row >= 0 && row < static_cast<int>(items.size())
-                ? TryShopPurchase(*localPlayer, *team, items[row].choice, repeat, purchaseMessage)
-                : false;
-            if (purchaseMessage.empty())
-            {
-                purchaseMessage = "В этой строке магазина нет товара.";
-            }
-            SetMessage(purchaseMessage);
-            AddEventMessage(purchaseMessage, bought ? Color { 128, 238, 166, 255 } : Color { 255, 130, 130, 255 });
-            if (bought)
-            {
-                audio_.PlayPurchase();
-            }
-            else
-            {
-                audio_.PlayDenied();
-            }
-        }
+        HandleHotbarSelectionInput(*localPlayer);
     }
-    else if (!shopOpen_ && currentInput_.hotbarSlot > 0)
-    {
-        const int slot = currentInput_.hotbarSlot - 1;
-        if (slot >= 0 && slot < kHotbarSlotCount)
-        {
-            selectedHotbarSlot_ = slot;
-            const ItemStack stack = localPlayer->GetInventory().GetHotbarSlots()[slot];
-            if (stack.IsEmpty())
-            {
-                SetMessage("Выбран пустой слот.", 1.0f);
-            }
-            else
-            {
-                SetMessage(std::string("Выбрано: ") + ItemDisplayName(stack.type) + ".", 1.2f);
-            }
-        }
-    }
-    else if (!shopOpen_ && std::fabs(currentInput_.mouseWheel) > 0.01f)
-    {
-        if (IsSniperScopeRequested(*localPlayer))
-        {
-            sniperMagnification_ = std::clamp(
-                sniperMagnification_ + currentInput_.mouseWheel * 0.25f,
-                1.5f,
-                3.0f);
-            SetMessage("Оптика: x" + FormatTenths(sniperMagnification_), 0.7f);
-        }
-        else
-        {
-            const int direction = currentInput_.mouseWheel > 0.0f ? -1 : 1;
-            selectedHotbarSlot_ = (selectedHotbarSlot_ + direction + kHotbarSlotCount) % kHotbarSlotCount;
-            const ItemStack stack = localPlayer->GetInventory().GetHotbarSlots()[selectedHotbarSlot_];
-            if (!stack.IsEmpty())
-            {
-                SetMessage(std::string("Выбрано: ") + ItemDisplayName(stack.type) + ".", 0.8f);
-            }
-        }
-    }
-
 #if DAIBED_DEVELOPER_BUILD
     if (currentInput_.debugRespawnPressed)
     {
@@ -724,6 +771,12 @@ void Game::HandleInput()
 
     if (currentInput_.placePressed)
     {
+        if (TryOpenAimedTeamChest(*localPlayer))
+        {
+            currentInput_ = PlayerInput {};
+            return;
+        }
+
         UseSelectedItem(*localPlayer);
         fastPlaceTimer_ = currentInput_.bridgeMode ? 0.16f : 0.22f;
     }
@@ -731,6 +784,15 @@ void Game::HandleInput()
 
 void Game::Update(float dt)
 {
+    if (NetworkClientSessionActive())
+    {
+        // One frame of the MP client session (Stage 4: the single standard
+        // loop drives the network client; there is no nested client loop).
+        // Raw dt on purpose — the old client loop never clamped it.
+        UpdateNetworkClientSession(dt);
+        return;
+    }
+
     dt = std::min(dt, 0.05f);
 
     if (!headless_)
@@ -896,6 +958,7 @@ void Game::UpdateMatchSimulation(float dt)
             AddEventMessage("10:00 Скорость генераторов увеличена", Color { 255, 235, 142, 255 }, 5.0f);
             AddKillFeed("Генераторы ускорены", Color { 255, 235, 142, 255 }, 6.0f);
             audio_.PlayPurchase();
+            PushWorldEventSnapshot(WorldEventKind::GeneratorBoost, -1, -1, -1, Vector3 { 0.0f, 0.0f, 0.0f });
         }
         UpdateLocalPlayer(dt);
         UpdateAttackOrBreak(dt);
@@ -973,6 +1036,7 @@ void Game::UpdateMatchSimulation(float dt)
         UpdatePlacementPreview();
         UpdateFastPlacement(dt);
         SendMockNetworkInput();
+        IntegratedServerTick(dt);
     }
     UpdatePredictionStats(dt);
 }
@@ -980,6 +1044,14 @@ void Game::UpdateMatchSimulation(float dt)
 void Game::Render()
 {
     if (headless_)
+    {
+        return;
+    }
+
+    // MP client session overlays (connect failures, lobby, reconnect, waiting
+    // for a snapshot) draw their own full frame; an in-match session frame
+    // falls through to the normal render body below.
+    if (NetworkClientSessionActive() && RenderNetworkClientSessionOverlay())
     {
         return;
     }
@@ -1168,7 +1240,11 @@ void Game::Render()
         }
     }
 
-    if (screen_ == GameScreen::Paused)
+    if (networkMode_ == NetworkMode::LocalClient && clientPaused_)
+    {
+        RenderNetworkPauseOverlay();
+    }
+    else if (screen_ == GameScreen::Paused)
     {
         RenderPauseOverlay();
     }
@@ -1371,6 +1447,48 @@ void Game::DropPlayerResources(Player& player)
 
 void Game::UpdateCamera(float dt)
 {
+    // THE local-human camera, shared by SP and the MP client session (Stage
+    // 4.2 merged the old UpdateClientCamera copy into this).
+    //
+    // Decay the prediction-smoothing offset toward zero every frame
+    // (frame-rate independent) so a reconciliation correction eases out over
+    // ~kPredictionSmoothingTau. In plain SP the offset is always zero.
+    if (dt > 0.0f)
+    {
+        const float decay = std::exp(-dt / kPredictionSmoothingTau);
+        predictionSmoothingOffset_.x *= decay;
+        predictionSmoothingOffset_.y *= decay;
+        predictionSmoothingOffset_.z *= decay;
+    }
+
+    const Player* player = GetLocalPlayer();
+    if (networkMode_ == NetworkMode::LocalClient)
+    {
+        // A replicated network client derives spectator mode from the assigned
+        // player's liveness every frame (death → watch a teammate, respawn →
+        // back to first person); no local death logic runs on a client. Keyed
+        // on the network MODE, not the live session object, because the client
+        // smokes drive these internals directly without a session. SP manages
+        // spectatorMode_ from its own death handling instead.
+        const bool followingControlledSelf = player != nullptr && player->IsAlive();
+        if (!followingControlledSelf)
+        {
+            // Drop any residual smoothing so the view doesn't ease from a
+            // stale offset on respawn.
+            predictionSmoothingOffset_ = Vector3 { 0.0f, 0.0f, 0.0f };
+            if (!spectatorMode_)
+            {
+                EnterSpectatorMode();
+            }
+        }
+        else if (spectatorMode_)
+        {
+            spectatorMode_ = false;
+            spectatorFreeCamera_ = false;
+            cameraController_.SetMode(ViewMode::FirstPerson);
+        }
+    }
+
     if (spectatorMode_)
     {
         sniperScopeBlend_ += (0.0f - sniperScopeBlend_) * std::min(1.0f, dt * 12.0f);
@@ -1380,7 +1498,6 @@ void Game::UpdateCamera(float dt)
         return;
     }
 
-    const Player* player = GetLocalPlayer();
     if (player == nullptr)
     {
         return;
@@ -1398,7 +1515,43 @@ void Game::UpdateCamera(float dt)
     gameplayFov_ += (targetFov - gameplayFov_) * std::min(1.0f, dt * 12.0f);
     cameraController_.SetFov(gameplayFov_);
     cameraController_.SetCrouching(player->IsSneaking());
-    cameraController_.Update(player->GetPosition(), dt);
+    // For a predicted network player the camera focus is the (replicated +
+    // predicted) position plus the decaying error-smoothing offset, so
+    // reconciliation corrections glide instead of snapping. The camera yaw is
+    // driven by local mouse look, never by the laggy snapshot yaw.
+    const Vector3 followPos = player->GetPosition();
+    cameraController_.Update(
+        Vector3 {
+            followPos.x + predictionSmoothingOffset_.x,
+            followPos.y + predictionSmoothingOffset_.y,
+            followPos.z + predictionSmoothingOffset_.z
+        },
+        dt);
+}
+
+int Game::NextProjectileId()
+{
+    return ++nextProjectileId_;
+}
+
+int Game::NextExplosiveId()
+{
+    return ++nextExplosiveId_;
+}
+
+int Game::NextHazardZoneId()
+{
+    return ++nextHazardZoneId_;
+}
+
+int Game::NextHeroDeviceId()
+{
+    return ++nextHeroDeviceId_;
+}
+
+int Game::NextDroppedItemId()
+{
+    return ++nextDroppedItemId_;
 }
 
 bool Game::LaunchBlasterShot(Player& player, Vector3 direction, bool aimed, bool announce)
@@ -1423,6 +1576,7 @@ bool Game::LaunchBlasterShot(Player& player, Vector3 direction, bool aimed, bool
     direction = Vector3 { direction.x / adjustedLength, direction.y / adjustedLength, direction.z / adjustedLength };
 
     EnergyProjectile projectile {};
+    projectile.id = NextProjectileId();
     projectile.position = Vector3 {
         player.GetPosition().x + direction.x * 0.8f,
         player.GetPosition().y + 0.82f + direction.y * 0.8f,
@@ -1448,11 +1602,19 @@ bool Game::LaunchBlasterShot(Player& player, Vector3 direction, bool aimed, bool
     player.ConsumeLoadedBlaster();
     player.ResetAttackCooldown(kBlasterTuning.cooldown);
     AddWorldEffect(projectile.position, direction, Color { 98, 245, 255, 255 }, 0.50f, 0.32f, WorldEffectKind::Burst);
+    const bool sniperItem = GetSelectedHotbarStack(player).type == ItemType::SniperRifle;
+    // Owner-private spawn feedback, independent of `announce`: the local human
+    // path (announce=true) already gets an immediate SetMessage below, but a
+    // real network owner (announce=false, see ApplyNetworkPlayerActions) has no
+    // other way to learn its shot landed. See docs/MULTIPLAYER_REFACTOR_PLAN.md
+    // Phase 5 "stable replicated entities" for the impact-side follow-up.
+    PushProjectileActionResultSnapshot(player, true, ProjectileKind::Blaster, sniperItem, projectile.position,
+        sniperItem
+            ? "Снайперская винтовка разряжена — удерживайте ЛКМ для новой зарядки."
+            : "Бластер разряжен — удерживайте ЛКМ для новой зарядки.");
     if (announce)
     {
-        const bool sniper = HasLocalCamera(ControlKindForPlayer(player))
-            && GetSelectedHotbarStack(player).type == ItemType::SniperRifle;
-        SetMessage(sniper
+        SetMessage(sniperItem
             ? "Снайперская винтовка разряжена — удерживайте ЛКМ для новой зарядки."
             : "Бластер разряжен — удерживайте ЛКМ для новой зарядки.");
         audio_.PlayBreakBlock();
@@ -1469,6 +1631,8 @@ bool Game::LaunchBowShot(Player& player, Vector3 direction, float drawPower, boo
     }
     if (!SpendUtilityItem(player, UtilityType::Arrows))
     {
+        PushProjectileActionResultSnapshot(player, false, ProjectileKind::Arrow, false, player.GetPosition(),
+            "Нет стрел. Купите боеприпасы в магазине.");
         if (announce)
         {
             SetMessage("Нет стрел. Купите боеприпасы в магазине.");
@@ -1486,6 +1650,7 @@ bool Game::LaunchBowShot(Player& player, Vector3 direction, float drawPower, boo
     const int powerLevel = BowPowerLevelForUpgrade(upgradeLevel);
 
     EnergyProjectile projectile {};
+    projectile.id = NextProjectileId();
     projectile.position = Vector3 {
         player.GetPosition().x + direction.x * 0.72f,
         player.GetPosition().y + 0.82f + direction.y * 0.72f,
@@ -1510,6 +1675,8 @@ bool Game::LaunchBowShot(Player& player, Vector3 direction, float drawPower, boo
     projectile.affectedByDrag = true;
     projectiles_.push_back(projectile);
     player.ResetAttackCooldown(kArrowTuning.cooldown);
+    PushProjectileActionResultSnapshot(player, true, ProjectileKind::Arrow, projectile.critical, projectile.position,
+        projectile.critical ? "Лук: критический выстрел!" : "Лук: выстрел.");
     if (announce)
     {
         SetMessage(projectile.critical ? "Лук: критический выстрел!" : "Лук: выстрел.");
@@ -1607,12 +1774,12 @@ void Game::UpdateLocalPlayer(float dt)
     }
 
     // Movement, aim and selected slot are sourced from a typed PlayerCommand —
-    // the same shape bots/network will produce — and applied via
-    // ApplyPlayerCommand(). Utility inputs run first (they aim through the
-    // camera, independent of the player's yaw). See NETWORK_PREP_PLAN.md for
-    // which inputs already flow through the command and which still don't.
+    // the same shape bots/network produce — and applied via ApplyPlayerCommand().
+    // Everything else (utilities, abilities, combat, break, place, economy)
+    // rides this tick's command through the authoritative path: the integrated
+    // loopback server in SP (ApplyIntegratedServerCommand), the real server in
+    // MP. No action is applied directly here.
     const PlayerCommand command = BuildLocalPlayerCommand();
-    UseUtilityInputs(*player, command);
 
     const bool wasOnGround = player->IsOnGround();
     const float fallingVelocity = player->GetVelocity().y;
@@ -1654,16 +1821,16 @@ void Game::ApplyPlayerCommand(Player& player, const PlayerCommand& command, floa
     player.SetYaw(command.aimYaw);
     if (command.selectedSlot >= 0 && command.selectedSlot < kHotbarSlotCount)
     {
-        // The local player keeps its slot in selectedHotbarSlot_ (UI mirror);
-        // network-controlled players carry their own slot so the authoritative
-        // server replicates the right held item per player (Phase 0.1W).
+        // Every player's slot lives on the Player (single source of truth for
+        // the sim/replication). The locally predicted player ALSO mirrors it
+        // into selectedHotbarSlot_ because the frame-level UI (mouse wheel,
+        // hotbar keys) writes that field between ticks; the write-through here
+        // keeps the two in lockstep so no gameplay read can see a stale
+        // Player::selectedSlot_ for the local human.
+        player.SetSelectedSlot(command.selectedSlot);
         if (IsLocallyPredicted(controlKind))
         {
             selectedHotbarSlot_ = command.selectedSlot;
-        }
-        else
-        {
-            player.SetSelectedSlot(command.selectedSlot);
         }
     }
     if (HasLocalCamera(controlKind))
@@ -1822,8 +1989,13 @@ void Game::HandleDeathsAndRespawns()
             HandleDeathInventory(player, killerId);
             if (player.GetHeroId() == HeroId::Svidetel)
             {
-                svidetelEchoes_.push_back(SvidetelEcho {
-                    player.GetPosition(), player.GetId(), player.GetTeamId(), 12.0f, 0.0f, false, {}, 0.0f });
+                SvidetelEcho deathEcho {};
+                deathEcho.position = player.GetPosition();
+                deathEcho.ownerPlayerId = player.GetId();
+                deathEcho.ownerTeamId = player.GetTeamId();
+                deathEcho.lifetime = 12.0f;
+                deathEcho.id = NextHeroDeviceId();
+                svidetelEchoes_.push_back(deathEcho);
                 player.AddHeroUltimateCharge(8.0f);
             }
             damageCredits_.erase(
@@ -1885,6 +2057,16 @@ void Game::HandleDeathsAndRespawns()
                 finalDeath ? RED : ORANGE,
                 5.0f);
             audio_.PlayDeath();
+            PushWorldEventSnapshot(
+                WorldEventKind::PlayerDied,
+                killerId,
+                player.GetId(),
+                player.GetTeamId(),
+                player.GetPosition(),
+                0,
+                0,
+                (finalDeath ? 1 : 0) | (voidDeath ? 2 : 0),
+                deathCause);
             if (IsLocallyPredicted(ControlKindForPlayer(player)))
             {
                 localDeathKiller_ = killerName;
@@ -1922,6 +2104,12 @@ void Game::HandleDeathsAndRespawns()
                     });
                 }
                 SetMessage(player.GetName() + " потерял защиту респауна. Финальная смерть.");
+                PushWorldEventSnapshot(
+                    WorldEventKind::PlayerRespawnLost,
+                    -1,
+                    player.GetId(),
+                    player.GetTeamId(),
+                    player.GetPosition());
                 if (IsLocallyPredicted(ControlKindForPlayer(player)))
                 {
                     EnterSpectatorMode();
@@ -1932,6 +2120,12 @@ void Game::HandleDeathsAndRespawns()
                 player.RespawnAtHome();
                 SetMessage(player.GetName() + " возродился. " + BoolCoreState(team->coreAlive));
                 AddWorldEffect(player.GetHomeSpawnPoint(), GetTeamColor(team->color), 0.42f, 0.45f);
+                PushWorldEventSnapshot(
+                    WorldEventKind::PlayerRespawned,
+                    -1,
+                    player.GetId(),
+                    player.GetTeamId(),
+                    player.GetHomeSpawnPoint());
             }
         }
     }
@@ -2227,7 +2421,12 @@ void Game::EnterSpectatorMode()
     inventoryOpen_ = false;
     CloseChest();
     heldInventoryStack_ = ItemStack {};
-    DisableCursor();
+    heldInventoryOrigin_ = HeldInventoryOrigin::None;
+    heldInventoryOriginSlot_ = -1;
+    if (!headless_)
+    {
+        DisableCursor();
+    }
 
     const Player* localPlayer = GetLocalPlayer();
     spectatorPosition_ = localPlayer != nullptr
@@ -2464,6 +2663,78 @@ Game::ScopedLocalFeedbackSuppression::~ScopedLocalFeedbackSuppression()
     game_.audio_.SetMuted(previousAudioMuted_);
 }
 
+void Game::RecordLagCompFrame()
+{
+    LagCompFrame frame;
+    frame.tick = matchSimulation_.CurrentTick();
+    frame.positions.reserve(players_.size());
+    for (const Player& player : players_)
+    {
+        frame.positions.push_back(LagCompPlayerPosition { player.GetId(), player.GetPositionVec3() });
+    }
+    lagCompHistory_.push_back(std::move(frame));
+    while (lagCompHistory_.size() > kLagCompHistoryTicks)
+    {
+        lagCompHistory_.erase(lagCompHistory_.begin());
+    }
+}
+
+Game::ScopedLagCompensation::ScopedLagCompensation(Game& game, int attackerPlayerId, std::uint32_t rewindTick)
+    : game_(game)
+{
+    // No history / no request (bots, SP integrated server): use live positions.
+    if (rewindTick == 0 || game_.lagCompHistory_.empty())
+    {
+        return;
+    }
+
+    // Pick the recorded frame closest to (and not newer than) rewindTick, so a
+    // rewind past the ring's horizon clamps to the oldest frame instead of
+    // reaching for state that has already scrolled off.
+    const LagCompFrame* chosen = nullptr;
+    for (const LagCompFrame& frame : game_.lagCompHistory_)
+    {
+        if (frame.tick <= rewindTick)
+        {
+            chosen = &frame;
+        }
+        else
+        {
+            break;
+        }
+    }
+    if (chosen == nullptr)
+    {
+        chosen = &game_.lagCompHistory_.front();
+    }
+
+    for (const LagCompPlayerPosition& historical : chosen->positions)
+    {
+        if (historical.playerId == attackerPlayerId)
+        {
+            continue; // never rewind the attacker itself
+        }
+        Player* target = game_.matchSimulation_.GetPlayer(historical.playerId);
+        if (target == nullptr || !target->IsAlive())
+        {
+            continue;
+        }
+        restore_.push_back(LagCompPlayerPosition { historical.playerId, target->GetPositionVec3() });
+        target->SetPosition(historical.position);
+    }
+}
+
+Game::ScopedLagCompensation::~ScopedLagCompensation()
+{
+    for (const LagCompPlayerPosition& saved : restore_)
+    {
+        if (Player* target = game_.matchSimulation_.GetPlayer(saved.playerId))
+        {
+            target->SetPosition(saved.position);
+        }
+    }
+}
+
 void Game::AddWorldEffect(Vector3 position, Color color, float radius, float seconds)
 {
     if (suppressLocalFeedback_)
@@ -2612,7 +2883,15 @@ Game::CombatPresentationEvent Game::ApplyCombatGameplayEvent(const CombatEvent& 
                     });
                 if (found == likhoBleeds_.end())
                 {
-                    likhoBleeds_.push_back(LikhoBleed { targetPlayer->GetId(), attackerPlayer->GetId(), attackerPlayer->GetTeamId(), 6.0f, 0.8f, 1 });
+                    LikhoBleed bleed {};
+                    bleed.targetPlayerId = targetPlayer->GetId();
+                    bleed.ownerPlayerId = attackerPlayer->GetId();
+                    bleed.ownerTeamId = attackerPlayer->GetTeamId();
+                    bleed.lifetime = 6.0f;
+                    bleed.tickTimer = 0.8f;
+                    bleed.stacks = 1;
+                    bleed.id = NextHeroDeviceId();
+                    likhoBleeds_.push_back(bleed);
                 }
                 else
                 {
@@ -2654,8 +2933,13 @@ Game::CombatPresentationEvent Game::ApplyCombatGameplayEvent(const CombatEvent& 
         }
         if (event.killed && attackerPlayer->GetHeroId() == HeroId::Svidetel)
         {
-            svidetelEchoes_.push_back(SvidetelEcho {
-                targetPlayer->GetPosition(), attackerPlayer->GetId(), attackerPlayer->GetTeamId(), 12.0f, 0.0f, false, {}, 0.0f });
+            SvidetelEcho killEcho {};
+            killEcho.position = targetPlayer->GetPosition();
+            killEcho.ownerPlayerId = attackerPlayer->GetId();
+            killEcho.ownerTeamId = attackerPlayer->GetTeamId();
+            killEcho.lifetime = 12.0f;
+            killEcho.id = NextHeroDeviceId();
+            svidetelEchoes_.push_back(killEcho);
             attackerPlayer->AddHeroUltimateCharge(10.0f);
         }
     }
@@ -2674,6 +2958,10 @@ Game::CombatPresentationEvent Game::ApplyCombatGameplayEvent(const CombatEvent& 
         if (event.coreHit)
         {
             attackerScore.coreDamage += event.damage;
+            if (event.coreDestroyed)
+            {
+                ++attackerScore.coresDestroyed;
+            }
             if (automatch_.active)
             {
                 if (automatch_.currentFirstCoreDamageTime < 0.0f)
@@ -2836,6 +3124,7 @@ void Game::PresentCombatEvent(const CombatPresentationEvent& presentation)
 void Game::RegisterCombatEvent(const CombatEvent& event, const std::string& message)
 {
     const CombatPresentationEvent presentation = ApplyCombatGameplayEvent(event, message);
+    PushCombatEventSnapshots(presentation);
     PresentCombatEvent(presentation);
 }
 

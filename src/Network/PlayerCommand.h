@@ -12,9 +12,59 @@ enum class PlayerActionType : int
     None = 0,
     BuyItem = 1,       // paramA = shop choice id, paramB = repeat count
     DropItem = 2,      // paramA = inventory slot, paramB = count   (reserved)
-    MoveInventory = 3, // paramA = from slot, paramB = to slot      (reserved)
-    ChestTransfer = 4, // paramA = slot, paramB = direction         (reserved)
+    MoveInventory = 3, // legacy paramB=0 quick-move, packed paramB=exact slot move.
+    ChestTransfer = 4, // legacy paramB: 0=deposit, 1=first withdraw, 2=slot withdraw.
+    BlockPlace = 5,    // replicated result/event; not sent as a discrete request yet.
+    BlockBreak = 6,    // replicated result/event; not sent as a discrete request yet.
+    CombatEvent = 7,   // replicated combat/core feedback event.
+    UtilityUse = 8,    // replicated utility item result (heal/teleport/dash/fireball/molotov/alarm).
+    HeroAbility = 9,   // replicated hero ability cast/denied owner-private result.
+    ProjectileLaunch = 10, // replicated bow/blaster spawn/owner feedback event.
 };
+
+enum class InventoryMoveOp : int
+{
+    QuickMove = 0,
+    SlotToSlot = 1,
+};
+
+enum class ChestTransferOp : int
+{
+    DepositFirst = 0,
+    WithdrawFirst = 1,
+    WithdrawExact = 2,
+    PlayerToChestSlot = 3,
+    ChestToPlayerSlot = 4,
+    ChestToChestSlot = 5,
+};
+
+constexpr int kPlayerActionPackedFlag = 0x40000000;
+constexpr int kPlayerActionOpShift = 20;
+constexpr int kPlayerActionSlotShift = 10;
+constexpr int kPlayerActionOpMask = 0x3FF;
+constexpr int kPlayerActionSlotMask = 0x3FF;
+constexpr int kPlayerActionAmountMask = 0x3FF;
+
+inline int PackPlayerActionParam(int op, int slot, int amount = 0)
+{
+    return kPlayerActionPackedFlag
+        | ((op & kPlayerActionOpMask) << kPlayerActionOpShift)
+        | ((slot & kPlayerActionSlotMask) << kPlayerActionSlotShift)
+        | (amount & kPlayerActionAmountMask);
+}
+
+inline bool DecodePackedPlayerActionParam(int packed, int& op, int& slot, int& amount)
+{
+    if ((packed & kPlayerActionPackedFlag) == 0)
+    {
+        return false;
+    }
+
+    op = (packed >> kPlayerActionOpShift) & kPlayerActionOpMask;
+    slot = (packed >> kPlayerActionSlotShift) & kPlayerActionSlotMask;
+    amount = packed & kPlayerActionAmountMask;
+    return true;
+}
 
 // One tick of player input intent, in a transport-friendly, raylib-free form.
 // Humans and (later) bots produce these; the authoritative simulation consumes
@@ -76,4 +126,14 @@ struct PlayerCommand
     int actionType = static_cast<int>(PlayerActionType::None);
     int actionParamA = 0;
     int actionParamB = 0;
+
+    // --- Lag compensation (server-side hitbox rewind) -------------------
+    // The authoritative server tick this client was actually SEEING enemies at
+    // when it issued this command — i.e. the last acknowledged snapshot tick
+    // minus the client's interpolation delay. For an instant-hit melee attack
+    // the server rewinds every OTHER player to their position at this tick
+    // before running the hit test, so a hit that looked good on the laggy
+    // client also lands on the server. 0 means "no rewind" (bots, the SP
+    // integrated server where client==server): the server uses live positions.
+    std::uint32_t rewindTick = 0;
 };

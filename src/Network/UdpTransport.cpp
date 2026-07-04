@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
+#include <random>
 #include <thread>
 #include <utility>
 
@@ -54,6 +56,159 @@ constexpr int kReliableMaxAttempts = 12;
 constexpr float kSnapshotSendIntervalSeconds = 1.0f / 20.0f;
 constexpr float kFullResyncRetryIntervalSeconds = 0.20f;
 constexpr std::size_t kMaxSnapshotPacketBytes = 4096;
+// --- Transport-level packet fragmentation (audit finding: >MTU datagrams) ---
+// Any encoded packet larger than kMaxDatagramBytes (full snapshot baselines,
+// resyncs, delta-overflow fallbacks) is split into PacketFragment datagrams of
+// kFragmentChunkBytes each instead of one huge UDP datagram: a single >1500 B
+// datagram IP-fragments (loss of ANY fragment loses the whole packet, and some
+// middleboxes drop IP fragments outright), and >64 KB would not send at all.
+// 1200 B is the QUIC-style safe-MTU value; the fixed chunk layout keeps
+// reassembly idempotent across reliable retries (fragmentId = the original
+// packet's sequence, stable per retry).
+constexpr std::size_t kMaxDatagramBytes = 1200;
+constexpr std::size_t kFragmentChunkBytes = 1024;
+constexpr std::size_t kMaxAssembledPacketBytes = 512 * 1024;
+constexpr std::size_t kMaxFragmentAssemblies = 8;
+constexpr double kFragmentAssemblyTimeoutSeconds = 3.0;
+
+// --- Test-only datagram loss injection (network debugging) ------------------
+// DAIBED_NET_DROP_PCT=<0..95> makes every endpoint drop that percentage of
+// OUTGOING datagrams before the socket (counters still tick, emulating wire
+// loss). Deterministic seed so a failing run can be replayed. Zero overhead
+// when the variable is unset.
+int NetDropPercent()
+{
+    static const int value = []
+    {
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996) // getenv: fine for a test-only debug knob
+#endif
+        const char* env = std::getenv("DAIBED_NET_DROP_PCT");
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+        if (env == nullptr)
+        {
+            return 0;
+        }
+        const long parsed = std::strtol(env, nullptr, 10);
+        return static_cast<int>(std::clamp(parsed, 0L, 95L));
+    }();
+    return value;
+}
+
+bool DropDatagramForTesting()
+{
+    const int pct = NetDropPercent();
+    if (pct <= 0)
+    {
+        return false;
+    }
+    static std::mt19937 rng { 0xDA1BEDu };
+    return static_cast<int>(rng() % 100u) < pct;
+}
+
+// Reassembles PacketFragment datagrams back into the original oversized packet.
+// Keyed by (endpoint, fragmentId); duplicate chunks (reliable retries) merge
+// idempotently. Stale or conflicting assemblies are dropped defensively.
+struct FragmentAssembler
+{
+    struct Entry
+    {
+        std::uint64_t endpointKey = 0;
+        std::uint32_t fragmentId = 0;
+        std::uint32_t totalSize = 0;
+        std::uint16_t count = 0;
+        std::size_t receivedChunks = 0;
+        std::vector<std::uint8_t> data;
+        std::vector<bool> have;
+        Clock::time_point started;
+    };
+    std::vector<Entry> entries;
+
+    // Returns true and fills `out` when this chunk completed a packet.
+    bool Accept(std::uint64_t endpointKey, std::uint32_t fragmentId,
+                std::uint16_t index, std::uint16_t count, std::uint32_t totalSize,
+                const std::vector<std::uint8_t>& chunk, std::vector<std::uint8_t>& out)
+    {
+        if (count == 0 || index >= count || totalSize == 0
+            || totalSize > kMaxAssembledPacketBytes
+            || static_cast<std::size_t>(count) * kFragmentChunkBytes < totalSize)
+        {
+            return false;
+        }
+        const std::size_t offset = static_cast<std::size_t>(index) * kFragmentChunkBytes;
+        const std::size_t expected = (index + 1u == count)
+            ? static_cast<std::size_t>(totalSize) - offset
+            : kFragmentChunkBytes;
+        if (offset >= totalSize || chunk.size() != expected)
+        {
+            return false;
+        }
+
+        const Clock::time_point now = Clock::now();
+        entries.erase(
+            std::remove_if(entries.begin(), entries.end(),
+                [now](const Entry& entry)
+                {
+                    return std::chrono::duration<double>(now - entry.started).count()
+                        > kFragmentAssemblyTimeoutSeconds;
+                }),
+            entries.end());
+
+        auto found = std::find_if(entries.begin(), entries.end(),
+            [endpointKey, fragmentId](const Entry& entry)
+            {
+                return entry.endpointKey == endpointKey && entry.fragmentId == fragmentId;
+            });
+        if (found == entries.end())
+        {
+            if (entries.size() >= kMaxFragmentAssemblies)
+            {
+                entries.erase(entries.begin());
+            }
+            Entry entry;
+            entry.endpointKey = endpointKey;
+            entry.fragmentId = fragmentId;
+            entry.totalSize = totalSize;
+            entry.count = count;
+            entry.data.resize(totalSize);
+            entry.have.assign(count, false);
+            entry.started = now;
+            entries.push_back(std::move(entry));
+            found = entries.end() - 1;
+        }
+        else if (found->count != count || found->totalSize != totalSize)
+        {
+            return false; // conflicting metadata for the same id — ignore
+        }
+
+        if (!found->have[index])
+        {
+            std::copy(chunk.begin(), chunk.end(),
+                      found->data.begin() + static_cast<std::ptrdiff_t>(offset));
+            found->have[index] = true;
+            ++found->receivedChunks;
+        }
+        if (found->receivedChunks == found->count)
+        {
+            out = std::move(found->data);
+            entries.erase(found);
+            return true;
+        }
+        return false;
+    }
+};
+
+std::uint64_t EndpointKey(const sockaddr_in& addr)
+{
+    return (static_cast<std::uint64_t>(addr.sin_addr.s_addr) << 16)
+        | static_cast<std::uint64_t>(addr.sin_port);
+}
+constexpr std::size_t kCommandBackupCount = 3;
+constexpr std::size_t kMaxSentSnapshotHistory = 32;
+constexpr std::size_t kMaxClientSnapshotHistory = 32;
 
 double SecondsSince(Clock::time_point start)
 {
@@ -327,6 +482,12 @@ struct ServerTransport::Impl
         bool fullSnapshotAcked = false;
         std::uint32_t snapshotBaselineSequence = 0;
         std::uint32_t pendingFullSnapshotSequence = 0;
+        struct SentSnapshot
+        {
+            std::uint32_t sequence = 0;
+            MatchSnapshot snapshot;
+        };
+        std::vector<SentSnapshot> sentSnapshotHistory;
         struct ReliablePacket
         {
             std::uint32_t sequence = 0;
@@ -372,14 +533,45 @@ struct ServerTransport::Impl
     std::vector<ReceivedCommand> commands;
     std::vector<DisconnectedClient> disconnected;
     std::vector<ReconnectedClient> reconnected;
+    FragmentAssembler fragments;
 
     void SendTo(const sockaddr_in& addr, const std::vector<std::uint8_t>& bytes)
     {
-        sendto(sock, reinterpret_cast<const char*>(bytes.data()),
-               static_cast<int>(bytes.size()), 0,
-               reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
+        if (bytes.size() > kMaxDatagramBytes)
+        {
+            SendFragmented(addr, bytes);
+            return;
+        }
+        if (!DropDatagramForTesting())
+        {
+            sendto(sock, reinterpret_cast<const char*>(bytes.data()),
+                   static_cast<int>(bytes.size()), 0,
+                   reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
+        }
         ++packetsSent;
         bytesSent += bytes.size();
+    }
+
+    void SendFragmented(const sockaddr_in& addr, const std::vector<std::uint8_t>& bytes)
+    {
+        PacketHeader original;
+        if (DecodeHeader(bytes.data(), bytes.size(), original) != DecodeStatus::Ok)
+        {
+            return; // never happens for our own encoders
+        }
+        const std::size_t total = bytes.size();
+        const std::uint16_t count = static_cast<std::uint16_t>(
+            (total + kFragmentChunkBytes - 1) / kFragmentChunkBytes);
+        for (std::uint16_t i = 0; i < count; ++i)
+        {
+            const std::size_t offset = static_cast<std::size_t>(i) * kFragmentChunkBytes;
+            const std::size_t len = total - offset < kFragmentChunkBytes
+                ? total - offset
+                : kFragmentChunkBytes;
+            SendTo(addr, EncodePacketFragment(
+                sequence++, original.sequence, i, count,
+                static_cast<std::uint32_t>(total), bytes.data() + offset, len));
+        }
     }
 
     void QueueReliable(ClientChannel& client, MessageType type, std::uint32_t seq,
@@ -419,6 +611,48 @@ struct ServerTransport::Impl
         {
             client.fullSnapshotAcked = true;
         }
+        if (ackedType == MessageType::SnapshotDelta)
+        {
+            const auto found = std::find_if(
+                client.sentSnapshotHistory.begin(),
+                client.sentSnapshotHistory.end(),
+                [ackedSequence](const ClientChannel::SentSnapshot& sent)
+                {
+                    return sent.sequence == ackedSequence;
+                });
+            if (found != client.sentSnapshotHistory.end()
+                && ackedSequence > client.snapshotBaselineSequence)
+            {
+                client.snapshotBaseline = found->snapshot;
+                client.snapshotBaselineSequence = ackedSequence;
+                client.hasSnapshotBaseline = true;
+                client.fullSnapshotAcked = true;
+                client.sentSnapshotHistory.erase(
+                    std::remove_if(
+                        client.sentSnapshotHistory.begin(),
+                        client.sentSnapshotHistory.end(),
+                        [ackedSequence](const ClientChannel::SentSnapshot& sent)
+                        {
+                            return sent.sequence <= ackedSequence;
+                        }),
+                    client.sentSnapshotHistory.end());
+            }
+        }
+    }
+
+    void QueueDecodedCommand(ClientChannel& client, PlayerCommand command)
+    {
+        if (command.tick <= client.lastProcessedCommandTick)
+        {
+            ++staleCommandsDropped;
+            client.lastSeen = Clock::now();
+            return;
+        }
+        // Authoritative mapping: stamp to the client's own player.
+        command.controlledPlayerId = static_cast<std::uint32_t>(client.playerId);
+        client.lastProcessedCommandTick = command.tick;
+        commands.push_back(ReceivedCommand { client.clientId, command });
+        client.lastSeen = Clock::now();
     }
 
     void RetryReliable()
@@ -651,9 +885,9 @@ void ServerTransport::Poll()
     {
         sockaddr_in from;
         socklen_t fromLen = sizeof(from);
-        const int n = recvfrom(impl_->sock, reinterpret_cast<char*>(buffer.data()),
-                               static_cast<int>(buffer.size()), 0,
-                               reinterpret_cast<sockaddr*>(&from), &fromLen);
+        int n = recvfrom(impl_->sock, reinterpret_cast<char*>(buffer.data()),
+                         static_cast<int>(buffer.size()), 0,
+                         reinterpret_cast<sockaddr*>(&from), &fromLen);
         if (n <= 0)
         {
             if (n < 0 && !WouldBlock(LastSocketError()))
@@ -669,6 +903,41 @@ void ServerTransport::Poll()
         if (DecodeHeader(buffer.data(), static_cast<std::size_t>(n), header) != DecodeStatus::Ok)
         {
             continue; // bad magic / version / truncated — ignore, never crash
+        }
+
+        // Oversized-packet reassembly: a completed fragment set replaces the
+        // datagram in `buffer` and re-enters the normal dispatch below as if
+        // the original packet had arrived whole.
+        if (header.type == MessageType::PacketFragment)
+        {
+            PacketHeader fragHeader;
+            std::uint32_t fragmentId = 0;
+            std::uint16_t fragmentIndex = 0;
+            std::uint16_t fragmentCount = 0;
+            std::uint32_t totalSize = 0;
+            std::vector<std::uint8_t> chunk;
+            if (DecodePacketFragment(buffer.data(), static_cast<std::size_t>(n), fragHeader,
+                                     fragmentId, fragmentIndex, fragmentCount, totalSize, chunk)
+                != DecodeStatus::Ok)
+            {
+                continue;
+            }
+            std::vector<std::uint8_t> assembled;
+            if (!impl_->fragments.Accept(EndpointKey(from), fragmentId, fragmentIndex,
+                                         fragmentCount, totalSize, chunk, assembled))
+            {
+                continue; // incomplete (or rejected) — wait for more chunks
+            }
+            if (assembled.size() > buffer.size())
+            {
+                buffer.resize(assembled.size());
+            }
+            std::copy(assembled.begin(), assembled.end(), buffer.begin());
+            n = static_cast<int>(assembled.size());
+            if (DecodeHeader(buffer.data(), static_cast<std::size_t>(n), header) != DecodeStatus::Ok)
+            {
+                continue;
+            }
         }
 
         Impl::ClientChannel* client = impl_->FindByEndpoint(from);
@@ -791,6 +1060,7 @@ void ServerTransport::Poll()
                     (void)lastKnownTick;
                     client->needsFullSnapshot = true;
                     client->fullSnapshotAcked = false;
+                    client->sentSnapshotHistory.clear();
                     ++impl_->resyncRequestsReceived;
                     client->lastSeen = Clock::now();
                 }
@@ -846,6 +1116,7 @@ void ServerTransport::Poll()
                         client->hasSnapshotBaseline = false;
                         client->needsFullSnapshot = true;
                         client->fullSnapshotAcked = false;
+                        client->sentSnapshotHistory.clear();
                         ++impl_->lobbyRevision;
                         const std::uint32_t seq = impl_->sequence++;
                         impl_->QueueReliable(
@@ -867,13 +1138,24 @@ void ServerTransport::Poll()
                     {
                         impl_->lobbyStatusOverride.clear();
                     }
+                    const LobbyUpdate before = client->lobby;
                     ApplyLobbyUpdate(client->lobby, update, impl_->config, client->clientId);
                     if (!impl_->IsHost(client->clientId))
                     {
                         client->lobby.startRequested = false;
                     }
                     client->lastSeen = Clock::now();
-                    ++impl_->lobbyRevision;
+                    // Clients re-send their lobby intent periodically for loss
+                    // resilience; only a real change bumps the revision.
+                    const bool changed = before.playerName != client->lobby.playerName
+                        || before.selectedTeam != client->lobby.selectedTeam
+                        || before.selectedHero != client->lobby.selectedHero
+                        || before.ready != client->lobby.ready
+                        || before.startRequested != client->lobby.startRequested;
+                    if (changed)
+                    {
+                        ++impl_->lobbyRevision;
+                    }
                 }
             }
             break;
@@ -888,17 +1170,25 @@ void ServerTransport::Poll()
                 if (DecodePlayerCommand(buffer.data(), static_cast<std::size_t>(n), cmdHeader, command)
                     == DecodeStatus::Ok)
                 {
-                    if (command.tick <= client->lastProcessedCommandTick)
+                    impl_->QueueDecodedCommand(*client, command);
+                }
+            }
+            break;
+        }
+        case MessageType::PlayerCommandBatch:
+        {
+            // Only assigned clients may drive a player.
+            if (client != nullptr && client->ackSent && client->playerId >= 0)
+            {
+                PacketHeader batchHeader;
+                std::vector<PlayerCommand> commands;
+                if (DecodePlayerCommandBatch(buffer.data(), static_cast<std::size_t>(n),
+                                             batchHeader, commands) == DecodeStatus::Ok)
+                {
+                    for (const PlayerCommand& command : commands)
                     {
-                        ++impl_->staleCommandsDropped;
-                        client->lastSeen = Clock::now();
-                        break;
+                        impl_->QueueDecodedCommand(*client, command);
                     }
-                    // Authoritative mapping: stamp to the client's own player.
-                    command.controlledPlayerId = static_cast<std::uint32_t>(client->playerId);
-                    client->lastProcessedCommandTick = command.tick;
-                    impl_->commands.push_back(ReceivedCommand { client->clientId, command });
-                    client->lastSeen = Clock::now();
                 }
             }
             break;
@@ -957,6 +1247,7 @@ void ServerTransport::AssignPlayer(int clientId, int playerId)
     client->fullSnapshotAcked = false;
     client->snapshotBaselineSequence = 0;
     client->pendingFullSnapshotSequence = 0;
+    client->sentSnapshotHistory.clear();
     ++impl_->lobbyRevision;
 }
 
@@ -1131,6 +1422,7 @@ void ServerTransport::SendSnapshotToClient(int clientId, const MatchSnapshot& sn
             client->hasSnapshotBaseline = true;
             client->needsFullSnapshot = false;
             client->fullSnapshotAcked = false;
+            client->sentSnapshotHistory.clear();
             client->lastSnapshotSent = now;
             ++impl_->fullSnapshotsSent;
             impl_->lastFullSnapshotBytes = bytes.size();
@@ -1156,14 +1448,19 @@ void ServerTransport::SendSnapshotToClient(int clientId, const MatchSnapshot& sn
             client->pendingFullSnapshotSequence = fullSeq;
             client->hasSnapshotBaseline = true;
             client->needsFullSnapshot = false;
+            client->sentSnapshotHistory.clear();
             client->lastSnapshotSent = now;
             ++impl_->fullSnapshotsSent;
             impl_->lastFullSnapshotBytes = fullBytes.size();
             return;
         }
         impl_->SendTo(client->addr, bytes);
-        client->snapshotBaseline = perClientSnapshot;
-        client->snapshotBaselineSequence = seq;
+        client->sentSnapshotHistory.push_back(
+            Impl::ClientChannel::SentSnapshot { seq, perClientSnapshot });
+        while (client->sentSnapshotHistory.size() > kMaxSentSnapshotHistory)
+        {
+            client->sentSnapshotHistory.erase(client->sentSnapshotHistory.begin());
+        }
         client->lastSnapshotSent = now;
         ++impl_->deltaSnapshotsSent;
         impl_->lastDeltaSnapshotBytes = bytes.size();
@@ -1183,6 +1480,28 @@ void ServerTransport::BroadcastSnapshot(const MatchSnapshot& snapshot)
             SendSnapshotToClient(client.clientId, snapshot);
         }
     }
+}
+
+bool ServerTransport::NeedsSnapshotForClient(int clientId) const
+{
+    if (impl_->sock == kInvalidSocket)
+    {
+        return false;
+    }
+    const Impl::ClientChannel* client = impl_->FindById(clientId);
+    if (client == nullptr || client->playerId < 0)
+    {
+        return false;
+    }
+    if (!client->hasSnapshotBaseline || client->needsFullSnapshot)
+    {
+        return true;
+    }
+    if (!client->fullSnapshotAcked)
+    {
+        return false;
+    }
+    return SecondsSince(client->lastSnapshotSent) >= kSnapshotSendIntervalSeconds;
 }
 
 std::vector<ReceivedCommand> ServerTransport::DrainCommands()
@@ -1209,6 +1528,15 @@ std::uint32_t ServerTransport::LastProcessedCommandTick(int clientId) const
 {
     const Impl::ClientChannel* client = impl_->FindById(clientId);
     return client != nullptr ? client->lastProcessedCommandTick : 0;
+}
+
+void ServerTransport::AdvanceProcessedCommandTick(int clientId, std::uint32_t tick)
+{
+    Impl::ClientChannel* client = impl_->FindById(clientId);
+    if (client != nullptr && tick > client->lastProcessedCommandTick)
+    {
+        client->lastProcessedCommandTick = tick;
+    }
 }
 
 int ServerTransport::PlayerForClient(int clientId) const
@@ -1258,6 +1586,11 @@ struct ClientTransport::Impl
     Clock::time_point openTime;
     Clock::time_point lastServerSeen;
     Clock::time_point lastHello;
+    // Last lobby intent, re-sent periodically until the match starts (see
+    // SendLobbyUpdate for why plain one-shot sends were not enough).
+    LobbyUpdate lastLobbyUpdate {};
+    bool hasLobbyUpdate = false;
+    Clock::time_point lastLobbyUpdateSent;
     Clock::time_point latestSnapshotReceivedAt;
     Clock::time_point lastCommandReplay;
     Clock::time_point lastFullResyncRequest;
@@ -1276,6 +1609,13 @@ struct ClientTransport::Impl
     std::size_t lastFullSnapshotBytes = 0;
     std::size_t lastDeltaSnapshotBytes = 0;
     std::uint32_t lastAckedCommandTick = 0;
+    struct SnapshotHistoryEntry
+    {
+        std::uint32_t sequence = 0;
+        MatchSnapshot snapshot;
+    };
+    std::vector<SnapshotHistoryEntry> snapshotHistory;
+    FragmentAssembler fragments;
     std::vector<PlayerCommand> pendingCommands;
     MatchSnapshot latestSnapshot;
     LobbySnapshot latestLobbySnapshot;
@@ -1286,9 +1626,34 @@ struct ClientTransport::Impl
         {
             return;
         }
-        sendto(sock, reinterpret_cast<const char*>(bytes.data()),
-               static_cast<int>(bytes.size()), 0,
-               reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr));
+        if (bytes.size() > kMaxDatagramBytes)
+        {
+            PacketHeader original;
+            if (DecodeHeader(bytes.data(), bytes.size(), original) != DecodeStatus::Ok)
+            {
+                return;
+            }
+            const std::size_t total = bytes.size();
+            const std::uint16_t count = static_cast<std::uint16_t>(
+                (total + kFragmentChunkBytes - 1) / kFragmentChunkBytes);
+            for (std::uint16_t i = 0; i < count; ++i)
+            {
+                const std::size_t offset = static_cast<std::size_t>(i) * kFragmentChunkBytes;
+                const std::size_t len = total - offset < kFragmentChunkBytes
+                    ? total - offset
+                    : kFragmentChunkBytes;
+                SendBytes(EncodePacketFragment(
+                    sequence++, original.sequence, i, count,
+                    static_cast<std::uint32_t>(total), bytes.data() + offset, len));
+            }
+            return;
+        }
+        if (!DropDatagramForTesting())
+        {
+            sendto(sock, reinterpret_cast<const char*>(bytes.data()),
+                   static_cast<int>(bytes.size()), 0,
+                   reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr));
+        }
         ++packetsSent;
         bytesSent += bytes.size();
     }
@@ -1328,6 +1693,65 @@ struct ClientTransport::Impl
             hasSnapshot ? latestSnapshot.tick : 0));
         lastFullResyncRequest = Clock::now();
         ++resyncRequestsSent;
+    }
+
+    void RememberSnapshot(std::uint32_t snapshotSequence, const MatchSnapshot& snapshot)
+    {
+        const auto existing = std::find_if(
+            snapshotHistory.begin(),
+            snapshotHistory.end(),
+            [snapshotSequence](const SnapshotHistoryEntry& entry)
+            {
+                return entry.sequence == snapshotSequence;
+            });
+        if (existing != snapshotHistory.end())
+        {
+            existing->snapshot = snapshot;
+        }
+        else
+        {
+            snapshotHistory.push_back(SnapshotHistoryEntry { snapshotSequence, snapshot });
+        }
+        while (snapshotHistory.size() > kMaxClientSnapshotHistory)
+        {
+            snapshotHistory.erase(snapshotHistory.begin());
+        }
+    }
+
+    const MatchSnapshot* FindSnapshotHistory(std::uint32_t snapshotSequence, std::uint32_t tick) const
+    {
+        const auto found = std::find_if(
+            snapshotHistory.begin(),
+            snapshotHistory.end(),
+            [snapshotSequence, tick](const SnapshotHistoryEntry& entry)
+            {
+                return entry.sequence == snapshotSequence && entry.snapshot.tick == tick;
+            });
+        return found != snapshotHistory.end() ? &found->snapshot : nullptr;
+    }
+
+    void SendCommandWindow(std::size_t begin, std::size_t end)
+    {
+        if (begin >= end || begin >= pendingCommands.size())
+        {
+            return;
+        }
+        end = end < pendingCommands.size() ? end : pendingCommands.size();
+        std::vector<PlayerCommand> commands(
+            pendingCommands.begin() + static_cast<std::ptrdiff_t>(begin),
+            pendingCommands.begin() + static_cast<std::ptrdiff_t>(end));
+        if (commands.empty())
+        {
+            return;
+        }
+        if (commands.size() == 1)
+        {
+            SendBytes(EncodePlayerCommand(sequence++, commands.front()));
+        }
+        else
+        {
+            SendBytes(EncodePlayerCommandBatch(sequence++, commands));
+        }
     }
 };
 
@@ -1416,7 +1840,9 @@ bool ClientTransport::Open(const std::string& host, std::uint16_t port, const st
     impl_->bytesPerSecond = 0.0f;
     impl_->packetsPerSecond = 0.0f;
     impl_->lastAckedCommandTick = 0;
+    impl_->snapshotHistory.clear();
     impl_->pendingCommands.clear();
+    impl_->hasLobbyUpdate = false;
 
     // Say hello with the join token. Delivery is best-effort; Poll() re-sends it
     // until we get a ConnectAck or ConnectDenied. A dead server just never
@@ -1477,7 +1903,9 @@ void ClientTransport::Close()
     impl_->lastFullSnapshotBytes = 0;
     impl_->lastDeltaSnapshotBytes = 0;
     impl_->lastAckedCommandTick = 0;
+    impl_->snapshotHistory.clear();
     impl_->pendingCommands.clear();
+    impl_->hasLobbyUpdate = false;
     impl_->assignedPlayerId = -1;
     impl_->lobbyClientId = -1;
     if (impl_->inited)
@@ -1500,9 +1928,9 @@ void ClientTransport::Poll()
     {
         sockaddr_in from;
         socklen_t fromLen = sizeof(from);
-        const int n = recvfrom(impl_->sock, reinterpret_cast<char*>(buffer.data()),
-                               static_cast<int>(buffer.size()), 0,
-                               reinterpret_cast<sockaddr*>(&from), &fromLen);
+        int n = recvfrom(impl_->sock, reinterpret_cast<char*>(buffer.data()),
+                         static_cast<int>(buffer.size()), 0,
+                         reinterpret_cast<sockaddr*>(&from), &fromLen);
         if (n <= 0)
         {
             break;
@@ -1519,6 +1947,41 @@ void ClientTransport::Poll()
             continue;
         }
         impl_->lastServerSeen = Clock::now();
+
+        // Oversized-packet reassembly (full snapshot baselines / resyncs): a
+        // completed fragment set replaces the datagram in `buffer` and falls
+        // through into the normal dispatch below.
+        if (header.type == MessageType::PacketFragment)
+        {
+            PacketHeader fragHeader;
+            std::uint32_t fragmentId = 0;
+            std::uint16_t fragmentIndex = 0;
+            std::uint16_t fragmentCount = 0;
+            std::uint32_t totalSize = 0;
+            std::vector<std::uint8_t> chunk;
+            if (DecodePacketFragment(buffer.data(), static_cast<std::size_t>(n), fragHeader,
+                                     fragmentId, fragmentIndex, fragmentCount, totalSize, chunk)
+                != DecodeStatus::Ok)
+            {
+                continue;
+            }
+            std::vector<std::uint8_t> assembled;
+            if (!impl_->fragments.Accept(0, fragmentId, fragmentIndex,
+                                         fragmentCount, totalSize, chunk, assembled))
+            {
+                continue; // incomplete — wait for the remaining chunks
+            }
+            if (assembled.size() > buffer.size())
+            {
+                buffer.resize(assembled.size());
+            }
+            std::copy(assembled.begin(), assembled.end(), buffer.begin());
+            n = static_cast<int>(assembled.size());
+            if (DecodeHeader(buffer.data(), static_cast<std::size_t>(n), header) != DecodeStatus::Ok)
+            {
+                continue;
+            }
+        }
         switch (header.type)
         {
         case MessageType::ConnectAck:
@@ -1586,6 +2049,7 @@ void ClientTransport::Poll()
                 impl_->latestSnapshot = std::move(snapshot);
                 impl_->hasSnapshot = true;
                 impl_->lastSnapshotSequence = snapHeader.sequence;
+                impl_->RememberSnapshot(impl_->lastSnapshotSequence, impl_->latestSnapshot);
                 impl_->fullResyncRequested = false;
                 ++impl_->fullSnapshotsReceived;
                 ++impl_->acceptedSnapshots;
@@ -1615,7 +2079,7 @@ void ClientTransport::Poll()
                 == DecodeStatus::Ok)
             {
                 impl_->lastDeltaSnapshotBytes = static_cast<std::size_t>(n);
-                const SnapshotDeltaApplyStatus applyStatus = ApplySnapshotDeltaIfCompatible(
+                SnapshotDeltaApplyStatus applyStatus = ApplySnapshotDeltaIfCompatible(
                     impl_->hasSnapshot,
                     impl_->latestSnapshot,
                     impl_->lastSnapshotSequence,
@@ -1623,8 +2087,30 @@ void ClientTransport::Poll()
                     delta);
                 if (applyStatus == SnapshotDeltaApplyStatus::OldSnapshot)
                 {
+                    impl_->SendAck(snapHeader);
                     ++impl_->ignoredSnapshots;
                     break;
+                }
+                if (applyStatus == SnapshotDeltaApplyStatus::BaselineMismatch
+                    && snapHeader.sequence > impl_->lastSnapshotSequence)
+                {
+                    if (const MatchSnapshot* historical =
+                            impl_->FindSnapshotHistory(delta.baselineSequence, delta.baselineTick))
+                    {
+                        MatchSnapshot recovered = *historical;
+                        std::uint32_t recoveredSequence = delta.baselineSequence;
+                        applyStatus = ApplySnapshotDeltaIfCompatible(
+                            true,
+                            recovered,
+                            recoveredSequence,
+                            snapHeader.sequence,
+                            delta);
+                        if (applyStatus == SnapshotDeltaApplyStatus::Applied)
+                        {
+                            impl_->latestSnapshot = std::move(recovered);
+                            impl_->lastSnapshotSequence = recoveredSequence;
+                        }
+                    }
                 }
                 if (SnapshotDeltaStatusNeedsFullResync(applyStatus))
                 {
@@ -1632,7 +2118,10 @@ void ClientTransport::Poll()
                     impl_->RequestFullResync(true);
                     break;
                 }
+                impl_->SendAck(snapHeader);
                 impl_->hasSnapshot = true;
+                impl_->RememberSnapshot(impl_->lastSnapshotSequence, impl_->latestSnapshot);
+                impl_->fullResyncRequested = false;
                 ++impl_->deltaSnapshotsReceived;
                 ++impl_->acceptedSnapshots;
                 impl_->latestSnapshotReceivedAt = Clock::now();
@@ -1665,7 +2154,9 @@ void ClientTransport::Poll()
                 impl_->denyReason = reason;
                 impl_->connected = false;
                 impl_->inMatch = false;
+                impl_->snapshotHistory.clear();
                 impl_->pendingCommands.clear();
+                impl_->hasLobbyUpdate = false;
             }
             break;
         }
@@ -1699,13 +2190,23 @@ void ClientTransport::Poll()
         impl_->RequestFullResync(false);
     }
 
+    // Pre-match lobby intent rides best-effort datagrams; re-send the latest
+    // state periodically so a lost ready/start can never strand the client in
+    // the lobby (idempotent server-side; the server only bumps its lobby
+    // revision when the applied state actually changed).
+    if (impl_->connected && !impl_->inMatch && impl_->hasLobbyUpdate
+        && SecondsSince(impl_->lastLobbyUpdateSent) > 0.4)
+    {
+        impl_->SendBytes(EncodeLobbyUpdate(impl_->sequence++, impl_->lastLobbyUpdate));
+        impl_->lastLobbyUpdateSent = Clock::now();
+    }
+
     if (impl_->connected && impl_->inMatch && !impl_->pendingCommands.empty()
         && SecondsSince(impl_->lastCommandReplay) > kCommandReplayIntervalSeconds)
     {
-        for (const PlayerCommand& command : impl_->pendingCommands)
+        for (std::size_t i = 0; i < impl_->pendingCommands.size(); i += kCommandBackupCount)
         {
-            const std::vector<std::uint8_t> bytes = EncodePlayerCommand(impl_->sequence++, command);
-            impl_->SendBytes(bytes);
+            impl_->SendCommandWindow(i, i + kCommandBackupCount);
         }
         impl_->lastCommandReplay = Clock::now();
     }
@@ -1741,8 +2242,9 @@ void ClientTransport::SendCommand(const PlayerCommand& command)
             impl_->pendingCommands.erase(impl_->pendingCommands.begin());
         }
     }
-    const std::vector<std::uint8_t> bytes = EncodePlayerCommand(impl_->sequence++, command);
-    impl_->SendBytes(bytes);
+    const std::size_t pendingCount = impl_->pendingCommands.size();
+    const std::size_t count = kCommandBackupCount < pendingCount ? kCommandBackupCount : pendingCount;
+    impl_->SendCommandWindow(impl_->pendingCommands.size() - count, impl_->pendingCommands.size());
     impl_->lastCommandReplay = Clock::now();
 }
 
@@ -1752,6 +2254,14 @@ void ClientTransport::SendLobbyUpdate(const LobbyUpdate& update)
     {
         return;
     }
+    // Lobby intent is idempotent STATE (name/team/hero/ready/start), so its
+    // reliability is periodic re-send from Poll(), not an ack protocol: a
+    // single unreliable send used to strand a lossy client in the lobby
+    // forever when its one ready/start datagram was lost (found by the
+    // DAIBED_NET_DROP_PCT loss-injection stress).
+    impl_->lastLobbyUpdate = update;
+    impl_->hasLobbyUpdate = true;
+    impl_->lastLobbyUpdateSent = Clock::now();
     const std::vector<std::uint8_t> bytes = EncodeLobbyUpdate(impl_->sequence++, update);
     impl_->SendBytes(bytes);
 }
@@ -2015,6 +2525,7 @@ void ServerTransport::BroadcastLobbySnapshot(const LobbySnapshot&) {}
 void ServerTransport::SendLobbySnapshotToClient(int, const LobbySnapshot&) {}
 void ServerTransport::BroadcastSnapshot(const MatchSnapshot&) {}
 void ServerTransport::SendSnapshotToClient(int, const MatchSnapshot&) {}
+bool ServerTransport::NeedsSnapshotForClient(int) const { return false; }
 std::vector<ReceivedCommand> ServerTransport::DrainCommands() { return {}; }
 std::size_t ServerTransport::ClientCount() const { return 0; }
 std::uint16_t ServerTransport::BoundPort() const { return 0; }
@@ -2029,6 +2540,7 @@ std::uint32_t ServerTransport::ResyncRequestsReceived() const { return 0; }
 std::size_t ServerTransport::LastFullSnapshotBytes() const { return 0; }
 std::size_t ServerTransport::LastDeltaSnapshotBytes() const { return 0; }
 std::uint32_t ServerTransport::LastProcessedCommandTick(int) const { return 0; }
+void ServerTransport::AdvanceProcessedCommandTick(int, std::uint32_t) {}
 int ServerTransport::PlayerForClient(int) const { return -1; }
 std::vector<int> ServerTransport::ConnectedClients() const { return {}; }
 

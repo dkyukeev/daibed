@@ -407,5 +407,6 @@ bool World::IsCollisionBlock(BlockType type)
         || type == BlockType::LavaBlock
         || type == BlockType::IceBlock
         || type == BlockType::ResourceGenerator
+        || type == BlockType::TeamChestBlock
         || type == BlockType::EnergyCoreBlock;
 }

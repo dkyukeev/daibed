@@ -415,6 +415,7 @@ void Game::SetupMatch()
     predictionCorrectionsPerSecond_ = 0.0f;
     unackedCommandCount_ = 0;
     lastAuthoritativeTick_ = 0;
+    lagCompHistory_.clear();
     matchSimulation_.Reset(); // clears tick/clock/queue + winner + phase (Lobby)
     suddenDeathTiebreakTeamId_.reset();
     coreCollapseTriggered_ = false;
@@ -423,6 +424,17 @@ void Game::SetupMatch()
     generatorBoostTriggered_ = false;
     shopOpen_ = false;
     economyActionSeq_.clear();
+    recentActionResults_.clear();
+    presentedActionResultSeq_.clear();
+    nextActionResultSeq_ = 0;
+    recentWorldEvents_.clear();
+    nextWorldEventSeq_ = 0;
+    presentedWorldEventSeq_ = 0;
+    nextProjectileId_ = 0;
+    nextExplosiveId_ = 0;
+    nextHazardZoneId_ = 0;
+    nextHeroDeviceId_ = 0;
+    nextDroppedItemId_ = 0;
     clientEconomyActionSeq_ = 0;
     pendingEconomyActionType_ = PlayerActionType::None;
     pendingEconomyActionParamA_ = 0;
@@ -432,6 +444,8 @@ void Game::SetupMatch()
     CloseChest();
     inventoryCursorSlot_ = 0;
     heldInventoryStack_ = ItemStack {};
+    heldInventoryOrigin_ = HeldInventoryOrigin::None;
+    heldInventoryOriginSlot_ = -1;
     attackChargeActive_ = false;
     attackChargeTimer_ = 0.0f;
     sniperScopeBlend_ = 0.0f;
@@ -501,6 +515,11 @@ void Game::SetupMatch()
     teams_.push_back(green);
     teams_.push_back(yellow);
 
+    teams_[0].teamChestBlock = GridPos { -40, 1, -3 };
+    teams_[1].teamChestBlock = GridPos { 40, 1, 3 };
+    teams_[2].teamChestBlock = GridPos { -3, 1, -40 };
+    teams_[3].teamChestBlock = GridPos { 3, 1, 40 };
+
     switch (arenaBiome_)
     {
     case ArenaBiome::Ice:
@@ -536,6 +555,7 @@ void Game::SetupMatch()
         world_.PlaceBlock(GridPos { team.coreBlock.x - 1, team.coreBlock.y, team.coreBlock.z }, Block { BlockType::WoolBlock, team.id, true }, true);
         world_.PlaceBlock(GridPos { team.coreBlock.x, team.coreBlock.y, team.coreBlock.z + 1 }, Block { BlockType::WoolBlock, team.id, true }, true);
         world_.PlaceBlock(GridPos { team.coreBlock.x, team.coreBlock.y, team.coreBlock.z - 1 }, Block { BlockType::WoolBlock, team.id, true }, true);
+        world_.PlaceBlock(team.teamChestBlock, Block { BlockType::TeamChestBlock, team.id, false }, true);
     }
 
     SetupGenerators();
@@ -753,6 +773,17 @@ void Game::SetupMatch()
     // above set it to Lobby; the win condition will move it to Finished.
     matchSimulation_.ResetBlockDeltas();
     matchSimulation_.SetPhase(MatchPhase::Playing);
+
+    // Phase 6: plain singleplayer runs an in-process integrated server for the
+    // local human. Automatch stays direct — there is no human client to route.
+    if (networkMode_ == NetworkMode::LocalSinglePlayer && !automatch_.active)
+    {
+        StartIntegratedServer();
+    }
+    else
+    {
+        StopIntegratedServer();
+    }
 }
 
 void Game::AddClassicArenaLayout()

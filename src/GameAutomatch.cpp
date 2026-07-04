@@ -175,7 +175,7 @@ void Game::ConfigureAutomatchMatch()
     automatch_.currentTimeline.clear();
 
     players_.erase(
-        std::remove_if(players_.begin(), players_.end(), [](const Player& player) { return !player.IsLocal(); }),
+        std::remove_if(players_.begin(), players_.end(), [](const Player& player) { return !IsLocallyPredicted(player.GetControlKind()); }),
         players_.end());
     int nextId = localPlayerId_ + 1;
     for (Team& team : teams_)
@@ -211,7 +211,7 @@ void Game::ConfigureAutomatchMatch()
     for (Player& player : players_)
     {
         const int teamId = player.GetTeamId();
-        if (player.IsLocal() || teamId < 0 || teamId >= static_cast<int>(heroSlotByTeam.size()))
+        if (IsLocallyPredicted(player.GetControlKind()) || teamId < 0 || teamId >= static_cast<int>(heroSlotByTeam.size()))
         {
             continue;
         }
@@ -232,7 +232,7 @@ void Game::ConfigureAutomatchMatch()
     spectatorTargetIndex_ = 0;
     for (int i = 0; i < static_cast<int>(players_.size()); ++i)
     {
-        if (!players_[i].IsLocal() && players_[i].IsAlive() && !players_[i].IsEliminated())
+        if (!IsLocallyPredicted(players_[i].GetControlKind()) && players_[i].IsAlive() && !players_[i].IsEliminated())
         {
             spectatorTargetIndex_ = i;
             spectatorPosition_ = players_[i].GetPosition();
@@ -293,7 +293,7 @@ void Game::SampleAutomatchBots()
 
     for (const Player& player : players_)
     {
-        if (player.IsLocal())
+        if (IsLocallyPredicted(player.GetControlKind()))
         {
             continue;
         }
@@ -397,7 +397,7 @@ void Game::FinishAutomatchRun(bool timeout)
     }
     for (const Player& player : players_)
     {
-        if (player.IsLocal())
+        if (IsLocallyPredicted(player.GetControlKind()))
         {
             continue;
         }
@@ -431,7 +431,7 @@ void Game::FinishAutomatchRun(bool timeout)
 
     for (const Player& player : players_)
     {
-        if (player.IsLocal())
+        if (IsLocallyPredicted(player.GetControlKind()))
         {
             continue;
         }
@@ -460,7 +460,7 @@ void Game::FinishAutomatchRun(bool timeout)
 
     for (const Player& player : players_)
     {
-        if (player.IsLocal() || player.GetTeamId() < 0 || player.GetTeamId() >= 4)
+        if (IsLocallyPredicted(player.GetControlKind()) || player.GetTeamId() < 0 || player.GetTeamId() >= 4)
         {
             continue;
         }

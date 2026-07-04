@@ -78,6 +78,16 @@ Vector3 Normalize(Vector3 value)
     return Vector3 { value.x / length, value.y / length, value.z / length };
 }
 
+Vector3 AimDirectionFromCommandInput(const PlayerCommand& command)
+{
+    const float cosPitch = std::cos(command.aimPitch);
+    return Vector3 {
+        std::sin(command.aimYaw) * cosPitch,
+        std::sin(command.aimPitch),
+        -std::cos(command.aimYaw) * cosPitch
+    };
+}
+
 int ResourceIndex(ResourceType type)
 {
     return static_cast<int>(type);
@@ -156,16 +166,10 @@ void Game::UseHeroAbilityInputs(Player& player)
         return;
     }
 
-    if (command.useAbility1)
-    {
-        UseHeroAbility(player, HeroAbilitySlot::Active1);
-    }
-    if (command.useAbility2)
-    {
-        UseHeroAbility(player, HeroAbilitySlot::Active2);
-    }
     if (command.useUltimate)
     {
+        // Client-side teleport preview: pure presentation, so it stays here even
+        // when the cast itself is routed through the integrated server below.
         if (HasLocalCamera(controlKind) && player.GetHeroId() == HeroId::Orbita)
         {
             orbitaTeleportPreview_ = BuildOrbitaTeleportPreview(player);
@@ -175,8 +179,11 @@ void Game::UseHeroAbilityInputs(Player& player)
         {
             orbitaTeleportPreviewTimer_ = 0.0f;
         }
-        UseHeroAbility(player, HeroAbilitySlot::Ultimate);
     }
+
+    // The cast itself always rides this tick's command into the authoritative
+    // entry (ApplyPlayerActionCommand — via the integrated loopback server in
+    // SP, the real server in MP). This input hook is presentation-only.
 }
 
 // Applies the per-tick action intents of a command (hero abilities) to a
@@ -191,16 +198,31 @@ bool Game::ApplyPlayerActionCommand(Player& player, const PlayerCommand& command
         return false;
     }
 
-    const auto applySlot = [this, &player](HeroAbilitySlot slot)
+    // This is the network/bot/integrated-server cast entry, so the owner-private
+    // replicated push belongs here: it is the only way a real remote client
+    // learns their cast succeeded/was denied/is on cooldown. The locally
+    // predicted human (integrated SP client, Phase 6) doesn't consume
+    // ActionResultSnapshots yet — present its result directly, like
+    // ApplyNetworkBlockPlace does for the place slice.
+    const auto applySlot = [this, &player, &command, controlKind](HeroAbilitySlot slot)
     {
-        const HeroAbilityActionResult result = ApplyHeroAbilityAction(player, slot);
+        const HeroAbilityActionResult result = ApplyHeroAbilityAction(player, slot, &command);
         if (result.handled)
         {
+            PushHeroAbilityActionResultSnapshot(player, result);
+            if (IsLocallyPredicted(controlKind))
+            {
+                PresentHeroAbilityResult(result);
+            }
             return result.success;
         }
 
-        ScopedLocalFeedbackSuppression suppressLegacyFeedback(*this, true);
-        return UseHeroAbilityLegacy(player, slot);
+        // Every existing hero is fully handled by ApplyHeroAbilityAction (its
+        // per-hero branches all set handled=true). The old per-hero direct
+        // handlers were an unreachable duplicate with divergent camera-based
+        // aim and have been deleted. A future hero without a result branch
+        // lands here: treat it as an unimplemented, denied cast.
+        return false;
     };
 
     bool used = false;
@@ -219,7 +241,7 @@ bool Game::ApplyPlayerActionCommand(Player& player, const PlayerCommand& command
     return used;
 }
 
-Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroAbilitySlot slot)
+Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroAbilitySlot slot, const PlayerCommand* command)
 {
     HeroAbilityActionResult result {};
     result.hero = player.GetHeroId();
@@ -231,14 +253,16 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
         return result;
     }
 
-    if (player.GetHeroId() == HeroId::Radon && slot != HeroAbilitySlot::Ultimate)
+    if (player.GetHeroId() == HeroId::Radon)
     {
         result.handled = true;
         const HeroDefinition& hero = HeroSystem::GetDefinition(HeroId::Radon);
-        const HeroAbilityDefinition& ability = slot == HeroAbilitySlot::Active1 ? hero.active1 : hero.active2;
+        const HeroAbilityDefinition& ability = slot == HeroAbilitySlot::Active1
+            ? hero.active1
+            : (slot == HeroAbilitySlot::Active2 ? hero.active2 : hero.ultimate);
         const HeroAbilityState& state = slot == HeroAbilitySlot::Active1
             ? player.GetHeroState().active1
-            : player.GetHeroState().active2;
+            : (slot == HeroAbilitySlot::Active2 ? player.GetHeroState().active2 : player.GetHeroState().ultimate);
         const Color accent = HeroAccentColor(HeroId::Radon);
         result.color = accent;
         result.position = player.GetPosition();
@@ -256,6 +280,88 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
         EnergyCore* core = FindCoreByTeam(player.GetTeamId());
         const bool coreAlive = core != nullptr && core->IsAlive();
         const bool hasLocalCamera = HasLocalCamera(ControlKindForPlayer(player));
+        if (slot == HeroAbilitySlot::Ultimate)
+        {
+            if (!player.GetHeroState().ultimateReady)
+            {
+                result.message = "Радон: ульта не готова, заряд "
+                    + std::to_string(static_cast<int>(player.GetHeroState().ultimateCharge)) + "%.";
+                result.messageSeconds = 1.8f;
+                result.playDeniedSound = true;
+                return result;
+            }
+
+            if (coreAlive)
+            {
+                HeroRuntimeState& heroState = player.MutableHeroState();
+                heroState.ultimatePrimed = !heroState.ultimatePrimed;
+                SetHeroAnimation(player, heroState.ultimatePrimed ? HeroAnimationState::UltPrimed : HeroAnimationState::Recovery, 0.45f);
+                if (core != nullptr)
+                {
+                    result.worldEffects.push_back(HeroWorldEffectResult {
+                        world_.GridToWorld(core->GetBlockPosition()), player.Forward(), accent, 1.05f, 0.85f, WorldEffectKind::CorePulse, true });
+                }
+                result.message = heroState.ultimatePrimed
+                    ? "Радон: перехват разрушения Кора включен."
+                    : "Радон: перехват разрушения Кора выключен.";
+                result.messageSeconds = 2.2f;
+                result.eventMessages.push_back(HeroEventMessageResult {
+                    heroState.ultimatePrimed
+                        ? "Ульта Радона ожидает угрозу Кору."
+                        : "Ульта Радона снята с подтверждения.",
+                    accent,
+                    2.6f });
+                result.success = true;
+                result.playPickupSound = true;
+                return result;
+            }
+
+            player.StartHeroAbilityCooldown(HeroAbilitySlot::Ultimate, 40.0f, 0.0f);
+            SetHeroAnimation(player, HeroAnimationState::Ultimate, 0.72f);
+            const Vector3 wavePosition = player.GetPosition();
+            constexpr float waveRadius = 5.8f;
+            constexpr float waveDamage = 28.0f;
+            constexpr float waveForce = 8.2f;
+            for (Player& target : players_)
+            {
+                if (!target.IsAlive() || target.IsEliminated() || target.GetTeamId() == player.GetTeamId())
+                {
+                    continue;
+                }
+                const float distance = std::sqrt(DistanceSquared(target.GetPosition(), wavePosition));
+                if (distance > waveRadius)
+                {
+                    continue;
+                }
+
+                const float fraction = 1.0f - std::clamp(distance / std::max(0.1f, waveRadius), 0.0f, 1.0f);
+                const int scaledDamage = std::max(4, static_cast<int>(waveDamage * (0.55f + fraction * 0.45f) + 0.5f));
+                NoteDamageCredit(target.GetId(), player.GetId(), "взрывом Радона");
+                target.Damage(scaledDamage);
+                const Vector3 away = Normalize2D(Vector3 {
+                    target.GetPosition().x - wavePosition.x,
+                    0.0f,
+                    target.GetPosition().z - wavePosition.z
+                });
+                const float scaledForce = waveForce * (0.55f + fraction * 0.45f) * BiomeKnockbackMultiplier();
+                target.ApplyKnockback(Vector3 { away.x * scaledForce, 1.05f + fraction * 0.75f, away.z * scaledForce });
+                result.floatingTexts.push_back(HeroFloatingTextResult { "нестабильно", target.GetPosition(), accent });
+            }
+
+            result.worldEffects.push_back(HeroWorldEffectResult {
+                wavePosition, Vector3 { 0.0f, 0.0f, 1.0f }, accent, waveRadius, 0.70f, WorldEffectKind::Ring, true });
+            result.message = "Радон выпустил нестабильную энергию разрушенного Кора.";
+            result.messageSeconds = 2.6f;
+            result.eventMessages.push_back(HeroEventMessageResult {
+                "Ульта Радона: нестабильная энергия Кора.", accent, 3.0f });
+            result.hasCameraShake = true;
+            result.cameraShakeStrength = 0.28f;
+            result.cameraShakeSeconds = 0.28f;
+            result.success = true;
+            result.playCoreDestroyedSound = true;
+            return result;
+        }
+
         player.StartHeroAbilityCooldown(slot, ability.cooldownSeconds, ability.durationSeconds);
 
         if (slot == HeroAbilitySlot::Active1)
@@ -360,7 +466,12 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
         {
             SetHeroAnimation(player, HeroAnimationState::Ability2, 0.46f);
             const bool blueFire = !coreAlive;
-            Vector3 direction = hasLocalCamera ? cameraController_.GetAimDirection() : player.Forward();
+            // player.Forward() is flat (yaw-only) — a network Radon would always
+            // throw the molotov horizontally regardless of the command's real
+            // aimPitch. AimDirectionFromCommandInput restores the intended arc.
+            Vector3 direction = hasLocalCamera
+                ? cameraController_.GetAimDirection()
+                : (command != nullptr ? AimDirectionFromCommandInput(*command) : player.Forward());
             const float directionLength = Length(direction);
             if (directionLength <= 0.0001f)
             {
@@ -372,6 +483,7 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
             }
 
             EnergyProjectile projectile {};
+            projectile.id = NextProjectileId();
             projectile.position = Vector3 {
                 player.GetPosition().x + direction.x * 0.75f,
                 player.GetPosition().y + 0.82f + direction.y * 0.75f,
@@ -407,14 +519,230 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
         return result;
     }
 
-    if (player.GetHeroId() == HeroId::Brom && slot != HeroAbilitySlot::Ultimate)
+    if (player.GetHeroId() == HeroId::Orbita)
+    {
+        result.handled = true;
+        const HeroDefinition& hero = HeroSystem::GetDefinition(HeroId::Orbita);
+        const HeroAbilityDefinition& ability = slot == HeroAbilitySlot::Active1
+            ? hero.active1
+            : (slot == HeroAbilitySlot::Active2 ? hero.active2 : hero.ultimate);
+        const HeroAbilityState& state = slot == HeroAbilitySlot::Active1
+            ? player.GetHeroState().active1
+            : (slot == HeroAbilitySlot::Active2 ? player.GetHeroState().active2 : player.GetHeroState().ultimate);
+        const Color accent = HeroAccentColor(HeroId::Orbita);
+        result.color = accent;
+        result.position = player.GetPosition();
+        result.direction = player.Forward();
+
+        if (state.cooldownRemaining > 0.0f)
+        {
+            result.message = hero.name + ": " + ability.name + " на кулдауне еще "
+                + FormatTenths(state.cooldownRemaining) + " с.";
+            result.messageSeconds = 1.7f;
+            result.playDeniedSound = true;
+            return result;
+        }
+        HeroRuntimeState& heroState = player.MutableHeroState();
+        if (slot == HeroAbilitySlot::Ultimate)
+        {
+            if (!heroState.ultimateReady)
+            {
+                result.message = "Орбита: ульта не готова, заряд "
+                    + std::to_string(static_cast<int>(heroState.ultimateCharge)) + "%.";
+                result.messageSeconds = 1.8f;
+                result.playDeniedSound = true;
+                return result;
+            }
+
+            if (!heroState.orbitaTeleportPrimed)
+            {
+                const OrbitaTeleportPreview preview = command != nullptr
+                    ? BuildOrbitaTeleportPreviewFromAim(
+                        player,
+                        Vector3 { player.GetPosition().x, player.GetPosition().y + 0.78f, player.GetPosition().z },
+                        AimDirectionFromCommandInput(*command))
+                    : BuildOrbitaTeleportPreview(player);
+                if (!preview.visible || !preview.valid)
+                {
+                    result.message = preview.reason.empty()
+                        ? "Орбита: нет безопасной видимой точки телепорта."
+                        : "Орбита: " + preview.reason;
+                    result.messageSeconds = 2.0f;
+                    result.playDeniedSound = true;
+                    return result;
+                }
+
+                heroState.orbitaTeleportPrimed = true;
+                heroState.orbitaTeleportPreviewTimer = 4.0f;
+                heroState.orbitaTeleportDestination = preview.destination;
+                heroState.orbitaTeleportDirection = preview.direction;
+                heroState.orbitaTeleportDistance = preview.travelDistance;
+                heroState.orbitaTeleportHealthCost = preview.healthCost;
+                result.worldEffects.push_back(HeroWorldEffectResult {
+                    preview.destination, preview.direction, accent, 0.82f, 4.0f, WorldEffectKind::Ring, true });
+                result.floatingTexts.push_back(HeroFloatingTextResult { "ТЕЛЕПОРТ?", preview.destination, accent });
+                result.message = "Орбита: точка отмечена. Нажмите ульту еще раз в течение 4 секунд.";
+                result.messageSeconds = 3.0f;
+                result.success = true;
+                result.playPickupSound = true;
+                return result;
+            }
+
+            std::string reason;
+            if (!IsOrbitaTeleportDestinationSafe(heroState.orbitaTeleportDestination, player.GetTeamId(), &reason))
+            {
+                heroState.orbitaTeleportPrimed = false;
+                heroState.orbitaTeleportPreviewTimer = 0.0f;
+                result.message = "Орбита: телепорт отменен. " + reason;
+                result.messageSeconds = 2.0f;
+                result.playDeniedSound = true;
+                return result;
+            }
+
+            const Vector3 start = player.GetPosition();
+            const Vector3 destination = heroState.orbitaTeleportDestination;
+            const Vector3 teleportDirection = heroState.orbitaTeleportDirection;
+            const int selfDamage = heroState.orbitaTeleportHealthCost;
+            heroState.orbitaTeleportPrimed = false;
+            heroState.orbitaTeleportPreviewTimer = 0.0f;
+            player.Teleport(destination);
+            player.Damage(selfDamage);
+            player.MutableHeroState().orbitaPulseTimer = 0.8f;
+            SetHeroAnimation(player, HeroAnimationState::Ultimate, 0.36f);
+            player.StartHeroAbilityCooldown(slot, ability.cooldownSeconds, ability.durationSeconds);
+
+            result.worldEffects.push_back(HeroWorldEffectResult {
+                start, teleportDirection, accent, 0.85f, 0.36f, WorldEffectKind::Ring, true });
+            result.worldEffects.push_back(HeroWorldEffectResult {
+                destination, teleportDirection, accent, 1.05f, 0.42f, WorldEffectKind::Ring, true });
+            result.floatingTexts.push_back(HeroFloatingTextResult {
+                "-" + std::to_string(selfDamage),
+                Vector3 { destination.x, destination.y + 1.35f, destination.z },
+                accent });
+            result.message = "Орбита телепортировалась в видимую точку и получила "
+                + std::to_string(selfDamage) + " урона.";
+            result.messageSeconds = 2.5f;
+            result.eventMessages.push_back(HeroEventMessageResult {
+                "Ульта Орбиты: видимый телепорт завершен.", accent, 2.8f });
+            result.hasCameraShake = true;
+            result.cameraShakeStrength = 0.18f;
+            result.cameraShakeSeconds = 0.18f;
+            result.success = true;
+            result.playCoreDestroyedSound = true;
+            return result;
+        }
+
+        Vector3 forward = HasLocalCamera(ControlKindForPlayer(player)) ? cameraController_.GetFlatForward() : player.Forward();
+        forward = Normalize2D(forward);
+        if (Length2D(forward) <= 0.0001f)
+        {
+            forward = player.Forward();
+        }
+
+        if (slot == HeroAbilitySlot::Active1)
+        {
+            heroState.orbitaMomentumStrike = true;
+            heroState.orbitaPulseTimer = 1.2f;
+            heroState.orbitaDashRemaining = kOrbitaDashDistance;
+            heroState.orbitaDashDirection = forward;
+            heroState.orbitaDashLiftRemaining = kOrbitaDashLift;
+            player.AddHeroUltimateCharge(7.0f);
+            SetHeroAnimation(player, HeroAnimationState::Ability1, 0.28f);
+
+            result.worldEffects.push_back(HeroWorldEffectResult {
+                player.GetPosition(), forward, accent, 1.15f, 0.34f, WorldEffectKind::Trail, true });
+            result.worldEffects.push_back(HeroWorldEffectResult {
+                player.GetPosition(), forward, accent, 0.72f, 0.36f, WorldEffectKind::Ring, true });
+            result.floatingTexts.push_back(HeroFloatingTextResult {
+                "дэш", Vector3 { player.GetPosition().x, player.GetPosition().y + 1.2f, player.GetPosition().z }, accent });
+            result.message = "Орбита делает дэш вперед. Следующий удар получил разгонный импульс.";
+            result.messageSeconds = 2.2f;
+            result.eventMessages.push_back(HeroEventMessageResult {
+                "Орбита: разгонный импульс готов для следующего удара.", accent, 2.4f });
+            result.playPickupSound = true;
+        }
+        else
+        {
+            const Vector3 playerPosition = player.GetPosition();
+            const GridPos underFeet = world_.WorldToGrid(Vector3 { playerPosition.x, playerPosition.y - 1.05f, playerPosition.z });
+            std::vector<GridPos> placedPositions;
+            placedPositions.reserve(8);
+
+            for (int i = 1; i <= 8; ++i)
+            {
+                const Vector3 projected {
+                    playerPosition.x + forward.x * static_cast<float>(i),
+                    static_cast<float>(underFeet.y),
+                    playerPosition.z + forward.z * static_cast<float>(i)
+                };
+                const GridPos pos = world_.WorldToGrid(projected);
+                if (std::find(placedPositions.begin(), placedPositions.end(), pos) != placedPositions.end())
+                {
+                    continue;
+                }
+                if (pos.y < kBuildMinY || pos.y > kBuildMaxY
+                    || std::abs(pos.x) > kBuildMapRadius
+                    || std::abs(pos.z) > kBuildMapRadius
+                    || !world_.IsAir(pos)
+                    || WouldBlockOverlapPlayer(pos, player.GetId())
+                    || IsOrbitaCoreRestrictedPosition(world_.GridToWorld(pos), player.GetTeamId()))
+                {
+                    continue;
+                }
+
+                if (PlaceWorldBlock(pos, Block { BlockType::EnergyGlassBlock, player.GetTeamId(), true }, false, BlockDeltaReason::TemporaryPlace, player.GetId()))
+                {
+                    placedPositions.push_back(pos);
+                    heroTemporaryBlocks_.push_back(HeroTemporaryBlock {
+                        pos,
+                        player.GetTeamId(),
+                        std::max(0.1f, ability.durationSeconds
+                            + static_cast<float>(placedPositions.size() - 1) * 0.12f)
+                    });
+                    result.worldEffects.push_back(HeroWorldEffectResult {
+                        world_.GridToWorld(pos), Vector3 { 0.0f, 0.0f, 1.0f }, accent, 0.22f, 0.28f, WorldEffectKind::Burst, false });
+                }
+            }
+
+            if (placedPositions.empty())
+            {
+                result.message = "Орбита: фантомные блоки не нашли свободной безопасной линии.";
+                result.messageSeconds = 2.0f;
+                result.playDeniedSound = true;
+                return result;
+            }
+
+            heroState.orbitaPulseTimer = ability.durationSeconds;
+            SetHeroAnimation(player, HeroAnimationState::Ability2, 0.32f);
+            result.worldEffects.push_back(HeroWorldEffectResult {
+                player.GetPosition(), forward, accent, 1.45f, 0.42f, WorldEffectKind::Cone, true });
+            result.floatingTexts.push_back(HeroFloatingTextResult {
+                "фантом x" + std::to_string(static_cast<int>(placedPositions.size())),
+                Vector3 { player.GetPosition().x, player.GetPosition().y + 1.25f, player.GetPosition().z },
+                accent });
+            result.message = "Орбита выставила фантомные блоки на 3 секунды: "
+                + std::to_string(static_cast<int>(placedPositions.size())) + ".";
+            result.messageSeconds = 2.4f;
+            result.eventMessages.push_back(HeroEventMessageResult {
+                "Фантомные блоки Орбиты постепенно исчезают и не защищают чужой Кор.", accent, 2.8f });
+            result.playBuildSound = true;
+        }
+
+        player.StartHeroAbilityCooldown(slot, ability.cooldownSeconds, ability.durationSeconds);
+        result.success = true;
+        return result;
+    }
+
+    if (player.GetHeroId() == HeroId::Brom)
     {
         result.handled = true;
         const HeroDefinition& hero = HeroSystem::GetDefinition(HeroId::Brom);
-        const HeroAbilityDefinition& ability = slot == HeroAbilitySlot::Active1 ? hero.active1 : hero.active2;
+        const HeroAbilityDefinition& ability = slot == HeroAbilitySlot::Active1
+            ? hero.active1
+            : (slot == HeroAbilitySlot::Active2 ? hero.active2 : hero.ultimate);
         const HeroAbilityState& state = slot == HeroAbilitySlot::Active1
             ? player.GetHeroState().active1
-            : player.GetHeroState().active2;
+            : (slot == HeroAbilitySlot::Active2 ? player.GetHeroState().active2 : player.GetHeroState().ultimate);
         const Color accent = HeroAccentColor(HeroId::Brom);
         result.color = accent;
         result.position = player.GetPosition();
@@ -426,6 +754,95 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
                 + FormatTenths(state.cooldownRemaining) + " с.";
             result.messageSeconds = 1.7f;
             result.playDeniedSound = true;
+            return result;
+        }
+        if (slot == HeroAbilitySlot::Ultimate)
+        {
+            if (!player.GetHeroState().ultimateReady)
+            {
+                result.message = "Бром: ульта не готова, заряд "
+                    + std::to_string(static_cast<int>(player.GetHeroState().ultimateCharge)) + "%.";
+                result.messageSeconds = 1.8f;
+                result.playDeniedSound = true;
+                return result;
+            }
+
+            constexpr float absorbRadiusSq = 7.0f * 7.0f;
+            int absorbed = 0;
+            for (ResourcePickup& pickup : matchSimulation_.Pickups())
+            {
+                const Vector3 pickupPos = ToVector3(pickup.position);
+                if (pickup.collected || DistanceSquared(pickupPos, player.GetPosition()) > absorbRadiusSq)
+                {
+                    continue;
+                }
+
+                player.GetInventory().AddResource(pickup.type, pickup.amount);
+                absorbed += pickup.amount;
+                pickup.collected = true;
+                result.worldEffects.push_back(HeroWorldEffectResult {
+                    pickupPos, Vector3 { 0.0f, 0.0f, 1.0f }, accent, 0.18f, 0.18f, WorldEffectKind::Burst, false });
+            }
+
+            const int turretCount = std::min(5, player.GetInventory().GetResource(ResourceType::Gold) / kBromTurretGoldCost);
+            if (absorbed == 0 && turretCount == 0)
+            {
+                result.message = "Бром: для Сборки обороны нужны ресурсы рядом или в инвентаре.";
+                result.messageSeconds = 2.2f;
+                result.playDeniedSound = true;
+                return result;
+            }
+
+            int spawned = 0;
+            for (int i = 0; i < turretCount; ++i)
+            {
+                if (!player.GetInventory().SpendResource(ResourceType::Gold, kBromTurretGoldCost))
+                {
+                    continue;
+                }
+
+                const int spawnIndex = static_cast<int>(bromVacuumBots_.size() + bromTurretDrones_.size());
+                BromTurretDrone drone {};
+                drone.position = OffsetAround(
+                    Vector3 { player.GetPosition().x, player.GetPosition().y + 1.05f, player.GetPosition().z },
+                    spawnIndex,
+                    1.65f);
+                drone.ownerPlayerId = player.GetId();
+                drone.ownerTeamId = player.GetTeamId();
+                drone.temporary = true;
+                drone.lifetime = kBromUltimateDeviceLifetime;
+                drone.fireCooldown = 0.4f;
+                drone.pulseTimer = 0.4f;
+                drone.invulnerabilityTimer = 5.0f;
+                drone.id = NextHeroDeviceId();
+                bromTurretDrones_.push_back(drone);
+                result.worldEffects.push_back(HeroWorldEffectResult {
+                    drone.position, Vector3 { 0.0f, 0.0f, 1.0f }, accent, 0.36f, 0.34f, WorldEffectKind::Burst, false });
+                result.floatingTexts.push_back(HeroFloatingTextResult { "временная турель", drone.position, accent });
+                ++spawned;
+            }
+
+            if (spawned <= 0 && absorbed <= 0)
+            {
+                result.message = "Бром: ресурсы не удалось превратить в устройства.";
+                result.messageSeconds = 2.0f;
+                result.playDeniedSound = true;
+                return result;
+            }
+
+            SetHeroAnimation(player, HeroAnimationState::Ultimate, 0.58f);
+            player.StartHeroAbilityCooldown(HeroAbilitySlot::Ultimate, kBromUltimateCooldownSeconds, kBromUltimateDeviceLifetime);
+            result.worldEffects.push_back(HeroWorldEffectResult {
+                player.GetPosition(), player.Forward(), accent, 2.2f, 0.65f, WorldEffectKind::Ring, true });
+            result.message = "Бром запустил Сборку обороны: устройств "
+                + std::to_string(spawned) + ", время 1.5 минуты.";
+            result.messageSeconds = 3.0f;
+            result.eventMessages.push_back(HeroEventMessageResult {
+                "Ульта Брома собрала защиту из ресурсов. Поглощено рядом: " + std::to_string(absorbed) + ".",
+                accent,
+                3.2f });
+            result.success = true;
+            result.playPurchaseSound = true;
             return result;
         }
 
@@ -462,6 +879,7 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
             bot.lifetime = 0.0f;
             bot.pulseTimer = 0.4f;
             bot.invulnerabilityTimer = 0.0f;
+            bot.id = NextHeroDeviceId();
             bromVacuumBots_.push_back(bot);
             player.AddHeroUltimateCharge(8.0f);
             SetHeroAnimation(player, HeroAnimationState::Ability1, 0.34f);
@@ -506,6 +924,7 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
             drone.fireCooldown = 0.4f;
             drone.pulseTimer = 0.4f;
             drone.invulnerabilityTimer = 0.0f;
+            drone.id = NextHeroDeviceId();
             bromTurretDrones_.push_back(drone);
             player.AddHeroUltimateCharge(10.0f);
             SetHeroAnimation(player, HeroAnimationState::Ability2, 0.34f);
@@ -627,6 +1046,7 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
             trap.ownerTeamId = player.GetTeamId();
             trap.lifetime = std::max(0.1f, ability->durationSeconds);
             trap.flashTimer = 0.45f;
+            trap.id = NextHeroDeviceId();
             konvoyTraps_.push_back(trap);
             SetHeroAnimation(player, HeroAnimationState::Ability1, 0.30f);
             result.worldEffects.push_back(HeroWorldEffectResult {
@@ -672,6 +1092,7 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
             tether.lifetime = std::max(0.1f, ability->durationSeconds);
             tether.flashTimer = 0.42f;
             tether.ownerLastHealth = player.GetHealth();
+            tether.id = NextHeroDeviceId();
             konvoyTethers_.push_back(tether);
             player.AddHeroUltimateCharge(10.0f);
             SetHeroAnimation(player, HeroAnimationState::Ability2, 0.34f);
@@ -706,6 +1127,7 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
                     dome.initiallyInsideEnemyIds.push_back(target.GetId());
                 }
             }
+            dome.id = NextHeroDeviceId();
             konvoyDomes_.push_back(dome);
             SetHeroAnimation(player, HeroAnimationState::Ultimate, 0.52f);
             result.worldEffects.push_back(HeroWorldEffectResult {
@@ -745,7 +1167,15 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
         if (slot == HeroAbilitySlot::Active2)
         {
             const Vector3 origin { player.GetPosition().x, player.GetPosition().y + 0.72f, player.GetPosition().z };
-            const Vector3 direction = HasLocalCamera(ControlKindForPlayer(player)) ? cameraController_.GetAimDirection() : player.Forward();
+            // A network player has no server-side camera, but its command DOES
+            // carry a real aimPitch — falling back to player.Forward() (yaw-only,
+            // always flat) silently threw away vertical aim, so a remote Svidetel
+            // could never phase blocks above/below eye level while a local one
+            // could. AimDirectionFromCommandInput reconstructs the same 3D
+            // direction the command intended.
+            const Vector3 direction = HasLocalCamera(ControlKindForPlayer(player))
+                ? cameraController_.GetAimDirection()
+                : (command != nullptr ? AimDirectionFromCommandInput(*command) : player.Forward());
             const std::optional<RaycastHit> hit = world_.Raycast(origin, direction, 5.5f);
             if (!hit.has_value() || hit->blockData.type == BlockType::EnergyCoreBlock)
             {
@@ -827,8 +1257,16 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
 
         if (slot == HeroAbilitySlot::Active1)
         {
-            svidetelEchoes_.push_back(SvidetelEcho {
-                player.GetPosition(), player.GetId(), player.GetTeamId(), ability.durationSeconds, 0.2f, true, {}, 0.0f });
+            SvidetelEcho echo {};
+            echo.position = player.GetPosition();
+            echo.ownerPlayerId = player.GetId();
+            echo.ownerTeamId = player.GetTeamId();
+            echo.lifetime = ability.durationSeconds;
+            echo.fireCooldown = 0.2f;
+            echo.armed = true;
+            echo.flashTimer = 0.0f;
+            echo.id = NextHeroDeviceId();
+            svidetelEchoes_.push_back(echo);
             result.message = "Свидетель создал вооруженное Эхо.";
             result.messageSeconds = 2.2f;
         }
@@ -871,7 +1309,12 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
     if (slot == HeroAbilitySlot::Ultimate)
     {
         const Vector3 origin { player.GetPosition().x, player.GetPosition().y + 0.72f, player.GetPosition().z };
-        const Vector3 aim = Normalize(HasLocalCamera(ControlKindForPlayer(player)) ? cameraController_.GetAimDirection() : player.Forward());
+        // Same pitch-loss issue as Svidetel's Active2 above: player.Forward() is
+        // always flat, so a network Likho could never target a disguise victim
+        // above/below eye level. Use the command's real 3D aim instead.
+        const Vector3 aim = Normalize(HasLocalCamera(ControlKindForPlayer(player))
+            ? cameraController_.GetAimDirection()
+            : (command != nullptr ? AimDirectionFromCommandInput(*command) : player.Forward()));
         float bestScore = -1.0f;
         for (Player& candidate : players_)
         {
@@ -1000,6 +1443,10 @@ void Game::PresentHeroAbilityResult(const HeroAbilityActionResult& result)
     {
         AddEventMessage(event.message, event.color, event.seconds);
     }
+    if (result.hasCameraShake)
+    {
+        AddCameraShake(result.cameraShakeStrength, result.cameraShakeSeconds);
+    }
     if (result.playPickupSound)
     {
         audio_.PlayPickup();
@@ -1016,293 +1463,14 @@ void Game::PresentHeroAbilityResult(const HeroAbilityActionResult& result)
     {
         audio_.PlayBreakBlock();
     }
+    if (result.playCoreDestroyedSound)
+    {
+        audio_.PlayCoreDestroyed();
+    }
     if (result.playDeniedSound)
     {
         audio_.PlayDenied();
     }
-}
-
-bool Game::UseHeroAbility(Player& player, HeroAbilitySlot slot)
-{
-    const HeroAbilityActionResult result = ApplyHeroAbilityAction(player, slot);
-    if (result.handled)
-    {
-        PresentHeroAbilityResult(result);
-        return result.success;
-    }
-    return UseHeroAbilityLegacy(player, slot);
-}
-
-bool Game::UseHeroAbilityLegacy(Player& player, HeroAbilitySlot slot)
-{
-    if (!player.IsAlive() || player.IsEliminated())
-    {
-        return false;
-    }
-
-    if (player.GetHeroId() == HeroId::Radon)
-    {
-        return UseRadonAbility(player, slot);
-    }
-    if (player.GetHeroId() == HeroId::Orbita)
-    {
-        return UseOrbitaAbility(player, slot);
-    }
-    if (player.GetHeroId() == HeroId::Brom)
-    {
-        return UseBromAbility(player, slot);
-    }
-    if (player.GetHeroId() == HeroId::Konvoy)
-    {
-        return UseKonvoyAbility(player, slot);
-    }
-    if (player.GetHeroId() == HeroId::Likho)
-    {
-        return UseLikhoAbility(player, slot);
-    }
-    if (player.GetHeroId() == HeroId::Svidetel)
-    {
-        return UseSvidetelAbility(player, slot);
-    }
-
-    const HeroDefinition& hero = HeroSystem::GetDefinition(player.GetHeroId());
-    const HeroAbilityDefinition* ability = nullptr;
-    const HeroAbilityState* state = nullptr;
-    switch (slot)
-    {
-    case HeroAbilitySlot::Active1:
-        ability = &hero.active1;
-        state = &player.GetHeroState().active1;
-        break;
-    case HeroAbilitySlot::Active2:
-        ability = &hero.active2;
-        state = &player.GetHeroState().active2;
-        break;
-    case HeroAbilitySlot::Ultimate:
-        ability = &hero.ultimate;
-        state = &player.GetHeroState().ultimate;
-        break;
-    }
-
-    if (ability == nullptr || state == nullptr)
-    {
-        return false;
-    }
-    if (state->cooldownRemaining > 0.0f)
-    {
-        SetMessage(hero.name + ": " + ability->name + " на кулдауне еще "
-            + FormatTenths(state->cooldownRemaining) + " с.", 1.7f);
-        audio_.PlayDenied();
-        return false;
-    }
-    if (slot == HeroAbilitySlot::Ultimate && !player.GetHeroState().ultimateReady)
-    {
-        SetMessage(hero.name + ": ульта не готова, заряд "
-            + std::to_string(static_cast<int>(player.GetHeroState().ultimateCharge)) + "%.", 1.8f);
-        audio_.PlayDenied();
-        return false;
-    }
-
-    player.StartHeroAbilityCooldown(slot, ability->cooldownSeconds, ability->durationSeconds);
-    const Color accent = HeroAccentColor(hero.id);
-    AddWorldEffect(player.GetPosition(), accent, slot == HeroAbilitySlot::Ultimate ? 0.62f : 0.38f, 0.45f);
-    AddFloatingText(HeroAbilitySlotName(slot), Vector3 { player.GetPosition().x, player.GetPosition().y + 1.4f, player.GetPosition().z }, accent);
-    const std::string message = hero.name + ": " + ability->name + " - базовый каркас активирован.";
-    SetMessage(message, 2.2f);
-    AddEventMessage(message, accent, 2.8f);
-    audio_.PlayPickup();
-    return true;
-}
-
-bool Game::UseLikhoAbility(Player& player, HeroAbilitySlot slot)
-{
-    const HeroDefinition& hero = HeroSystem::GetDefinition(HeroId::Likho);
-    const HeroAbilityDefinition& ability = slot == HeroAbilitySlot::Active1
-        ? hero.active1
-        : (slot == HeroAbilitySlot::Active2 ? hero.active2 : hero.ultimate);
-    if (!player.IsHeroAbilityReady(slot))
-    {
-        SetMessage("Лихо: способность не готова.", 1.6f);
-        audio_.PlayDenied();
-        return false;
-    }
-
-    Player* disguiseTarget = nullptr;
-    if (slot == HeroAbilitySlot::Ultimate)
-    {
-        const Vector3 origin { player.GetPosition().x, player.GetPosition().y + 0.72f, player.GetPosition().z };
-        const Vector3 aim = Normalize(player.IsLocal() ? cameraController_.GetAimDirection() : player.Forward());
-        float bestScore = -1.0f;
-        for (Player& candidate : players_)
-        {
-            if (!candidate.IsAlive() || candidate.IsEliminated() || candidate.GetTeamId() == player.GetTeamId())
-            {
-                continue;
-            }
-            const Vector3 targetPoint { candidate.GetPosition().x, candidate.GetPosition().y + 0.65f, candidate.GetPosition().z };
-            const Vector3 delta { targetPoint.x - origin.x, targetPoint.y - origin.y, targetPoint.z - origin.z };
-            const float distance = Length(delta);
-            if (distance > 24.0f || distance <= 0.001f)
-            {
-                continue;
-            }
-            const Vector3 normalizedDelta = Normalize(delta);
-            const float alignment = aim.x * normalizedDelta.x + aim.y * normalizedDelta.y + aim.z * normalizedDelta.z;
-            if (alignment < 0.72f)
-            {
-                continue;
-            }
-            const std::optional<RaycastHit> wall = world_.Raycast(origin, delta, distance);
-            if (wall.has_value() && wall->distance < distance - 0.35f)
-            {
-                continue;
-            }
-            const float score = alignment * 2.0f - distance / 24.0f;
-            if (score > bestScore)
-            {
-                bestScore = score;
-                disguiseTarget = &candidate;
-            }
-        }
-        if (disguiseTarget == nullptr)
-        {
-            SetMessage("Лихо: наведитесь на видимого врага, чтобы скопировать облик.", 2.0f);
-            audio_.PlayDenied();
-            return false;
-        }
-    }
-
-    player.StartHeroAbilityCooldown(slot, ability.cooldownSeconds, ability.durationSeconds);
-    HeroRuntimeState& state = player.MutableHeroState();
-    const Color accent = HeroAccentColor(HeroId::Likho);
-    if (slot == HeroAbilitySlot::Active1)
-    {
-        SetMessage("Лихо заглушило шаги. Первый удар проверит атаку в спину.", 2.4f);
-        AddWorldEffect(player.GetPosition(), player.Forward(), accent, 0.75f, 0.55f, WorldEffectKind::Trail);
-    }
-    else if (slot == HeroAbilitySlot::Active2)
-    {
-        SetMessage("Лихо: следующие удары накладывают кровотечение.", 2.4f);
-        AddWorldEffect(player.GetPosition(), accent, 0.70f, 0.45f);
-    }
-    else
-    {
-        state.likhoDisguiseTeamId = disguiseTarget->GetTeamId();
-        state.likhoDisguisePlayerId = disguiseTarget->GetId();
-        state.likhoDisguiseHeroId = disguiseTarget->GetHeroId();
-        SetMessage("Лихо приняло искаженный облик чужой команды. Атака или урон раскроют маскировку.", 3.0f);
-        AddWorldEffect(player.GetPosition(), player.Forward(), accent, 1.1f, 0.85f, WorldEffectKind::Ring);
-    }
-    SetHeroAnimation(player, slot == HeroAbilitySlot::Active1
-        ? HeroAnimationState::Ability1
-        : (slot == HeroAbilitySlot::Active2 ? HeroAnimationState::Ability2 : HeroAnimationState::Ultimate), 0.34f);
-    AddFloatingText(ability.name, Vector3 { player.GetPosition().x, player.GetPosition().y + 1.35f, player.GetPosition().z }, accent);
-    audio_.PlayPickup();
-    return true;
-}
-
-bool Game::UseSvidetelAbility(Player& player, HeroAbilitySlot slot)
-{
-    const HeroDefinition& hero = HeroSystem::GetDefinition(HeroId::Svidetel);
-    const HeroAbilityDefinition& ability = slot == HeroAbilitySlot::Active1
-        ? hero.active1
-        : (slot == HeroAbilitySlot::Active2 ? hero.active2 : hero.ultimate);
-    if (!player.IsHeroAbilityReady(slot))
-    {
-        SetMessage("Свидетель: способность не готова.", 1.6f);
-        audio_.PlayDenied();
-        return false;
-    }
-
-    if (slot == HeroAbilitySlot::Active2)
-    {
-        const Vector3 origin { player.GetPosition().x, player.GetPosition().y + 0.72f, player.GetPosition().z };
-        const Vector3 direction = player.IsLocal() ? cameraController_.GetAimDirection() : player.Forward();
-        const std::optional<RaycastHit> hit = world_.Raycast(origin, direction, 5.5f);
-        if (!hit.has_value() || hit->blockData.type == BlockType::EnergyCoreBlock)
-        {
-            SetMessage("Свидетель: наведитесь на обычные блоки вдали от Кора.", 2.0f);
-            audio_.PlayDenied();
-            return false;
-        }
-
-        int phased = 0;
-        for (int x = -1; x <= 1; ++x)
-        {
-            for (int y = 0; y <= 1; ++y)
-            {
-                GridPos pos = hit->block;
-                if (std::fabs(hit->normal.x) > 0.5f)
-                {
-                    pos.y += y;
-                    pos.z += x;
-                }
-                else if (std::fabs(hit->normal.z) > 0.5f)
-                {
-                    pos.x += x;
-                    pos.y += y;
-                }
-                else
-                {
-                    pos.x += x;
-                    pos.z += y;
-                }
-                const Block* block = world_.GetBlock(pos);
-                if (block == nullptr || block->type == BlockType::EnergyCoreBlock || !block->breakable)
-                {
-                    continue;
-                }
-                bool nearCore = false;
-                const Vector3 center = world_.GridToWorld(pos);
-                for (const EnergyCore& core : matchSimulation_.Cores())
-                {
-                    if (DistanceSquared(center, world_.GridToWorld(core.GetBlockPosition())) < 12.0f)
-                    {
-                        nearCore = true;
-                        break;
-                    }
-                }
-                if (nearCore)
-                {
-                    continue;
-                }
-                svidetelPhaseBlocks_.push_back(SvidetelPhaseBlock { pos, *block, ability.durationSeconds });
-                RemoveWorldBlock(pos, BlockDeltaReason::PhaseRemove, player.GetId());
-                AddWorldEffect(center, HeroAccentColor(HeroId::Svidetel), 0.30f, 0.42f);
-                ++phased;
-            }
-        }
-        if (phased == 0)
-        {
-            SetMessage("Свидетель: участок защищен или слишком близко к Кору.", 2.0f);
-            audio_.PlayDenied();
-            return false;
-        }
-        player.StartHeroAbilityCooldown(slot, ability.cooldownSeconds, ability.durationSeconds);
-        SetMessage("Свидетель сделал блоки фазовыми на 4 секунды.", 2.4f);
-    }
-    else
-    {
-        player.StartHeroAbilityCooldown(slot, ability.cooldownSeconds, ability.durationSeconds);
-        if (slot == HeroAbilitySlot::Active1)
-        {
-            svidetelEchoes_.push_back(SvidetelEcho {
-                player.GetPosition(), player.GetId(), player.GetTeamId(), ability.durationSeconds, 0.2f, true, {}, 0.0f });
-            SetMessage("Свидетель создал вооруженное Эхо.", 2.2f);
-        }
-        else
-        {
-            SetMessage("Свидетель видит контуры врагов, ресурсов и Коров.", 2.6f);
-        }
-    }
-
-    SetHeroAnimation(player, slot == HeroAbilitySlot::Active1
-        ? HeroAnimationState::Ability1
-        : (slot == HeroAbilitySlot::Active2 ? HeroAnimationState::Ability2 : HeroAnimationState::Ultimate), 0.38f);
-    AddWorldEffect(player.GetPosition(), player.Forward(), HeroAccentColor(HeroId::Svidetel), 0.95f, 0.65f, WorldEffectKind::Ring);
-    AddFloatingText(ability.name, Vector3 { player.GetPosition().x, player.GetPosition().y + 1.35f, player.GetPosition().z }, HeroAccentColor(HeroId::Svidetel));
-    audio_.PlayPickup();
-    return true;
 }
 
 void Game::SetHeroAnimation(Player& player, HeroAnimationState state, float seconds)
@@ -1311,209 +1479,6 @@ void Game::SetHeroAnimation(Player& player, HeroAnimationState state, float seco
     heroState.animationState = state;
     heroState.animationTimer = std::max(0.0f, seconds);
     heroState.animationDuration = std::max(0.0f, seconds);
-}
-
-bool Game::UseRadonAbility(Player& player, HeroAbilitySlot slot)
-{
-    const HeroDefinition& hero = HeroSystem::GetDefinition(HeroId::Radon);
-    const HeroAbilityDefinition* ability = slot == HeroAbilitySlot::Active1
-        ? &hero.active1
-        : (slot == HeroAbilitySlot::Active2 ? &hero.active2 : &hero.ultimate);
-    const HeroAbilityState* state = slot == HeroAbilitySlot::Active1
-        ? &player.GetHeroState().active1
-        : (slot == HeroAbilitySlot::Active2 ? &player.GetHeroState().active2 : &player.GetHeroState().ultimate);
-
-    if (state->cooldownRemaining > 0.0f)
-    {
-        SetMessage(hero.name + ": " + ability->name + " на кулдауне еще " + FormatTenths(state->cooldownRemaining) + " с.", 1.7f);
-        audio_.PlayDenied();
-        return false;
-    }
-
-    EnergyCore* core = FindCoreByTeam(player.GetTeamId());
-    const bool coreAlive = core != nullptr && core->IsAlive();
-    if (slot == HeroAbilitySlot::Ultimate)
-    {
-        if (!player.GetHeroState().ultimateReady)
-        {
-            SetMessage("Радон: ульта не готова, заряд " + std::to_string(static_cast<int>(player.GetHeroState().ultimateCharge)) + "%.", 1.8f);
-            audio_.PlayDenied();
-            return false;
-        }
-
-        if (coreAlive)
-        {
-            HeroRuntimeState& heroState = player.MutableHeroState();
-            heroState.ultimatePrimed = !heroState.ultimatePrimed;
-            SetHeroAnimation(player, heroState.ultimatePrimed ? HeroAnimationState::UltPrimed : HeroAnimationState::Recovery, 0.45f);
-            if (core != nullptr)
-            {
-                AddWorldEffect(world_.GridToWorld(core->GetBlockPosition()), player.Forward(), HeroAccentColor(HeroId::Radon), 1.05f, 0.85f, WorldEffectKind::CorePulse);
-            }
-            SetMessage(heroState.ultimatePrimed
-                    ? "Радон: перехват разрушения Кора включен."
-                    : "Радон: перехват разрушения Кора выключен.",
-                2.2f);
-            AddEventMessage(heroState.ultimatePrimed ? "Ульта Радона ожидает угрозу Кору." : "Ульта Радона снята с подтверждения.",
-                HeroAccentColor(HeroId::Radon),
-                2.6f);
-            audio_.PlayPickup();
-            return true;
-        }
-
-        player.StartHeroAbilityCooldown(HeroAbilitySlot::Ultimate, 40.0f, 0.0f);
-        UseRadonDestroyedCoreUltimate(player);
-        return true;
-    }
-
-    player.StartHeroAbilityCooldown(slot, ability->cooldownSeconds, ability->durationSeconds);
-    if (slot == HeroAbilitySlot::Active1)
-    {
-        const bool pull = !coreAlive && (IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT) || IsMouseButtonDown(MOUSE_BUTTON_RIGHT));
-        SetHeroAnimation(player, HeroAnimationState::WindUp, pull ? 0.44f : 0.40f);
-        UseRadonForcePulse(player, pull);
-        return true;
-    }
-
-    SetHeroAnimation(player, HeroAnimationState::Ability2, 0.46f);
-    UseRadonMolotov(player);
-    return true;
-}
-
-void Game::UseRadonForcePulse(Player& player, bool pull)
-{
-    const Vector3 origin {
-        player.GetPosition().x,
-        player.GetPosition().y + 0.72f,
-        player.GetPosition().z
-    };
-    Vector3 forward = player.IsLocal() ? cameraController_.GetFlatForward() : player.Forward();
-    forward = Normalize2D(forward);
-    if (Length2D(forward) <= 0.0001f)
-    {
-        forward = player.Forward();
-    }
-
-    int affected = 0;
-    const Color pulseColor = pull ? Color { 92, 164, 255, 255 } : HeroAccentColor(HeroId::Radon);
-    AddWorldEffect(origin, forward, pulseColor, pull ? 5.2f : 5.6f, 0.34f, pull ? WorldEffectKind::Pull : WorldEffectKind::Cone);
-    for (Player& target : players_)
-    {
-        if (target.GetId() == player.GetId()
-            || target.GetTeamId() == player.GetTeamId()
-            || !target.IsAlive()
-            || target.IsEliminated())
-        {
-            continue;
-        }
-
-        const Vector3 toTarget {
-            target.GetPosition().x - player.GetPosition().x,
-            0.0f,
-            target.GetPosition().z - player.GetPosition().z
-        };
-        const float distance = Length2D(toTarget);
-        if (distance <= 0.1f || distance > 5.6f)
-        {
-            continue;
-        }
-        const Vector3 direction = Normalize2D(toTarget);
-        if (Dot2D(forward, direction) < 0.48f)
-        {
-            continue;
-        }
-
-        const Vector3 targetEye {
-            target.GetPosition().x,
-            target.GetPosition().y + 0.72f,
-            target.GetPosition().z
-        };
-        const Vector3 ray {
-            targetEye.x - origin.x,
-            targetEye.y - origin.y,
-            targetEye.z - origin.z
-        };
-        const float rayDistance = Length(ray);
-        const std::optional<RaycastHit> wall = world_.Raycast(origin, ray, rayDistance);
-        if (wall.has_value() && wall->distance < rayDistance - 0.45f)
-        {
-            continue;
-        }
-
-        const float sneakMultiplier = pull && target.IsSneaking() ? 0.65f : 1.0f;
-        // The pulse must lift the target: grounded knockback is damped by
-        // friction so quickly that the ability can read as having no impact.
-        const float force = (pull ? 7.6f : 15.0f) * sneakMultiplier * BiomeKnockbackMultiplier();
-        const Vector3 impulseDirection = pull ? Vector3 { -direction.x, 0.0f, -direction.z } : direction;
-        target.Damage(2);
-        target.ApplyKnockback(
-            Vector3 { impulseDirection.x * force, pull ? 1.1f : 3.8f, impulseDirection.z * force },
-            pull ? 0.35f : 0.58f);
-        AddWorldEffect(target.GetPosition(), impulseDirection, pulseColor, 0.34f, 0.30f, WorldEffectKind::Burst);
-        AddFloatingText(pull ? "притяжение" : "толчок", target.GetPosition(), HeroAccentColor(HeroId::Radon));
-        ++affected;
-    }
-
-    AddWorldEffect(player.GetPosition(), forward, pulseColor, 0.62f, 0.42f, WorldEffectKind::Ring);
-    SetMessage(pull
-            ? "Радон притянул цели перед собой."
-            : "Радон выпустил силовой толчок.",
-        2.0f);
-    if (affected == 0)
-    {
-        AddEventMessage("Импульс Радона не задел врагов.", Fade(WHITE, 0.76f), 1.8f);
-    }
-    else
-    {
-        AddEventMessage("Импульс Радона задел целей: " + std::to_string(affected) + ".", HeroAccentColor(HeroId::Radon), 2.2f);
-    }
-    audio_.PlayBreakBlock();
-}
-
-void Game::UseRadonMolotov(Player& player)
-{
-    EnergyCore* core = FindCoreByTeam(player.GetTeamId());
-    const bool blueFire = core == nullptr || !core->IsAlive();
-    Vector3 direction = player.IsLocal() ? cameraController_.GetAimDirection() : player.Forward();
-    const float directionLength = Length(direction);
-    if (directionLength <= 0.0001f)
-    {
-        direction = player.Forward();
-    }
-    else
-    {
-        direction = Vector3 { direction.x / directionLength, direction.y / directionLength, direction.z / directionLength };
-    }
-
-    EnergyProjectile projectile {};
-    projectile.position = Vector3 {
-        player.GetPosition().x + direction.x * 0.75f,
-        player.GetPosition().y + 0.82f + direction.y * 0.75f,
-        player.GetPosition().z + direction.z * 0.75f
-    };
-    projectile.ownerId = player.GetId();
-    projectile.ownerTeamId = player.GetTeamId();
-    projectile.velocity = Vector3 { direction.x * 10.0f, direction.y * 10.0f + 2.0f, direction.z * 10.0f };
-    projectile.damage = blueFire ? 24 : 12;
-    projectile.radius = 0.28f;
-    projectile.explosionRadius = 1.6f;
-    projectile.fireZone = true;
-    projectile.blueFire = blueFire;
-    projectiles_.push_back(projectile);
-    AddWorldEffect(projectile.position, direction, blueFire ? Color { 92, 164, 255, 255 } : Color { 255, 118, 70, 255 }, 0.36f, 0.32f, WorldEffectKind::Trail);
-
-    SetMessage(blueFire ? "Радон бросил синий Молотов." : "Радон бросил коктейль Молотова.", 2.0f);
-    AddEventMessage(blueFire ? "Синий огонь Радона горит в 2 раза горячее." : "Огненная область Радона создана.", blueFire ? Color { 92, 164, 255, 255 } : Color { 255, 118, 70, 255 }, 2.4f);
-    audio_.PlayBreakBlock();
-}
-
-void Game::UseRadonDestroyedCoreUltimate(Player& player)
-{
-    SetHeroAnimation(player, HeroAnimationState::Ultimate, 0.72f);
-    EmitRadonCoreWave(player.GetPosition(), player.GetTeamId(), player.GetId(), 5.8f, 28.0f, 8.2f);
-    SetMessage("Радон выпустил нестабильную энергию разрушенного Кора.", 2.6f);
-    AddEventMessage("Ульта Радона: нестабильная энергия Кора.", HeroAccentColor(HeroId::Radon), 3.0f);
-    audio_.PlayCoreDestroyed();
 }
 
 bool Game::TryRadonCoreSacrifice(EnergyCore& core)
@@ -1582,103 +1547,31 @@ void Game::EmitRadonCoreWave(Vector3 position, int ownerTeamId, int ownerPlayerI
     AddCameraShake(0.28f, 0.28f);
 }
 
-bool Game::UseOrbitaAbility(Player& player, HeroAbilitySlot slot)
+bool Game::PredictOrbitaDashAction(Player& player, const PlayerCommand& command)
 {
-    const HeroDefinition& hero = HeroSystem::GetDefinition(HeroId::Orbita);
-    const HeroAbilityDefinition* ability = nullptr;
-    const HeroAbilityState* state = nullptr;
-    switch (slot)
-    {
-    case HeroAbilitySlot::Active1:
-        ability = &hero.active1;
-        state = &player.GetHeroState().active1;
-        break;
-    case HeroAbilitySlot::Active2:
-        ability = &hero.active2;
-        state = &player.GetHeroState().active2;
-        break;
-    case HeroAbilitySlot::Ultimate:
-        ability = &hero.ultimate;
-        state = &player.GetHeroState().ultimate;
-        break;
-    }
-
-    if (ability == nullptr || state == nullptr)
+    if (!command.useAbility1
+        || player.GetHeroId() != HeroId::Orbita
+        || !player.IsAlive()
+        || player.IsEliminated())
     {
         return false;
     }
-    if (state->cooldownRemaining > 0.0f)
+
+    const HeroRuntimeState& readState = player.GetHeroState();
+    if (readState.active1.cooldownRemaining > 0.0f)
     {
-        SetMessage(hero.name + ": " + ability->name + " на кулдауне еще "
-            + FormatTenths(state->cooldownRemaining) + " с.", 1.7f);
-        audio_.PlayDenied();
         return false;
     }
 
-    HeroRuntimeState& heroState = player.MutableHeroState();
-    if (slot == HeroAbilitySlot::Active1)
-    {
-        player.StartHeroAbilityCooldown(slot, ability->cooldownSeconds, ability->durationSeconds);
-        UseOrbitaDash(player);
-        return true;
-    }
-
-    if (slot == HeroAbilitySlot::Active2)
-    {
-        if (!UseOrbitaPhantomBlocks(player))
-        {
-            audio_.PlayDenied();
-            return false;
-        }
-
-        player.StartHeroAbilityCooldown(slot, ability->cooldownSeconds, ability->durationSeconds);
-        return true;
-    }
-
-    if (!heroState.ultimateReady)
-    {
-        SetMessage("Орбита: ульта не готова, заряд "
-            + std::to_string(static_cast<int>(heroState.ultimateCharge)) + "%.", 1.8f);
-        audio_.PlayDenied();
-        return false;
-    }
-    if (!heroState.orbitaTeleportPrimed)
-    {
-        const OrbitaTeleportPreview preview = BuildOrbitaTeleportPreview(player);
-        if (!preview.visible || !preview.valid)
-        {
-            audio_.PlayDenied();
-            return false;
-        }
-        heroState.orbitaTeleportPrimed = true;
-        heroState.orbitaTeleportPreviewTimer = 4.0f;
-        heroState.orbitaTeleportDestination = preview.destination;
-        heroState.orbitaTeleportDirection = preview.direction;
-        heroState.orbitaTeleportDistance = preview.travelDistance;
-        heroState.orbitaTeleportHealthCost = preview.healthCost;
-        AddWorldEffect(preview.destination, preview.direction, HeroAccentColor(HeroId::Orbita), 0.82f, 4.0f, WorldEffectKind::Ring);
-        AddFloatingText("ТЕЛЕПОРТ?", preview.destination, HeroAccentColor(HeroId::Orbita));
-        SetMessage("Орбита: точка отмечена. Нажмите ульту еще раз в течение 4 секунд.", 3.0f);
-        audio_.PlayPickup();
-        return true;
-    }
-    if (!UseOrbitaTeleport(player))
-    {
-        audio_.PlayDenied();
-        return false;
-    }
-
-    player.StartHeroAbilityCooldown(slot, ability->cooldownSeconds, ability->durationSeconds);
-    return true;
-}
-
-void Game::UseOrbitaDash(Player& player)
-{
-    Vector3 forward = player.IsLocal() ? cameraController_.GetFlatForward() : player.Forward();
-    forward = Normalize2D(forward);
+    Vector3 forward = Normalize2D(player.Forward());
     if (Length2D(forward) <= 0.0001f)
     {
-        forward = player.Forward();
+        forward = Vector3 { std::sin(command.aimYaw), 0.0f, -std::cos(command.aimYaw) };
+        forward = Normalize2D(forward);
+    }
+    if (Length2D(forward) <= 0.0001f)
+    {
+        return false;
     }
 
     HeroRuntimeState& heroState = player.MutableHeroState();
@@ -1687,85 +1580,7 @@ void Game::UseOrbitaDash(Player& player)
     heroState.orbitaDashRemaining = kOrbitaDashDistance;
     heroState.orbitaDashDirection = forward;
     heroState.orbitaDashLiftRemaining = kOrbitaDashLift;
-    player.AddHeroUltimateCharge(7.0f);
     SetHeroAnimation(player, HeroAnimationState::Ability1, 0.28f);
-
-    const Color accent = HeroAccentColor(HeroId::Orbita);
-    AddWorldEffect(player.GetPosition(), forward, accent, 1.15f, 0.34f, WorldEffectKind::Trail);
-    AddWorldEffect(player.GetPosition(), forward, accent, 0.72f, 0.36f, WorldEffectKind::Ring);
-    AddFloatingText("дэш", Vector3 { player.GetPosition().x, player.GetPosition().y + 1.2f, player.GetPosition().z }, accent);
-    SetMessage("Орбита делает дэш вперед. Следующий удар получил разгонный импульс.", 2.2f);
-    AddEventMessage("Орбита: разгонный импульс готов для следующего удара.", accent, 2.4f);
-    audio_.PlayPickup();
-}
-
-bool Game::UseOrbitaPhantomBlocks(Player& player)
-{
-    Vector3 forward = player.IsLocal() ? cameraController_.GetFlatForward() : player.Forward();
-    forward = Normalize2D(forward);
-    if (Length2D(forward) <= 0.0001f)
-    {
-        forward = player.Forward();
-    }
-
-    const HeroDefinition& hero = HeroSystem::GetDefinition(HeroId::Orbita);
-    const Vector3 playerPosition = player.GetPosition();
-    const GridPos underFeet = world_.WorldToGrid(Vector3 { playerPosition.x, playerPosition.y - 1.05f, playerPosition.z });
-    std::vector<GridPos> placedPositions;
-    placedPositions.reserve(8);
-
-    for (int i = 1; i <= 8; ++i)
-    {
-        const Vector3 projected {
-            playerPosition.x + forward.x * static_cast<float>(i),
-            static_cast<float>(underFeet.y),
-            playerPosition.z + forward.z * static_cast<float>(i)
-        };
-        const GridPos pos = world_.WorldToGrid(projected);
-        if (std::find(placedPositions.begin(), placedPositions.end(), pos) != placedPositions.end())
-        {
-            continue;
-        }
-        if (pos.y < kBuildMinY || pos.y > kBuildMaxY
-            || std::abs(pos.x) > kBuildMapRadius
-            || std::abs(pos.z) > kBuildMapRadius
-            || !world_.IsAir(pos)
-            || WouldBlockOverlapPlayer(pos, player.GetId())
-            || IsOrbitaCoreRestrictedPosition(world_.GridToWorld(pos), player.GetTeamId()))
-        {
-            continue;
-        }
-
-        if (PlaceWorldBlock(pos, Block { BlockType::EnergyGlassBlock, player.GetTeamId(), true }, false, BlockDeltaReason::TemporaryPlace, player.GetId()))
-        {
-            placedPositions.push_back(pos);
-            heroTemporaryBlocks_.push_back(HeroTemporaryBlock {
-                pos,
-                player.GetTeamId(),
-                std::max(0.1f, hero.active2.durationSeconds
-                    + static_cast<float>(placedPositions.size() - 1) * 0.12f)
-            });
-            AddWorldEffect(world_.GridToWorld(pos), HeroAccentColor(HeroId::Orbita), 0.22f, 0.28f);
-        }
-    }
-
-    if (placedPositions.empty())
-    {
-        SetMessage("Орбита: фантомные блоки не нашли свободной безопасной линии.", 2.0f);
-        return false;
-    }
-
-    HeroRuntimeState& heroState = player.MutableHeroState();
-    heroState.orbitaPulseTimer = hero.active2.durationSeconds;
-    SetHeroAnimation(player, HeroAnimationState::Ability2, 0.32f);
-    const Color accent = HeroAccentColor(HeroId::Orbita);
-    AddWorldEffect(player.GetPosition(), forward, accent, 1.45f, 0.42f, WorldEffectKind::Cone);
-    AddFloatingText("фантом x" + std::to_string(static_cast<int>(placedPositions.size())),
-        Vector3 { player.GetPosition().x, player.GetPosition().y + 1.25f, player.GetPosition().z },
-        accent);
-    SetMessage("Орбита выставила фантомные блоки на 3 секунды: " + std::to_string(static_cast<int>(placedPositions.size())) + ".", 2.4f);
-    AddEventMessage("Фантомные блоки Орбиты постепенно исчезают и не защищают чужой Кор.", accent, 2.8f);
-    audio_.PlayBuild();
     return true;
 }
 
@@ -1786,7 +1601,7 @@ OrbitaTeleportPreview Game::BuildOrbitaTeleportPreview(const Player& player) con
     preview.visible = true;
     if (heroState.orbitaTeleportPrimed && heroState.orbitaTeleportPreviewTimer > 0.0f)
     {
-        preview.start = player.IsLocal()
+        preview.start = IsLocallyPredicted(player.GetControlKind())
             ? cameraController_.GetAimOrigin()
             : Vector3 { player.GetPosition().x, player.GetPosition().y + 0.78f, player.GetPosition().z };
         preview.destination = heroState.orbitaTeleportDestination;
@@ -1796,10 +1611,10 @@ OrbitaTeleportPreview Game::BuildOrbitaTeleportPreview(const Player& player) con
         preview.valid = IsOrbitaTeleportDestinationSafe(preview.destination, player.GetTeamId(), &preview.reason);
         return preview;
     }
-    const Vector3 origin = player.IsLocal()
+    const Vector3 origin = IsLocallyPredicted(player.GetControlKind())
         ? cameraController_.GetAimOrigin()
         : Vector3 { player.GetPosition().x, player.GetPosition().y + 0.78f, player.GetPosition().z };
-    Vector3 direction = player.IsLocal() ? cameraController_.GetAimDirection() : player.Forward();
+    Vector3 direction = IsLocallyPredicted(player.GetControlKind()) ? cameraController_.GetAimDirection() : player.Forward();
     direction = Normalize(direction);
     if (Length(direction) <= 0.0001f)
     {
@@ -1876,43 +1691,106 @@ OrbitaTeleportPreview Game::BuildOrbitaTeleportPreview(const Player& player) con
     return preview;
 }
 
-bool Game::UseOrbitaTeleport(Player& player)
+OrbitaTeleportPreview Game::BuildOrbitaTeleportPreviewFromAim(const Player& player, Vector3 origin, Vector3 direction) const
 {
-    HeroRuntimeState& state = player.MutableHeroState();
-    if (!state.orbitaTeleportPrimed || state.orbitaTeleportPreviewTimer <= 0.0f)
+    OrbitaTeleportPreview preview {};
+    if (player.GetHeroId() != HeroId::Orbita || !player.IsAlive() || player.IsEliminated())
     {
-        return false;
+        return preview;
+    }
+
+    const HeroRuntimeState& heroState = player.GetHeroState();
+    if (!heroState.ultimateReady || heroState.ultimate.cooldownRemaining > 0.0f)
+    {
+        return preview;
+    }
+
+    preview.visible = true;
+    if (heroState.orbitaTeleportPrimed && heroState.orbitaTeleportPreviewTimer > 0.0f)
+    {
+        preview.start = origin;
+        preview.destination = heroState.orbitaTeleportDestination;
+        preview.direction = heroState.orbitaTeleportDirection;
+        preview.travelDistance = heroState.orbitaTeleportDistance;
+        preview.healthCost = heroState.orbitaTeleportHealthCost;
+        preview.valid = IsOrbitaTeleportDestinationSafe(preview.destination, player.GetTeamId(), &preview.reason);
+        return preview;
+    }
+
+    direction = Normalize(direction);
+    if (Length(direction) <= 0.0001f)
+    {
+        direction = player.Forward();
+    }
+    preview.start = origin;
+    preview.direction = direction;
+
+    const auto fail = [&preview](std::string reason, Vector3 destination, float travelDistance)
+    {
+        preview.destination = destination;
+        preview.travelDistance = travelDistance;
+        preview.healthCost = 0;
+        preview.reason = std::move(reason);
+        preview.valid = false;
+        return preview;
+    };
+
+    const std::optional<RaycastHit> hit = world_.Raycast(origin, direction, kOrbitaTeleportMaxDistance);
+    Vector3 destination {};
+    float travelDistance = kOrbitaTeleportMaxDistance;
+    if (hit.has_value())
+    {
+        const Vector3 hitPoint {
+            origin.x + direction.x * hit->distance,
+            origin.y + direction.y * hit->distance,
+            origin.z + direction.z * hit->distance
+        };
+        if (hit->distance < 1.1f)
+        {
+            return fail("точка телепорта слишком близко к препятствию.", hitPoint, hit->distance);
+        }
+        if (hit->normal.y < 0)
+        {
+            return fail("точка над головой закрыта.", hitPoint, hit->distance);
+        }
+
+        const Vector3 hitBlock = world_.GridToWorld(hit->block);
+        if (hit->normal.y > 0)
+        {
+            destination = Vector3 { hitBlock.x, hitBlock.y + 1.5f, hitBlock.z };
+        }
+        else
+        {
+            const Vector3 adjacent = world_.GridToWorld(hit->adjacent);
+            destination = Vector3 { adjacent.x, hitBlock.y + 1.5f, adjacent.z };
+        }
+        travelDistance = hit->distance;
+    }
+    else
+    {
+        const Vector3 flat = Normalize2D(direction);
+        if (Length2D(flat) <= 0.0001f)
+        {
+            return fail("нужна видимая точка впереди.", player.GetPosition(), 0.0f);
+        }
+        destination = Vector3 {
+            player.GetPosition().x + flat.x * kOrbitaTeleportMaxDistance,
+            player.GetPosition().y,
+            player.GetPosition().z + flat.z * kOrbitaTeleportMaxDistance
+        };
     }
 
     std::string reason;
-    if (!IsOrbitaTeleportDestinationSafe(state.orbitaTeleportDestination, player.GetTeamId(), &reason))
+    if (!IsOrbitaTeleportDestinationSafe(destination, player.GetTeamId(), &reason))
     {
-        state.orbitaTeleportPrimed = false;
-        state.orbitaTeleportPreviewTimer = 0.0f;
-        SetMessage("Орбита: телепорт отменен. " + reason, 2.0f);
-        return false;
+        return fail(reason, destination, travelDistance);
     }
 
-    const Vector3 start = player.GetPosition();
-    const Vector3 destination = state.orbitaTeleportDestination;
-    const Vector3 direction = state.orbitaTeleportDirection;
-    const int selfDamage = state.orbitaTeleportHealthCost;
-    state.orbitaTeleportPrimed = false;
-    state.orbitaTeleportPreviewTimer = 0.0f;
-    player.Teleport(destination);
-    player.Damage(selfDamage);
-    player.MutableHeroState().orbitaPulseTimer = 0.8f;
-    SetHeroAnimation(player, HeroAnimationState::Ultimate, 0.36f);
-
-    const Color accent = HeroAccentColor(HeroId::Orbita);
-    AddWorldEffect(start, direction, accent, 0.85f, 0.36f, WorldEffectKind::Ring);
-    AddWorldEffect(destination, direction, accent, 1.05f, 0.42f, WorldEffectKind::Ring);
-    AddFloatingText("-" + std::to_string(selfDamage), Vector3 { destination.x, destination.y + 1.35f, destination.z }, accent);
-    SetMessage("Орбита телепортировалась в видимую точку и получила " + std::to_string(selfDamage) + " урона.", 2.5f);
-    AddEventMessage("Ульта Орбиты: видимый телепорт завершен.", accent, 2.8f);
-    AddCameraShake(0.18f, 0.18f);
-    audio_.PlayCoreDestroyed();
-    return true;
+    preview.destination = destination;
+    preview.travelDistance = travelDistance;
+    preview.healthCost = std::clamp(static_cast<int>(travelDistance * kOrbitaTeleportDamagePerBlock + 0.5f), 4, 28);
+    preview.valid = true;
+    return preview;
 }
 
 bool Game::IsOrbitaCoreRestrictedPosition(Vector3 position, int teamId) const
@@ -1971,7 +1849,7 @@ std::vector<HeroDeviceVisual> Game::BuildHeroDeviceVisuals() const
     {
         const Team* team = FindTeam(bot.ownerTeamId);
         const Vector3 basePosition = team != nullptr
-            ? Vector3 { team->shopPosition.x, team->shopPosition.y + 0.35f, team->shopPosition.z }
+            ? TeamChestDepositPosition(*team)
             : bot.position;
         Vector3 direction = Normalize(Vector3 {
             basePosition.x - bot.position.x,
@@ -2104,424 +1982,6 @@ std::vector<HeroDeviceVisual> Game::BuildHeroDeviceVisuals() const
     return devices;
 }
 
-bool Game::UseBromAbility(Player& player, HeroAbilitySlot slot)
-{
-    const HeroDefinition& hero = HeroSystem::GetDefinition(HeroId::Brom);
-    const HeroAbilityDefinition* ability = nullptr;
-    const HeroAbilityState* state = nullptr;
-    switch (slot)
-    {
-    case HeroAbilitySlot::Active1:
-        ability = &hero.active1;
-        state = &player.GetHeroState().active1;
-        break;
-    case HeroAbilitySlot::Active2:
-        ability = &hero.active2;
-        state = &player.GetHeroState().active2;
-        break;
-    case HeroAbilitySlot::Ultimate:
-        ability = &hero.ultimate;
-        state = &player.GetHeroState().ultimate;
-        break;
-    }
-
-    if (ability == nullptr || state == nullptr)
-    {
-        return false;
-    }
-    if (state->cooldownRemaining > 0.0f)
-    {
-        SetMessage(hero.name + ": " + ability->name + " на кулдауне еще "
-            + FormatTenths(state->cooldownRemaining) + " с.", 1.7f);
-        audio_.PlayDenied();
-        return false;
-    }
-
-    if (slot == HeroAbilitySlot::Active1)
-    {
-        if (!UseBromVacuumBot(player, false, 0.0f))
-        {
-            audio_.PlayDenied();
-            return false;
-        }
-        player.StartHeroAbilityCooldown(slot, ability->cooldownSeconds, ability->durationSeconds);
-        return true;
-    }
-    if (slot == HeroAbilitySlot::Active2)
-    {
-        if (!UseBromTurretDrone(player, false, 0.0f))
-        {
-            audio_.PlayDenied();
-            return false;
-        }
-        player.StartHeroAbilityCooldown(slot, ability->cooldownSeconds, ability->durationSeconds);
-        return true;
-    }
-
-    if (!player.GetHeroState().ultimateReady)
-    {
-        SetMessage("Бром: ульта не готова, заряд "
-            + std::to_string(static_cast<int>(player.GetHeroState().ultimateCharge)) + "%.", 1.8f);
-        audio_.PlayDenied();
-        return false;
-    }
-    if (!UseBromUltimate(player))
-    {
-        audio_.PlayDenied();
-        return false;
-    }
-    player.StartHeroAbilityCooldown(HeroAbilitySlot::Ultimate, kBromUltimateCooldownSeconds, kBromUltimateDeviceLifetime);
-    return true;
-}
-
-bool Game::UseBromVacuumBot(Player& player, bool temporary, float lifetimeSeconds)
-{
-    if (!temporary)
-    {
-        const int activeCount = static_cast<int>(std::count_if(
-            bromVacuumBots_.begin(),
-            bromVacuumBots_.end(),
-            [&player](const BromVacuumBot& bot)
-            {
-                return !bot.temporary && bot.ownerPlayerId == player.GetId();
-            }));
-        if (activeCount >= 2)
-        {
-            SetMessage("Бром: одновременно могут работать только два робота-пылесоса.", 2.0f);
-            return false;
-        }
-        if (!player.GetInventory().SpendResource(ResourceType::Iron, kBromVacuumIronCost))
-        {
-            SetMessage("Бром: для робота-пылесоса нужно 48 железа.", 2.0f);
-            return false;
-        }
-    }
-
-    const int spawnIndex = static_cast<int>(bromVacuumBots_.size() + bromTurretDrones_.size());
-    BromVacuumBot bot {};
-    bot.position = OffsetAround(player.GetPosition(), spawnIndex, 1.35f);
-    bot.ownerPlayerId = player.GetId();
-    bot.ownerTeamId = player.GetTeamId();
-    bot.temporary = temporary;
-    bot.lifetime = temporary ? std::max(0.1f, lifetimeSeconds) : 0.0f;
-    bot.pulseTimer = 0.4f;
-    bot.invulnerabilityTimer = temporary ? 5.0f : 0.0f;
-    bromVacuumBots_.push_back(bot);
-
-    player.AddHeroUltimateCharge(temporary ? 0.0f : 8.0f);
-    SetHeroAnimation(player, temporary ? HeroAnimationState::Ultimate : HeroAnimationState::Ability1, 0.34f);
-    const Color accent = HeroAccentColor(HeroId::Brom);
-    AddWorldEffect(bot.position, accent, temporary ? 0.32f : 0.26f, 0.34f);
-    AddFloatingText(temporary ? "временный пылесос" : "робот-пылесос", bot.position, accent);
-    SetMessage(temporary ? "Бром собрал временного робота-пылесоса." : "Бром собрал робота-пылесоса за 48 железа.", 2.2f);
-    AddEventMessage("Робот-пылесос Брома ищет ресурсы и несет их в командный сундук.", accent, 2.8f);
-    audio_.PlayBuild();
-    return true;
-}
-
-bool Game::UseBromTurretDrone(Player& player, bool temporary, float lifetimeSeconds)
-{
-    if (!temporary)
-    {
-        const int activeCount = static_cast<int>(std::count_if(
-            bromTurretDrones_.begin(),
-            bromTurretDrones_.end(),
-            [&player](const BromTurretDrone& drone)
-            {
-                return !drone.temporary && drone.ownerPlayerId == player.GetId();
-            }));
-        if (activeCount >= 1)
-        {
-            SetMessage("Бром: одновременно может работать только один дрон-турель.", 2.0f);
-            return false;
-        }
-        if (!player.GetInventory().SpendResource(ResourceType::Gold, kBromTurretGoldCost))
-        {
-            SetMessage("Бром: для дрона-турели нужно 12 золота.", 2.0f);
-            return false;
-        }
-    }
-
-    const int spawnIndex = static_cast<int>(bromVacuumBots_.size() + bromTurretDrones_.size());
-    BromTurretDrone drone {};
-    drone.position = OffsetAround(Vector3 { player.GetPosition().x, player.GetPosition().y + 1.05f, player.GetPosition().z }, spawnIndex, 1.65f);
-    drone.ownerPlayerId = player.GetId();
-    drone.ownerTeamId = player.GetTeamId();
-    drone.temporary = temporary;
-    drone.lifetime = temporary ? std::max(0.1f, lifetimeSeconds) : 0.0f;
-    drone.fireCooldown = 0.4f;
-    drone.pulseTimer = 0.4f;
-    drone.invulnerabilityTimer = temporary ? 5.0f : 0.0f;
-    bromTurretDrones_.push_back(drone);
-
-    player.AddHeroUltimateCharge(temporary ? 0.0f : 10.0f);
-    SetHeroAnimation(player, temporary ? HeroAnimationState::Ultimate : HeroAnimationState::Ability2, 0.34f);
-    const Color accent = HeroAccentColor(HeroId::Brom);
-    AddWorldEffect(drone.position, accent, temporary ? 0.36f : 0.30f, 0.34f);
-    AddFloatingText(temporary ? "временная турель" : "дрон-турель", drone.position, accent);
-    SetMessage(temporary ? "Бром собрал временного дрона-турель." : "Бром собрал дрона-турель за 12 золота.", 2.2f);
-    AddEventMessage("Дрон-турель Брома стреляет только по игрокам и не атакует Кор.", accent, 2.8f);
-    audio_.PlayBuild();
-    return true;
-}
-
-bool Game::UseBromUltimate(Player& player)
-{
-    constexpr float absorbRadiusSq = 7.0f * 7.0f;
-    int absorbed = 0;
-    for (ResourcePickup& pickup : matchSimulation_.Pickups())
-    {
-        const Vector3 pickupPos = ToVector3(pickup.position);
-        if (pickup.collected || DistanceSquared(pickupPos, player.GetPosition()) > absorbRadiusSq)
-        {
-            continue;
-        }
-
-        player.GetInventory().AddResource(pickup.type, pickup.amount);
-        absorbed += pickup.amount;
-        pickup.collected = true;
-        AddWorldEffect(pickupPos, HeroAccentColor(HeroId::Brom), 0.18f, 0.18f);
-    }
-
-    const int turretCount = std::min(5, player.GetInventory().GetResource(ResourceType::Gold) / kBromTurretGoldCost);
-    if (absorbed == 0 && turretCount == 0)
-    {
-        SetMessage("Бром: для Сборки обороны нужны ресурсы рядом или в инвентаре.", 2.2f);
-        return false;
-    }
-
-    int spawned = 0;
-    for (int i = 0; i < turretCount; ++i)
-    {
-        if (player.GetInventory().SpendResource(ResourceType::Gold, kBromTurretGoldCost)
-            && UseBromTurretDrone(player, true, kBromUltimateDeviceLifetime))
-        {
-            ++spawned;
-        }
-    }
-
-    if (spawned <= 0 && absorbed <= 0)
-    {
-        SetMessage("Бром: ресурсы не удалось превратить в устройства.", 2.0f);
-        return false;
-    }
-
-    const Color accent = HeroAccentColor(HeroId::Brom);
-    SetHeroAnimation(player, HeroAnimationState::Ultimate, 0.58f);
-    AddWorldEffect(player.GetPosition(), player.Forward(), accent, 2.2f, 0.65f, WorldEffectKind::Ring);
-    SetMessage("Бром запустил Сборку обороны: устройств " + std::to_string(spawned) + ", время 1.5 минуты.", 3.0f);
-    AddEventMessage("Ульта Брома собрала защиту из ресурсов. Поглощено рядом: " + std::to_string(absorbed) + ".", accent, 3.2f);
-    audio_.PlayPurchase();
-    return true;
-}
-
-bool Game::UseKonvoyAbility(Player& player, HeroAbilitySlot slot)
-{
-    const HeroDefinition& hero = HeroSystem::GetDefinition(HeroId::Konvoy);
-    const HeroAbilityDefinition* ability = nullptr;
-    const HeroAbilityState* state = nullptr;
-    switch (slot)
-    {
-    case HeroAbilitySlot::Active1:
-        ability = &hero.active1;
-        state = &player.GetHeroState().active1;
-        break;
-    case HeroAbilitySlot::Active2:
-        ability = &hero.active2;
-        state = &player.GetHeroState().active2;
-        break;
-    case HeroAbilitySlot::Ultimate:
-        ability = &hero.ultimate;
-        state = &player.GetHeroState().ultimate;
-        break;
-    }
-
-    if (ability == nullptr || state == nullptr)
-    {
-        return false;
-    }
-    if (state->cooldownRemaining > 0.0f)
-    {
-        SetMessage(hero.name + ": " + ability->name + " на кулдауне еще "
-            + FormatTenths(state->cooldownRemaining) + " с.", 1.7f);
-        audio_.PlayDenied();
-        return false;
-    }
-
-    bool used = false;
-    if (slot == HeroAbilitySlot::Active1)
-    {
-        used = UseKonvoyTrap(player, ability->durationSeconds);
-    }
-    else if (slot == HeroAbilitySlot::Active2)
-    {
-        used = UseKonvoyHandcuffs(player, ability->durationSeconds);
-    }
-    else
-    {
-        if (!player.GetHeroState().ultimateReady)
-        {
-            SetMessage("Конвой: ульта не готова, заряд "
-                + std::to_string(static_cast<int>(player.GetHeroState().ultimateCharge)) + "%.", 1.8f);
-            audio_.PlayDenied();
-            return false;
-        }
-        used = UseKonvoyDome(player, ability->durationSeconds);
-    }
-
-    if (!used)
-    {
-        audio_.PlayDenied();
-        return false;
-    }
-
-    player.StartHeroAbilityCooldown(slot, ability->cooldownSeconds, ability->durationSeconds);
-    return true;
-}
-
-bool Game::UseKonvoyTrap(Player& player, float lifetimeSeconds)
-{
-    const int activeCount = static_cast<int>(std::count_if(
-        konvoyTraps_.begin(),
-        konvoyTraps_.end(),
-        [&player](const KonvoyTrap& trap)
-        {
-            return trap.ownerPlayerId == player.GetId();
-        }));
-    if (activeCount >= kKonvoyMaxTraps)
-    {
-        SetMessage("Конвой: одновременно может быть до 2 капканов.", 2.0f);
-        return false;
-    }
-
-    Vector3 forward = player.IsLocal() ? cameraController_.GetFlatForward() : player.Forward();
-    forward = Normalize2D(forward);
-    if (Length2D(forward) <= 0.0001f)
-    {
-        forward = player.Forward();
-    }
-
-    const Vector3 desired {
-        player.GetPosition().x + forward.x * 1.15f,
-        player.GetPosition().y,
-        player.GetPosition().z + forward.z * 1.15f
-    };
-    const GridPos column = world_.WorldToGrid(desired);
-    std::optional<Vector3> trapPosition;
-    const int startY = world_.WorldToGrid(player.GetPosition()).y + 1;
-    for (int y = startY; y >= startY - 3; --y)
-    {
-        const GridPos ground { column.x, y, column.z };
-        const GridPos above { column.x, y + 1, column.z };
-        if (world_.IsSolid(ground) && world_.IsAir(above))
-        {
-            const Vector3 groundCenter = world_.GridToWorld(ground);
-            trapPosition = Vector3 { desired.x, groundCenter.y + 0.57f, desired.z };
-            break;
-        }
-    }
-
-    if (!trapPosition.has_value())
-    {
-        SetMessage("Конвой: капкану нужна свободная поверхность рядом.", 2.0f);
-        return false;
-    }
-
-    KonvoyTrap trap {};
-    trap.position = *trapPosition;
-    trap.ownerPlayerId = player.GetId();
-    trap.ownerTeamId = player.GetTeamId();
-    trap.lifetime = std::max(0.1f, lifetimeSeconds);
-    trap.flashTimer = 0.45f;
-    konvoyTraps_.push_back(trap);
-
-    const Color accent = HeroAccentColor(HeroId::Konvoy);
-    SetHeroAnimation(player, HeroAnimationState::Ability1, 0.30f);
-    AddWorldEffect(trap.position, forward, accent, 0.52f, 0.38f, WorldEffectKind::Ring);
-    AddFloatingText("капкан", trap.position, accent);
-    SetMessage("Конвой поставил капкан. Время существования: 45 секунд.", 2.5f);
-    AddEventMessage("Капкан Конвоя заметен: его можно обойти или сломать инструментом.", accent, 2.8f);
-    audio_.PlayBuild();
-    return true;
-}
-
-bool Game::UseKonvoyHandcuffs(Player& player, float lifetimeSeconds)
-{
-    Player* target = FindNearbyEnemyPlayer(player, kKonvoyHandcuffRadius);
-    if (target == nullptr)
-    {
-        SetMessage("Конвой: для наручников нужен противник в радиусе 6 блоков.", 2.0f);
-        return false;
-    }
-
-    const Vector3 origin { player.GetPosition().x, player.GetPosition().y + 0.78f, player.GetPosition().z };
-    const Vector3 targetPoint { target->GetPosition().x, target->GetPosition().y + 0.72f, target->GetPosition().z };
-    const Vector3 ray {
-        targetPoint.x - origin.x,
-        targetPoint.y - origin.y,
-        targetPoint.z - origin.z
-    };
-    const float distance = Length(ray);
-    const std::optional<RaycastHit> wall = world_.Raycast(origin, ray, distance);
-    if (wall.has_value() && wall->distance < distance - 0.35f)
-    {
-        SetMessage("Конвой: наручники не проходят через блоки.", 2.0f);
-        return false;
-    }
-
-    KonvoyTether tether {};
-    tether.ownerPlayerId = player.GetId();
-    tether.targetPlayerId = target->GetId();
-    tether.ownerTeamId = player.GetTeamId();
-    tether.lifetime = std::max(0.1f, lifetimeSeconds);
-    tether.flashTimer = 0.42f;
-    tether.ownerLastHealth = player.GetHealth();
-    konvoyTethers_.push_back(tether);
-    player.AddHeroUltimateCharge(10.0f);
-
-    const Color accent = HeroAccentColor(HeroId::Konvoy);
-    SetHeroAnimation(player, HeroAnimationState::Ability2, 0.34f);
-    const Vector3 tetherDirection = Normalize2D(Vector3 {
-        target->GetPosition().x - player.GetPosition().x,
-        0.0f,
-        target->GetPosition().z - player.GetPosition().z
-    });
-    AddWorldEffect(player.GetPosition(), tetherDirection, accent, kKonvoyHandcuffRadius, 0.42f, WorldEffectKind::Trail);
-    AddFloatingText("наручники", target->GetPosition(), accent);
-    SetMessage("Конвой связал цель наручниками на 12 секунд. Радиус цепи: 6 блоков.", 2.6f);
-    AddEventMessage("Наручники Конвоя притягивают цель и рвутся после накопленных 30+ урона по Конвою.", accent, 3.0f);
-    audio_.PlayPickup();
-    return true;
-}
-
-bool Game::UseKonvoyDome(Player& player, float lifetimeSeconds)
-{
-    KonvoyDome dome {};
-    dome.position = player.GetPosition();
-    dome.ownerPlayerId = player.GetId();
-    dome.ownerTeamId = player.GetTeamId();
-    dome.lifetime = std::max(0.1f, lifetimeSeconds);
-    dome.flashTimer = 0.60f;
-    for (const Player& target : players_)
-    {
-        if (target.IsAlive() && !target.IsEliminated()
-            && target.GetTeamId() != player.GetTeamId()
-            && DistanceSquared(target.GetPosition(), dome.position) < kKonvoyDomeVisualRadius * kKonvoyDomeVisualRadius)
-        {
-            dome.initiallyInsideEnemyIds.push_back(target.GetId());
-        }
-    }
-    konvoyDomes_.push_back(dome);
-
-    const Color accent = HeroAccentColor(HeroId::Konvoy);
-    SetHeroAnimation(player, HeroAnimationState::Ultimate, 0.52f);
-    AddWorldEffect(player.GetPosition(), Vector3 { 0.0f, 0.0f, 1.0f }, accent, kKonvoyDomeVisualRadius, 0.80f, WorldEffectKind::CorePulse);
-    SetMessage("Конвой развернул Купол содержания на 30 секунд.", 2.8f);
-    AddEventMessage("Купол содержания имеет 180 HP: враги не проходят сквозь оболочку, союзники проходят свободно.", accent, 3.2f);
-    audio_.PlayPurchase();
-    return true;
-}
-
 void Game::ApplyBromBlockBreakPassive(Player& player, const Block& block, Vector3 position)
 {
     if (player.GetHeroId() != HeroId::Brom || block.teamId < 0 || block.teamId == player.GetTeamId())
@@ -2552,7 +2012,7 @@ void Game::ApplyBromBlockBreakPassive(Player& player, const Block& block, Vector
     player.AddHeroUltimateCharge(BromUltimateChargeForResource(reward, amount));
     const Color accent = HeroAccentColor(HeroId::Brom);
     AddFloatingText("+трофей " + std::to_string(amount) + " " + ToString(reward), position, accent);
-    if (player.IsLocal())
+    if (IsLocallyPredicted(player.GetControlKind()))
     {
         AddEventMessage("Пассивка Брома разобрала вражеский блок на материалы.", accent, 2.2f);
     }
