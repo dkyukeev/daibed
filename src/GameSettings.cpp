@@ -73,6 +73,18 @@ const char* Game::BotDifficultyName() const
     return "Неизвестно";
 }
 
+const char* Game::BotStrategyProfileName() const
+{
+    switch (botStrategyProfile_)
+    {
+    case BotStrategyProfile::Standard:
+        return "Обычная";
+    case BotStrategyProfile::HypixelRush:
+        return "Hypixel Rush";
+    }
+    return "Неизвестно";
+}
+
 const char* Game::ArenaLayoutName() const
 {
     switch (arenaLayout_)
@@ -312,6 +324,12 @@ void Game::LoadSettings()
             file >> value;
             botDifficulty_ = static_cast<BotDifficulty>(std::clamp(value, 0, 2));
         }
+        else if (key == "botStrategyProfile")
+        {
+            int value = static_cast<int>(botStrategyProfile_);
+            file >> value;
+            botStrategyProfile_ = static_cast<BotStrategyProfile>(std::clamp(value, 0, 1));
+        }
         else if (key == "arenaLayout")
         {
             int value = static_cast<int>(arenaLayout_);
@@ -354,18 +372,6 @@ void Game::LoadSettings()
         {
             file >> input_.MutableBindings().sneak;
         }
-#if DAIBED_DEVELOPER_BUILD
-        else if (key == "keyBridgeMode")
-        {
-            file >> input_.MutableBindings().bridgeMode;
-        }
-#else
-        else if (key == "keyBridgeMode")
-        {
-            int ignored = 0;
-            file >> ignored;
-        }
-#endif
         else if (key == "keySprint")
         {
             file >> input_.MutableBindings().sprint;
@@ -546,6 +552,83 @@ const BotTuningGenome& Game::BotTuningForTeam(int teamId) const
     return botTuningByTeam_[0];
 }
 
+BotTuningGenome Game::ScaledBotTuningForTeam(int teamId) const
+{
+    BotTuningGenome scaled = BotTuningForTeam(teamId);
+
+    if (botStrategyProfile_ == BotStrategyProfile::HypixelRush)
+    {
+        // A deliberately fast Bed Wars loop: make a cheap opening purchase,
+        // establish a first front, then send short repeat waves. Difficulty
+        // still owns reaction time and mechanical execution; this profile
+        // changes only strategic appetite and commitment.
+        scaled.earlyEconomySeconds = 24.0f;
+        scaled.pressurePhaseSeconds = 36.0f;
+        scaled.latePressureSeconds = 90.0f;
+        scaled.allInSeconds = 170.0f;
+        scaled.intentLockScale = 1.12f;
+        scaled.roleLockScale = 0.88f;
+        scaled.strategicAttackUrgencyScale = 0.72f;
+        scaled.lateAttackUrgencyScale = 0.46f;
+        scaled.strategicDefenseUrgencyScale = 0.24f;
+        scaled.strategicEconomyBonus = 38.0f;
+        scaled.personalEconomyBonus = 72.0f;
+        scaled.strategicPressureEconomyPenalty = 110.0f;
+        scaled.attackSlotBonus = 126.0f;
+        scaled.allyAssistWeight = 0.64f;
+
+        BotRoleTuning& defender = scaled.roles[static_cast<int>(BotRole::Defender)];
+        BotRoleTuning& rusher = scaled.roles[static_cast<int>(BotRole::Rusher)];
+        BotRoleTuning& collector = scaled.roles[static_cast<int>(BotRole::Collector)];
+        BotRoleTuning& fighter = scaled.roles[static_cast<int>(BotRole::Fighter)];
+        defender.pressureBiasScale *= 1.10f;
+        rusher.pressureBiasScale *= 1.35f;
+        collector.pressureBiasScale *= 1.22f;
+        fighter.pressureBiasScale *= 1.30f;
+        rusher.resourceBiasScale *= 0.72f;
+        collector.resourceBiasScale *= 0.82f;
+        fighter.resourceBiasScale *= 0.76f;
+        rusher.aggression *= 1.16f;
+        fighter.aggression *= 1.12f;
+        rusher.lootReturnValue = std::max(42.0f, rusher.lootReturnValue);
+        fighter.lootReturnValue = std::max(42.0f, fighter.lootReturnValue);
+        ClampBotTuningGenome(scaled);
+        return scaled;
+    }
+
+    // The stock timings were tuned around a 12-minute arena. Imported maps can
+    // have a much later collapse and far longer travel legs; leaving the stock
+    // clock unchanged puts every bot into permanent all-in after three minutes.
+    // Blend toward fractions of the map clock only once the arena grows beyond
+    // stock size, preserving the existing stock-map baseline byte-for-byte.
+    // A map author may extend collapse to leave more room for a tense final
+    // phase. That must not also postpone the proven economy/pressure cadence:
+    // Castle's 28-minute collapse is overtime after its 26.4-minute strategic
+    // timeline, not a reason to defer all-in by another minute.
+    constexpr float kMaxStrategicTimelineSeconds = 26.4f * 60.0f;
+    const float strategicTimelineSeconds = std::min(coreCollapseSeconds_, kMaxStrategicTimelineSeconds);
+    const float longMapBlend = std::clamp(
+        (strategicTimelineSeconds - 12.0f * 60.0f) / (12.0f * 60.0f),
+        0.0f,
+        1.0f);
+    const auto blend = [longMapBlend](float stockSeconds, float mapSeconds)
+    {
+        return stockSeconds + (mapSeconds - stockSeconds) * longMapBlend;
+    };
+
+    scaled.earlyEconomySeconds = blend(scaled.earlyEconomySeconds, strategicTimelineSeconds * 0.11f);
+    scaled.pressurePhaseSeconds = blend(scaled.pressurePhaseSeconds, strategicTimelineSeconds * 0.14f);
+    scaled.latePressureSeconds = blend(scaled.latePressureSeconds, strategicTimelineSeconds * 0.38f);
+    scaled.allInSeconds = blend(scaled.allInSeconds, strategicTimelineSeconds * 0.76f);
+
+    // Custom tuning files may contain unusual ordering. Keep the effective
+    // clock monotonic without mutating or re-writing the source genome.
+    scaled.pressurePhaseSeconds = std::max(scaled.pressurePhaseSeconds, scaled.earlyEconomySeconds + 2.0f);
+    scaled.latePressureSeconds = std::max(scaled.latePressureSeconds, scaled.pressurePhaseSeconds + 20.0f);
+    scaled.allInSeconds = std::max(scaled.allInSeconds, scaled.latePressureSeconds + 30.0f);
+    return scaled;
+}
+
 void Game::SaveSettings() const
 {
     std::ofstream file("DaiBed.settings", std::ios::trunc);
@@ -579,6 +662,7 @@ void Game::SaveSettings() const
     file << "selectedTeamSize " << selectedTeamSize_ << "\n";
     file << "selectedBotCount " << selectedBotCount_ << "\n";
     file << "botDifficulty " << static_cast<int>(botDifficulty_) << "\n";
+    file << "botStrategyProfile " << static_cast<int>(botStrategyProfile_) << "\n";
     file << "arenaLayout " << static_cast<int>(arenaLayout_) << "\n";
     file << "arenaBiome " << static_cast<int>(arenaBiome_) << "\n";
     file << "selectedHero " << HeroSystem::IndexOf(selectedHeroId_) << "\n";
@@ -589,9 +673,6 @@ void Game::SaveSettings() const
     file << "keyMoveRight " << bindings.moveRight << "\n";
     file << "keyJump " << bindings.jump << "\n";
     file << "keySneak " << bindings.sneak << "\n";
-#if DAIBED_DEVELOPER_BUILD
-    file << "keyBridgeMode " << bindings.bridgeMode << "\n";
-#endif
     file << "keySprint " << bindings.sprint << "\n";
     file << "keyAttack " << bindings.attack << "\n";
     file << "keyPlace " << bindings.place << "\n";
@@ -661,7 +742,9 @@ Color Game::BiomeSkyColor() const
     case ArenaBiome::Space:
         return Color { 5, 6, 18, 255 };
     case ArenaBiome::Ruins:
-        return Color { 24, 27, 24, 255 };
+        // Moody overcast sage instead of near-black: the castle map lives in
+        // this biome and a pitch-dark sky fought the sunny key light.
+        return Color { 52, 61, 56, 255 };
     case ArenaBiome::Arena:
         break;
     }

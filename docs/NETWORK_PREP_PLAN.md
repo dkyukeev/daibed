@@ -69,7 +69,7 @@ delta-compression.
 | Файл | Содержит |
 |---|---|
 | `src/Network/NetTypes.h` | `enum class NetworkMode { LocalSinglePlayer, LocalHost, LocalClient, DedicatedServer }`; `ServerConfig { listenAddress, port, maxPlayers, privateServer, serverName, password }` с `HasPassword()`/`ValidatePassword()` (без криптографии — только хранение/валидация). |
-| `src/Network/PlayerCommand.h` | `PlayerCommand` — все действия за тик: `controlledPlayerId`/`tick`, movement (`moveForward/moveStrafe/aimYaw/aimPitch/jump/sprint/sprintTapped/sneak/bridgeMode`), `selectedSlot`, attack (`attackPressed/Held/Released`), place (`placePressed/placeHeld/scopeHeld`), `interact`, `useAbility1/2/Ultimate`, utility (`useHeal/Teleport/Dash/Shoot/Fireball/Molotov/Alarm`). |
+| `src/Network/PlayerCommand.h` | `PlayerCommand` — все действия за тик: `controlledPlayerId`/`tick`, movement (`moveForward/moveStrafe/aimYaw/aimPitch/jump/sprint/sprintTapped/sneak`), `selectedSlot`, attack (`attackPressed/Held/Released`), place (`placePressed/placeHeld/scopeHeld`), `interact`, `useAbility1/2/Ultimate`, utility (`useHeal/Teleport/Dash/Shoot/Fireball/Molotov/Alarm`). |
 | `src/Network/NetworkSnapshot.h` | `MatchPhase`; `PlayerSnapshot` (id/team/hero/**`Vec3` pos/vel**/health/alive/eliminated/slot); `CoreSnapshot`; `GeneratorSnapshot`; `PickupSnapshot` (resourceType/amount/`Vec3`); `DroppedItemSnapshot` (itemType/count/`Vec3`); `MatchSnapshot` (tick/matchTime/phase/winner + players/cores/generators/pickups/droppedItems; место под visibility filtering). |
 | `src/Network/LocalServerSession.{h,cpp}` | In-process transport/snapshot-канал: `SubmitCommand` → `DrainCommands` → `PublishSnapshot`/`LatestSnapshot` (tick живёт в `MatchSimulation`, не здесь). Реальный транспорт подменит класс, сохранив форму command-in / snapshot-out. |
 | `src/Simulation/SimMath.h` | Raylib-free `Vec3 { float x,y,z }` (+ `Length`/операторы). Vector-тип симуляции/replication. Используется в `NetworkSnapshot`, `Resource`/`Generator`. |
@@ -157,7 +157,7 @@ ApplyPlayerCommand(Player&, const PlayerCommand&, dt)  // единая точк�
 не само-двигает игрока (иначе двойной шаг). В обычной игре всегда `false`.
 
 Ещё **не** через команду (осознанно отложено, всё ещё `currentInput_`):
-- aiming-slow при scope/blaster (`placeHeld`/`scopeHeld`), `bridgeMode`,
+- замедление при прицеливании scope/blaster (`placeHeld`/`scopeHeld`); исторический `bridgeMode` удалён,
   `sprintTapped` — локальные assist/aim-флаги внутри `ApplyPlayerCommand`;
 - attack/place/break (`UpdateAttackOrBreak`, `HandlePlaceBlock`),
   hero ability/utility/inventory/shop.
@@ -639,7 +639,7 @@ authoritative точка доступа к players.
 оно осталось только в **input/UI/camera/menu** слое (`HandleInput`,
 `HandleInventoryInput`) и в `BuildLocalPlayerCommand` (input→command builder).
 
-**`PlayerCommand` расширен** action-полями: `sprintTapped`, `bridgeMode`,
+**`PlayerCommand` расширен** action-полями: `sprintTapped`; исторический `bridgeMode` впоследствии удалён,
 `attackPressed`/`attackHeld`/`attackReleased`, `placePressed`/`placeHeld`,
 `scopeHeld`, `useAbility1/2/Ultimate` (были), `useHeal`/`useTeleport`/`useDash`/
 `useShoot`/`useFireball`/`useMolotov`/`useAlarm`. `BuildLocalPlayerCommand`

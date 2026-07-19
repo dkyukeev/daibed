@@ -8,6 +8,7 @@
 #include <cmath>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 
 namespace
@@ -74,6 +75,86 @@ void WriteJsonVector3(std::ofstream& file, Vector3 value)
 {
     file << "{\"x\":" << value.x << ",\"y\":" << value.y << ",\"z\":" << value.z << "}";
 }
+
+const char* ShopUsageModeName(ShopUsageMode mode)
+{
+    switch (mode)
+    {
+    case ShopUsageMode::Placeable: return "placeable";
+    case ShopUsageMode::Consumable: return "consumable";
+    case ShopUsageMode::TimedEffect: return "timedEffect";
+    case ShopUsageMode::Equipment: return "equipment";
+    case ShopUsageMode::Upgrade: return "upgrade";
+    case ShopUsageMode::TeamEffect: return "teamEffect";
+    }
+    return "unknown";
+}
+}
+
+void Game::RecordMemorableMoment(
+    std::string category,
+    int primaryTeamId,
+    int secondaryTeamId,
+    std::vector<int> participants,
+    std::string description,
+    float significance,
+    bool botDecisionDriven,
+    int actorHealth,
+    int targetHealth,
+    int carriedResourceValue,
+    std::vector<std::string> precedingActions)
+{
+    if (!automatch_.active || significance < 0.55f)
+    {
+        return;
+    }
+    const std::uint32_t tick = matchSimulation_.CurrentTick();
+    const int existingCategoryHighlights = static_cast<int>(std::count_if(
+        automatch_.currentMemorableMoments.begin(), automatch_.currentMemorableMoments.end(),
+        [&category](const MemorableMoment& moment) { return moment.category == category; }));
+    if (existingCategoryHighlights >= 2)
+    {
+        return;
+    }
+    // Moment categories are highlights, not an action log. Collapse repeated
+    // variants from the same team/fight into one event over a meaningful
+    // tactical window.
+    const std::uint32_t duplicateWindow = 15u * 60u;
+    for (auto it = automatch_.currentMemorableMoments.rbegin();
+         it != automatch_.currentMemorableMoments.rend(); ++it)
+    {
+        if (tick > it->tick + duplicateWindow) break;
+        if (it->category == category && it->primaryTeamId == primaryTeamId)
+        {
+            it->significance = std::max(it->significance, significance);
+            return;
+        }
+    }
+
+    MemorableMoment moment;
+    moment.tick = tick;
+    moment.seed = automatchSeed_ + static_cast<unsigned int>(automatch_.completedRuns) * 0x9e3779b9U;
+    moment.map = automatchMapLoaded_ ? automatchMapPath_ : "generated-arena";
+    moment.category = std::move(category);
+    moment.primaryTeamId = primaryTeamId;
+    moment.secondaryTeamId = secondaryTeamId;
+    moment.participants = std::move(participants);
+    moment.description = std::move(description);
+    moment.significance = std::clamp(significance, 0.0f, 1.0f);
+    moment.botDecisionDriven = botDecisionDriven;
+    moment.actorHealth = actorHealth;
+    moment.targetHealth = targetHealth;
+    moment.carriedResourceValue = carriedResourceValue;
+    moment.precedingActions = std::move(precedingActions);
+    for (const EnergyCore& core : matchSimulation_.Cores())
+    {
+        if (core.GetTeamId() >= 0 && core.GetTeamId() < 4)
+        {
+            moment.coreHealth[core.GetTeamId()] = core.IsAlive() ? core.GetHealth() : 0;
+        }
+    }
+    ++automatch_.memorableMomentCounts[moment.category];
+    automatch_.currentMemorableMoments.push_back(std::move(moment));
 }
 
 void Game::StartAutomatch()
@@ -109,6 +190,7 @@ void Game::StartAutomatch()
 
 bool Game::RunAutomatchBatch(int runs, int ticksPerFrame, int maxMinutes, unsigned int seed)
 {
+    navigationMetrics_ = NavigationMetrics {};
     profileSimulationMs_ = 0.0;
     profileBotsMs_ = 0.0;
     profilePathMs_ = 0.0;
@@ -128,6 +210,20 @@ bool Game::RunAutomatchBatch(int runs, int ticksPerFrame, int maxMinutes, unsign
     automatchTicksPerFrame_ = std::clamp(ticksPerFrame, 1, headless_ ? 1024 : 32);
     automatchMaxMinutes_ = std::clamp(maxMinutes, 3, 30);
     automatchSeed_ = seed;
+    // Custom map (--map): every SetupMatch in the batch (one per run) builds
+    // the world/entities from the creative document instead of the arena. The
+    // document's biome/layout drive the sky and biome rules too.
+    if (automatchMapLoaded_)
+    {
+        pendingCreativeDoc_ = &automatchMapDoc_;
+        UpdateCustomMapBuildBounds(automatchMapDoc_);
+        arenaBiome_ = static_cast<ArenaBiome>(automatchMapDoc_.biome);
+        arenaLayout_ = static_cast<ArenaLayout>(automatchMapDoc_.layout);
+    }
+    else
+    {
+        hasCustomMapBuildBounds_ = false;
+    }
     StartAutomatch();
 
     const int simulationTicks = automatchRunTarget_ * automatchMaxMinutes_ * 60 * 60;
@@ -142,8 +238,10 @@ bool Game::RunAutomatchBatch(int runs, int ticksPerFrame, int maxMinutes, unsign
     {
         automatch_.active = false;
         WriteAutomatchStatsJson();
+        pendingCreativeDoc_ = nullptr;
         return false;
     }
+    pendingCreativeDoc_ = nullptr;
     if (profilingEnabled_)
     {
         const double botsPercent = profileSimulationMs_ > 0.0 ? profileBotsMs_ * 100.0 / profileSimulationMs_ : 0.0;
@@ -173,6 +271,36 @@ void Game::ConfigureAutomatchMatch()
     automatch_.currentTeamStats[2] = AutomatchTeamStats {};
     automatch_.currentTeamStats[3] = AutomatchTeamStats {};
     automatch_.currentTimeline.clear();
+    automatch_.currentMemorableMoments.clear();
+    automatch_.recentKillTimes.clear();
+    automatch_.recentKillCounts.clear();
+    for (int teamId = 0; teamId < 4; ++teamId)
+    {
+        automatch_.lastAbilityTickByTeam[teamId] = 0;
+        automatch_.lastAbilityActorByTeam[teamId] = -1;
+    }
+    automatch_.lastLeaderTeamId = -1;
+    automatch_.lastCoreDestroyedTime = -1000.0f;
+    automatch_.lastCoreDestroyedTeamId = -1;
+    for (AutomatchBotStats& stats : automatch_.botStats)
+    {
+        // Per-run comparison state must not compare the last target/position
+        // of one seed with the freshly spawned bot in the next seed. Aggregate
+        // counters intentionally remain cumulative across the batch.
+        stats.hasObjectiveSample = false;
+        stats.currentNoProgressSamples = 0;
+        stats.lastObjectiveIntent = -1;
+        stats.lastAuthoredRouteAdvances = 0;
+        stats.lastPlanStarts = 0;
+        stats.lastPlanStageAdvances = 0;
+        stats.lastPlanCompletions = 0;
+        stats.lastPlanCancellations = 0;
+        stats.lastPlanExpiryCancellations = 0;
+        stats.lastPlanEvidenceCancellations = 0;
+        stats.lastPlanRouteFailureCancellations = 0;
+        stats.lastPlanVoidCancellations = 0;
+        stats.lastIntentForRetreat = -1;
+    }
 
     players_.erase(
         std::remove_if(players_.begin(), players_.end(), [](const Player& player) { return !IsLocallyPredicted(player.GetControlKind()); }),
@@ -180,7 +308,8 @@ void Game::ConfigureAutomatchMatch()
     int nextId = localPlayerId_ + 1;
     for (Team& team : teams_)
     {
-        if (!IsTeamActiveForMode(team.id))
+        // Custom maps (--map) define playable teams by their cores.
+        if (!TeamPlayableForSetup(team.id))
         {
             continue;
         }
@@ -312,38 +441,273 @@ void Game::SampleAutomatchBots()
         }
 
         AutomatchBotStats& stats = findBotStats(player);
-        ++stats.samples;
+        const bool activeSample = player.IsAlive() && !player.IsEliminated();
+        if (activeSample)
+        {
+            ++stats.samples;
+        }
+        stats.archetype = ToString(memory->archetype);
+        const int planStartsDelta = std::max(0, memory->planStarts - stats.lastPlanStarts);
+        const int planStageDelta = std::max(0, memory->planStageAdvances - stats.lastPlanStageAdvances);
+        const int planCompleteDelta = std::max(0, memory->planCompletions - stats.lastPlanCompletions);
+        const int planCancelDelta = std::max(0, memory->planCancellations - stats.lastPlanCancellations);
+        const int planExpiryDelta = std::max(0, memory->planExpiryCancellations - stats.lastPlanExpiryCancellations);
+        const int planEvidenceDelta = std::max(0, memory->planEvidenceCancellations - stats.lastPlanEvidenceCancellations);
+        const int planRouteFailureDelta = std::max(0, memory->planRouteFailureCancellations - stats.lastPlanRouteFailureCancellations);
+        const int planVoidDelta = std::max(0, memory->planVoidCancellations - stats.lastPlanVoidCancellations);
+        stats.planStarts += planStartsDelta;
+        stats.planStageAdvances += planStageDelta;
+        stats.planCompletions += planCompleteDelta;
+        stats.planCancellations += planCancelDelta;
+        stats.planExpiryCancellations += planExpiryDelta;
+        stats.planEvidenceCancellations += planEvidenceDelta;
+        stats.planRouteFailureCancellations += planRouteFailureDelta;
+        stats.planVoidCancellations += planVoidDelta;
+        stats.lastPlanStarts = memory->planStarts;
+        stats.lastPlanStageAdvances = memory->planStageAdvances;
+        stats.lastPlanCompletions = memory->planCompletions;
+        stats.lastPlanCancellations = memory->planCancellations;
+        stats.lastPlanExpiryCancellations = memory->planExpiryCancellations;
+        stats.lastPlanEvidenceCancellations = memory->planEvidenceCancellations;
+        stats.lastPlanRouteFailureCancellations = memory->planRouteFailureCancellations;
+        stats.lastPlanVoidCancellations = memory->planVoidCancellations;
+        stats.planHoldSeconds += activeSample && memory->currentPlan.goal != StrategicGoal::Idle ? 1.0f : 0.0f;
+        if (stats.lastIntentForRetreat >= 0
+            && stats.lastIntentForRetreat != static_cast<int>(BotIntent::RetreatHome)
+            && memory->intent == BotIntent::RetreatHome)
+        {
+            ++stats.retreats;
+            ++automatch_.retreats;
+        }
+        stats.lastIntentForRetreat = static_cast<int>(memory->intent);
+        stats.repeatedRouteDeaths = std::max(stats.repeatedRouteDeaths, memory->repeatedRouteFailures);
+        const Inventory& inventory = player.GetInventory();
+        const int blocksHeld = inventory.GetBlocks();
+        if (activeSample) stats.blocksHeld += blocksHeld;
+        stats.maxBlocksHeld = std::max(stats.maxBlocksHeld, blocksHeld);
+        stats.finalBlocksHeld = blocksHeld;
+        for (int resourceIndex = 0; resourceIndex < 3; ++resourceIndex)
+        {
+            const ResourceType resource = static_cast<ResourceType>(resourceIndex);
+            const int amount = inventory.GetResource(resource);
+            if (activeSample) stats.resourcesHeld[resourceIndex] += amount;
+            stats.finalResourcesHeld[resourceIndex] = amount;
+        }
         const int roleIndex = std::clamp(static_cast<int>(memory->role), 0, 3);
         const int intentIndex = std::clamp(static_cast<int>(memory->intent), 0, 9);
-        ++stats.roleSamples[roleIndex];
-        ++stats.intentSamples[intentIndex];
-        if (stats.lastRole >= 0 && stats.lastRole != roleIndex)
+        if (activeSample)
         {
-            ++stats.roleChanges;
-        }
-        if (stats.lastIntent >= 0 && stats.lastIntent != intentIndex)
-        {
-            ++stats.intentChanges;
-        }
-        stats.lastRole = roleIndex;
-        stats.lastIntent = intentIndex;
-        if (memory->stuckTimer > 1.0f)
-        {
-            ++stats.stuckSamples;
+            ++stats.roleSamples[roleIndex];
+            ++stats.intentSamples[intentIndex];
+            if (stats.lastRole >= 0 && stats.lastRole != roleIndex)
+            {
+                ++stats.roleChanges;
+            }
+            if (stats.lastIntent >= 0 && stats.lastIntent != intentIndex)
+            {
+                ++stats.intentChanges;
+            }
+            stats.lastRole = roleIndex;
+            stats.lastIntent = intentIndex;
+            if (memory->stuckTimer > 1.0f)
+            {
+                ++stats.stuckSamples;
+            }
         }
 
-        if (player.GetTeamId() >= 0 && player.GetTeamId() < 4)
+        const int strategicGoalIndex = std::clamp(static_cast<int>(memory->currentPlan.goal), 0, 6);
+        if (activeSample) ++stats.strategicGoalSamples[strategicGoalIndex];
+
+        const Vector3 position = player.GetPosition();
+        bool objectiveSampled = false;
+        bool objectiveProgressed = false;
+        bool objectiveNoProgress = false;
+        bool objectiveRegressed = false;
+        bool objectiveReached = false;
+        bool strategicStalled = false;
+        if (player.IsAlive() && !player.IsEliminated() && memory->hasObjectiveTarget)
+        {
+            objectiveSampled = true;
+            ++stats.objectiveSamples;
+            const float objectiveDistance = Distance3D(position, memory->objectiveTarget);
+            const bool targetChanged = !stats.hasObjectiveSample
+                || stats.lastObjectiveIntent != intentIndex
+                || Distance3D(stats.lastObjectiveTarget, memory->objectiveTarget) > 5.0f;
+            if (targetChanged)
+            {
+                if (stats.hasObjectiveSample)
+                {
+                    ++stats.objectiveTargetChanges;
+                }
+                stats.currentNoProgressSamples = 0;
+                stats.closestObjectiveDistance = objectiveDistance;
+            }
+            else
+            {
+                const float progress = stats.lastObjectiveDistance - objectiveDistance;
+                stats.netObjectiveDistanceChange += progress;
+                stats.closestObjectiveDistance = std::min(stats.closestObjectiveDistance, objectiveDistance);
+                if (objectiveDistance <= 4.0f)
+                {
+                    objectiveReached = true;
+                    ++stats.objectiveReachedSamples;
+                    stats.currentNoProgressSamples = 0;
+                }
+                else if (progress > 0.75f)
+                {
+                    objectiveProgressed = true;
+                    ++stats.objectiveProgressSamples;
+                    stats.currentNoProgressSamples = 0;
+                }
+                else
+                {
+                    ++stats.currentNoProgressSamples;
+                    if (progress < -0.75f)
+                    {
+                        objectiveRegressed = true;
+                        ++stats.objectiveRegressionSamples;
+                    }
+                    else
+                    {
+                        objectiveNoProgress = true;
+                        ++stats.objectiveNoProgressSamples;
+                    }
+                    stats.maxNoProgressSamples = std::max(stats.maxNoProgressSamples, stats.currentNoProgressSamples);
+                    if (stats.currentNoProgressSamples >= 10)
+                    {
+                        strategicStalled = true;
+                        ++stats.strategicStallSamples;
+                    }
+                }
+            }
+            stats.hasObjectiveSample = true;
+            stats.lastObjectiveTarget = memory->objectiveTarget;
+            stats.lastObjectiveDistance = objectiveDistance;
+            stats.lastObjectiveIntent = intentIndex;
+        }
+
+        bool midProximity = false;
+        bool midReach = false;
+        for (const Generator& generator : matchSimulation_.Generators())
+        {
+            if (generator.GetTeamId() != -1 || generator.GetType() != ResourceType::Crystal)
+            {
+                continue;
+            }
+            const float distance = Distance3D(position, Vector3 {
+                static_cast<float>(generator.GetPosition().x),
+                static_cast<float>(generator.GetPosition().y),
+                static_cast<float>(generator.GetPosition().z)
+            });
+            midProximity = midProximity || distance <= 16.0f;
+            midReach = midReach || distance <= 5.0f;
+        }
+        bool enemyBase = false;
+        bool enemyCoreReach = false;
+        for (const EnergyCore& enemyCore : matchSimulation_.Cores())
+        {
+            if (enemyCore.GetTeamId() == player.GetTeamId())
+            {
+                continue;
+            }
+            const float distance = Distance3D(position, world_.GridToWorld(enemyCore.GetBlockPosition()));
+            enemyBase = enemyBase || distance <= 18.0f;
+            enemyCoreReach = enemyCoreReach || distance <= 6.0f;
+        }
+        if (player.IsAlive() && !player.IsEliminated())
+        {
+            if (midProximity)
+            {
+                ++stats.midProximitySamples;
+            }
+            if (midReach)
+            {
+                ++stats.midReachSamples;
+                if (stats.firstMidReachTime < 0.0f)
+                {
+                    stats.firstMidReachTime = matchSimulation_.MatchTimeSeconds();
+                }
+            }
+            if (enemyBase)
+            {
+                ++stats.enemyBaseSamples;
+                if (stats.firstEnemyBaseTime < 0.0f)
+                {
+                    stats.firstEnemyBaseTime = matchSimulation_.MatchTimeSeconds();
+                }
+            }
+            if (enemyCoreReach)
+            {
+                ++stats.enemyCoreReachSamples;
+            }
+        }
+
+        int authoredRouteAdvanceDelta = 0;
+        if (memory->authoredRouteAdvances < stats.lastAuthoredRouteAdvances)
+        {
+            stats.lastAuthoredRouteAdvances = 0;
+        }
+        authoredRouteAdvanceDelta = memory->authoredRouteAdvances - stats.lastAuthoredRouteAdvances;
+        stats.lastAuthoredRouteAdvances = memory->authoredRouteAdvances;
+        stats.authoredRouteAdvances += authoredRouteAdvanceDelta;
+        stats.authoredRouteMarkerCount = std::max(stats.authoredRouteMarkerCount, memory->authoredRouteMarkerCount);
+        stats.maxAuthoredRouteIndex = std::max(stats.maxAuthoredRouteIndex, memory->authoredRouteIndex);
+        if (memory->usingAuthoredRoute)
+        {
+            ++stats.authoredRouteSamples;
+            if (memory->authoredRouteMarkerKind >= 0 && memory->authoredRouteMarkerKind < 4)
+            {
+                ++stats.authoredRouteMarkerSamples[memory->authoredRouteMarkerKind];
+            }
+        }
+
+        if (activeSample && player.GetTeamId() >= 0 && player.GetTeamId() < 4)
         {
             AutomatchTeamStats& teamStats = automatch_.currentTeamStats[player.GetTeamId()];
             ++teamStats.samples;
             ++teamStats.roleSamples[roleIndex];
             ++teamStats.intentSamples[intentIndex];
+            ++teamStats.strategicGoalSamples[strategicGoalIndex];
             teamStats.resourcesHeld[0] += player.GetInventory().GetResource(ResourceType::Iron);
             teamStats.resourcesHeld[1] += player.GetInventory().GetResource(ResourceType::Gold);
             teamStats.resourcesHeld[2] += player.GetInventory().GetResource(ResourceType::Crystal);
+            if (objectiveSampled) ++teamStats.objectiveSamples;
+            if (objectiveProgressed) ++teamStats.objectiveProgressSamples;
+            if (objectiveNoProgress) ++teamStats.objectiveNoProgressSamples;
+            if (objectiveRegressed) ++teamStats.objectiveRegressionSamples;
+            if (objectiveReached) ++teamStats.objectiveReachedSamples;
+            if (strategicStalled) ++teamStats.strategicStallSamples;
+            if (player.IsAlive() && !player.IsEliminated() && midProximity) ++teamStats.midProximitySamples;
+            if (player.IsAlive() && !player.IsEliminated() && midReach)
+            {
+                ++teamStats.midReachSamples;
+                if (teamStats.firstMidReachTime < 0.0f)
+                {
+                    teamStats.firstMidReachTime = matchSimulation_.MatchTimeSeconds();
+                }
+            }
+            if (player.IsAlive() && !player.IsEliminated() && enemyBase)
+            {
+                ++teamStats.enemyBaseSamples;
+                if (teamStats.firstEnemyBaseTime < 0.0f)
+                {
+                    teamStats.firstEnemyBaseTime = matchSimulation_.MatchTimeSeconds();
+                }
+            }
+            if (player.IsAlive() && !player.IsEliminated() && enemyCoreReach) ++teamStats.enemyCoreReachSamples;
+            teamStats.authoredRouteAdvances += authoredRouteAdvanceDelta;
+            teamStats.authoredRouteMarkerCount = std::max(teamStats.authoredRouteMarkerCount, memory->authoredRouteMarkerCount);
+            teamStats.maxAuthoredRouteIndex = std::max(teamStats.maxAuthoredRouteIndex, memory->authoredRouteIndex);
+            if (memory->usingAuthoredRoute)
+            {
+                ++teamStats.authoredRouteSamples;
+                if (memory->authoredRouteMarkerKind >= 0 && memory->authoredRouteMarkerKind < 4)
+                {
+                    ++teamStats.authoredRouteMarkerSamples[memory->authoredRouteMarkerKind];
+                }
+            }
         }
 
-        const Vector3 position = player.GetPosition();
         const EnergyCore* core = FindCoreByTeam(player.GetTeamId());
         const Vector3 base = core != nullptr ? world_.GridToWorld(core->GetBlockPosition()) : Vector3 {};
         const float fromBase = Distance3D(position, base);
@@ -380,6 +744,119 @@ void Game::SampleAutomatchBots()
         stats.averageDistanceFromBase += (fromBase - stats.averageDistanceFromBase) / samples;
         stats.averageDistanceFromCenter += (fromCenter - stats.averageDistanceFromCenter) / samples;
     }
+
+    int leader = -1;
+    float leaderScore = -1.0f;
+    for (int teamId = 0; teamId < 4; ++teamId)
+    {
+        const EnergyCore* core = FindCoreByTeam(teamId);
+        int living = 0;
+        for (const Player& player : players_)
+        {
+            if (player.GetTeamId() == teamId && player.IsAlive() && !player.IsEliminated()) ++living;
+        }
+        const float score = static_cast<float>(living * 100)
+            + (core != nullptr && core->IsAlive() ? 500.0f + static_cast<float>(core->GetHealth()) : 0.0f)
+            + static_cast<float>(automatch_.currentTeamStats[teamId].coreDamage) * 0.35f;
+        if (score > leaderScore)
+        {
+            leaderScore = score;
+            leader = teamId;
+        }
+    }
+    if (automatch_.lastLeaderTeamId >= 0 && leader >= 0 && leader != automatch_.lastLeaderTeamId)
+    {
+        ++automatch_.leaderChanges;
+    }
+    automatch_.lastLeaderTeamId = leader;
+}
+
+Game::AutomatchBotStats* Game::FindAutomatchBotStats(const Player& player)
+{
+    if (!automatch_.active || IsLocallyPredicted(player.GetControlKind()))
+    {
+        return nullptr;
+    }
+    for (AutomatchBotStats& stats : automatch_.botStats)
+    {
+        if (stats.teamId == player.GetTeamId() && stats.name == player.GetName())
+        {
+            return &stats;
+        }
+    }
+    automatch_.botStats.push_back(AutomatchBotStats { player.GetName(), player.GetTeamId() });
+    return &automatch_.botStats.back();
+}
+
+void Game::RecordAutomatchExplosivePurchase(const Player& player, int shopChoice)
+{
+    RecordAutomatchShopPurchase(player, shopChoice);
+}
+
+void Game::RecordAutomatchShopPurchase(const Player& player, int shopChoice)
+{
+    AutomatchBotStats* stats = FindAutomatchBotStats(player);
+    if (stats == nullptr)
+    {
+        return;
+    }
+    int itemCount = 1;
+    for (const ShopItem& item : shop_.GetItems())
+    {
+        if (item.choice == shopChoice)
+        {
+            itemCount = item.grantCount;
+            break;
+        }
+    }
+    stats->shopPurchases[shopChoice] += itemCount;
+    if (shopChoice == 105) ++stats->fireballsPurchased;
+    if (shopChoice == 8) ++stats->tntPurchased;
+}
+
+void Game::RecordAutomatchShopUse(const Player& player, int shopChoice)
+{
+    AutomatchBotStats* stats = FindAutomatchBotStats(player);
+    if (stats == nullptr || stats->shopUses[shopChoice] >= stats->shopPurchases[shopChoice])
+    {
+        return;
+    }
+    ++stats->shopUses[shopChoice];
+}
+
+void Game::RecordAutomatchExplosiveUse(const Player& player, bool fireball)
+{
+    RecordAutomatchShopUse(player, fireball ? 105 : 8);
+    AutomatchBotStats* stats = FindAutomatchBotStats(player);
+    if (stats == nullptr) return;
+    if (fireball) stats->fireballsUsed = stats->shopUses[105];
+    else stats->tntActivated = stats->shopUses[8];
+}
+
+void Game::RecordAutomatchDefenseBlockDestroyed(int ownerPlayerId, ExplosionBlockPolicy blockPolicy)
+{
+    if (!automatch_.active)
+    {
+        return;
+    }
+    const Player* player = matchSimulation_.GetPlayer(ownerPlayerId);
+    if (player == nullptr)
+    {
+        return;
+    }
+    AutomatchBotStats* stats = FindAutomatchBotStats(*player);
+    if (stats == nullptr)
+    {
+        return;
+    }
+    if (blockPolicy == ExplosionBlockPolicy::PreserveFortified)
+    {
+        ++stats->fireballDefenseBlocksDestroyed;
+    }
+    else if (blockPolicy == ExplosionBlockPolicy::PreserveReinforced)
+    {
+        ++stats->tntDefenseBlocksDestroyed;
+    }
 }
 
 void Game::FinishAutomatchRun(bool timeout)
@@ -391,6 +868,7 @@ void Game::FinishAutomatchRun(bool timeout)
     run.timeout = timeout;
     run.firstCoreDamageTime = automatch_.currentFirstCoreDamageTime;
     run.timeline = automatch_.currentTimeline;
+    run.memorableMoments = automatch_.currentMemorableMoments;
     for (int teamId = 0; teamId < 4; ++teamId)
     {
         run.teamStats[teamId] = automatch_.currentTeamStats[teamId];
@@ -521,6 +999,20 @@ void Game::FinishAutomatchRun(bool timeout)
             : "матч завершен без победителя";
     }
 
+    if (!timeout && run.winnerTeamId >= 0 && !run.teamStats[run.winnerTeamId].coreAlive)
+    {
+        RecordMemorableMoment(
+            "UnderdogVictory", run.winnerTeamId, -1, {},
+            std::string(TeamName(run.winnerTeamId)) + " won after losing its Core",
+            1.0f, true);
+        ++automatch_.comebackSuccesses;
+        run.memorableMoments = automatch_.currentMemorableMoments;
+    }
+    if (run.memorableMoments.empty())
+    {
+        ++automatch_.matchesWithoutMemorableMoment;
+    }
+
     ++automatch_.completedRuns;
     automatch_.totalDuration += run.duration;
     automatch_.totalKills += run.kills;
@@ -557,12 +1049,60 @@ void Game::WriteAutomatchStatsJson() const
         : 0.0f;
     int totalVoidFalls = 0;
     int totalStuckSamples = 0;
+    int totalStrategicStallSamples = 0;
+    int totalMidReachSamples = 0;
+    int totalEnemyBaseSamples = 0;
+    int totalAuthoredRouteSamples = 0;
+    int totalAuthoredRouteAdvances = 0;
     int totalIntentChanges = 0;
+    int totalPlanStarts = 0;
+    int totalPlanStageAdvances = 0;
+    int totalPlanCompletions = 0;
+    int totalPlanCancellations = 0;
+    int totalPlanExpiryCancellations = 0;
+    int totalPlanEvidenceCancellations = 0;
+    int totalPlanRouteFailureCancellations = 0;
+    int totalPlanVoidCancellations = 0;
+    float totalPlanHoldSeconds = 0.0f;
+    int totalRepeatedRouteDeaths = 0;
+    int totalFireballsPurchased = 0;
+    int totalFireballsUsed = 0;
+    int totalFireballDefenseBlocksDestroyed = 0;
+    int totalFireballBridgeOpportunities = 0;
+    int totalFireballDefenseOpportunities = 0;
+    int totalFireballTacticalUses = 0;
+    int totalTntPurchased = 0;
+    int totalTntActivated = 0;
+    int totalTntDefenseBlocksDestroyed = 0;
     for (const AutomatchBotStats& stats : automatch_.botStats)
     {
         totalVoidFalls += stats.voidFalls;
         totalStuckSamples += stats.stuckSamples;
+        totalStrategicStallSamples += stats.strategicStallSamples;
+        totalMidReachSamples += stats.midReachSamples;
+        totalEnemyBaseSamples += stats.enemyBaseSamples;
+        totalAuthoredRouteSamples += stats.authoredRouteSamples;
+        totalAuthoredRouteAdvances += stats.authoredRouteAdvances;
         totalIntentChanges += stats.intentChanges;
+        totalPlanStarts += stats.planStarts;
+        totalPlanStageAdvances += stats.planStageAdvances;
+        totalPlanCompletions += stats.planCompletions;
+        totalPlanCancellations += stats.planCancellations;
+        totalPlanExpiryCancellations += stats.planExpiryCancellations;
+        totalPlanEvidenceCancellations += stats.planEvidenceCancellations;
+        totalPlanRouteFailureCancellations += stats.planRouteFailureCancellations;
+        totalPlanVoidCancellations += stats.planVoidCancellations;
+        totalPlanHoldSeconds += stats.planHoldSeconds;
+        totalRepeatedRouteDeaths += stats.repeatedRouteDeaths;
+        totalFireballsPurchased += stats.fireballsPurchased;
+        totalFireballsUsed += stats.fireballsUsed;
+        totalFireballDefenseBlocksDestroyed += stats.fireballDefenseBlocksDestroyed;
+        totalFireballBridgeOpportunities += stats.fireballBridgeOpportunities;
+        totalFireballDefenseOpportunities += stats.fireballDefenseOpportunities;
+        totalFireballTacticalUses += stats.fireballTacticalUses;
+        totalTntPurchased += stats.tntPurchased;
+        totalTntActivated += stats.tntActivated;
+        totalTntDefenseBlocksDestroyed += stats.tntDefenseBlocksDestroyed;
     }
     const float runs = static_cast<float>(std::max(1, automatch_.completedRuns));
     const float fitness =
@@ -580,6 +1120,7 @@ void Game::WriteAutomatchStatsJson() const
     file << "    \"completedRuns\": " << automatch_.completedRuns << ",\n";
     file << "    \"targetRuns\": " << automatch_.targetRuns << ",\n";
     file << "    \"biome\": \"" << JsonEscape(ArenaBiomeName()) << "\",\n";
+    file << "    \"botStrategyProfile\": \"" << JsonEscape(BotStrategyProfileName()) << "\",\n";
     file << "    \"botTuningSource\": \"" << JsonEscape(botTuningSource_) << "\",\n";
     file << "    \"fitness\": " << fitness << ",\n";
     file << "    \"fitnessPerRun\": " << fitness / runs << ",\n";
@@ -591,7 +1132,184 @@ void Game::WriteAutomatchStatsJson() const
     file << "    \"totalCoreDestroyed\": " << automatch_.totalCoreDestroyed << ",\n";
     file << "    \"totalVoidFalls\": " << totalVoidFalls << ",\n";
     file << "    \"totalStuckSamples\": " << totalStuckSamples << ",\n";
+    file << "    \"totalStrategicStallSamples\": " << totalStrategicStallSamples << ",\n";
+    file << "    \"totalMidReachSamples\": " << totalMidReachSamples << ",\n";
+    file << "    \"totalEnemyBaseSamples\": " << totalEnemyBaseSamples << ",\n";
+    file << "    \"totalAuthoredRouteSamples\": " << totalAuthoredRouteSamples << ",\n";
+    file << "    \"totalAuthoredRouteAdvances\": " << totalAuthoredRouteAdvances << ",\n";
     file << "    \"totalIntentChanges\": " << totalIntentChanges << ",\n";
+    file << "    \"strategy\": {";
+    file << "\"planStarts\": " << totalPlanStarts << ", ";
+    file << "\"stageAdvances\": " << totalPlanStageAdvances << ", ";
+    file << "\"completions\": " << totalPlanCompletions << ", ";
+    file << "\"cancellations\": " << totalPlanCancellations << ", ";
+    file << "\"cancellationsByReason\": {\"expired\": " << totalPlanExpiryCancellations
+         << ", \"evidence\": " << totalPlanEvidenceCancellations
+         << ", \"routeFailure\": " << totalPlanRouteFailureCancellations
+         << ", \"void\": " << totalPlanVoidCancellations << "}, ";
+    file << "\"averageHoldSeconds\": " << (totalPlanStarts > 0 ? totalPlanHoldSeconds / static_cast<float>(totalPlanStarts) : 0.0f) << ", ";
+    file << "\"retreats\": " << automatch_.retreats << ", ";
+    file << "\"repeatedRouteDeaths\": " << totalRepeatedRouteDeaths << ", ";
+    file << "\"leaderChanges\": " << automatch_.leaderChanges << ", ";
+    file << "\"comebackAttempts\": " << automatch_.comebackAttempts << ", ";
+    file << "\"comebackSuccesses\": " << automatch_.comebackSuccesses << "},\n";
+    file << "    \"teamplay\": {";
+    file << "\"jointAttacks\": " << automatch_.jointAttacks << ", ";
+    file << "\"coreDefenseResponses\": " << automatch_.coreDefenseResponses << ", ";
+    file << "\"coreFortifications\": " << automatch_.coreFortifications << "},\n";
+    file << "    \"economy\": {";
+    file << "\"resourcesLost\": " << automatch_.resourcesLost << ", ";
+    file << "\"purchases\": {\"blocks\": " << automatch_.purchasesByCategory[0]
+         << ", \"combat\": " << automatch_.purchasesByCategory[1]
+         << ", \"utility\": " << automatch_.purchasesByCategory[2]
+         << ", \"team\": " << automatch_.purchasesByCategory[3]
+         << ", \"ranged\": " << automatch_.purchasesByCategory[4] << "}},\n";
+    file << "    \"shopExplosives\": {";
+    file << "\"fireball\": {\"purchased\": " << totalFireballsPurchased
+         << ", \"used\": " << totalFireballsUsed
+         << ", \"enemyDefenseBlocksDestroyed\": " << totalFireballDefenseBlocksDestroyed
+         << ", \"bridgeOpportunities\": " << totalFireballBridgeOpportunities
+         << ", \"defenseOpportunities\": " << totalFireballDefenseOpportunities
+         << ", \"tacticalUses\": " << totalFireballTacticalUses << "}, ";
+    file << "\"tnt\": {\"purchased\": " << totalTntPurchased
+         << ", \"activated\": " << totalTntActivated
+         << ", \"enemyDefenseBlocksDestroyed\": " << totalTntDefenseBlocksDestroyed << "}},\n";
+    file << "    \"memorableMoments\": {\n";
+    file << "      \"matchesWithoutSignificantMoment\": " << automatch_.matchesWithoutMemorableMoment << ",\n";
+    file << "      \"byCategory\": {";
+    static constexpr const char* kMomentCategories[] {
+        "CoreClutchDefense", "LastSecondCoreSave", "SuccessfulFlank", "BridgeFight",
+        "VoidEscape", "MultiKill", "AbilityCombo", "SacrificeForCore", "Comeback",
+        "BaseTrade", "ResourceHeist", "LongRangeFinish", "DefenseBreakthrough",
+        "FailedGreedyPush", "EmergencyBridge", "Revenge", "UnderdogVictory"
+    };
+    for (std::size_t categoryIndex = 0; categoryIndex < std::size(kMomentCategories); ++categoryIndex)
+    {
+        const auto found = automatch_.memorableMomentCounts.find(kMomentCategories[categoryIndex]);
+        file << (categoryIndex == 0 ? "" : ", ") << "\"" << kMomentCategories[categoryIndex] << "\": "
+             << (found != automatch_.memorableMomentCounts.end() ? found->second : 0);
+    }
+    file << "}\n";
+    file << "    },\n";
+    file << "    \"coreCollapseSeconds\": " << coreCollapseSeconds_ << ",\n";
+    file << "    \"navigation\": {\n";
+    file << "      \"routeGraphNodes\": " << routeGraph_.NodeCount() << ",\n";
+    file << "      \"routeGraphEdges\": " << routeGraph_.EdgeCount() << ",\n";
+    file << "      \"pathRequests\": " << navigationMetrics_.pathRequests << ",\n";
+    file << "      \"successfulPaths\": " << navigationMetrics_.successfulPaths << ",\n";
+    file << "      \"partialPaths\": " << navigationMetrics_.partialPaths << ",\n";
+    file << "      \"failedPathRequests\": " << navigationMetrics_.failedPathRequests << ",\n";
+    file << "      \"pathResultsByStatus\": {";
+    for (std::size_t status = 0; status < kNavigationSearchStatusCount; ++status)
+    {
+        if (status > 0) file << ", ";
+        file << "\"" << ToString(static_cast<NavigationSearchStatus>(status)) << "\": "
+             << navigationMetrics_.pathResultsByStatus[status];
+    }
+    file << "},\n";
+    file << "      \"blockedStartDeferrals\": " << navigationMetrics_.blockedStartDeferrals << ",\n";
+    file << "      \"blockedStartRecoveries\": " << navigationMetrics_.blockedStartRecoveries << ",\n";
+    file << "      \"averageExpandedNodes\": " << navigationMetrics_.AverageExpandedNodes() << ",\n";
+    file << "      \"averageGeneratedNodes\": " << navigationMetrics_.AverageGeneratedNodes() << ",\n";
+    file << "      \"heapDecreaseKeys\": " << navigationMetrics_.heapDecreaseKeys << ",\n";
+    file << "      \"peakOpenNodes\": " << navigationMetrics_.peakOpenNodes << ",\n";
+    file << "      \"longSprintActions\": " << navigationMetrics_.longSprintActions << ",\n";
+    file << "      \"diagonalActions\": " << navigationMetrics_.diagonalActions << ",\n";
+    file << "      \"corridorConstrainedSearches\": " << navigationMetrics_.corridorConstrainedSearches << ",\n";
+    file << "      \"corridorFallbackSearches\": " << navigationMetrics_.corridorFallbackSearches << ",\n";
+    file << "      \"corridorRejectedNodes\": " << navigationMetrics_.corridorRejectedNodes << ",\n";
+    file << "      \"segmentRepairAttempts\": " << navigationMetrics_.segmentRepairAttempts << ",\n";
+    file << "      \"segmentRepairSuccesses\": " << navigationMetrics_.segmentRepairSuccesses << ",\n";
+    file << "      \"segmentRepairFailures\": " << navigationMetrics_.segmentRepairFailures << ",\n";
+    file << "      \"segmentRepairReusedActions\": " << navigationMetrics_.segmentRepairReusedActions << ",\n";
+    file << "      \"segmentRepairExpandedNodes\": " << navigationMetrics_.segmentRepairExpandedNodes << ",\n";
+    file << "      \"segmentRepairMilliseconds\": " << navigationMetrics_.segmentRepairMilliseconds << ",\n";
+    file << "      \"dirtyRegionFastAccepts\": " << navigationMetrics_.dirtyRegionFastAccepts << ",\n";
+    file << "      \"dirtyRegionIntersectValidations\": " << navigationMetrics_.dirtyRegionIntersectValidations << ",\n";
+    file << "      \"dirtyRegionHistoryMisses\": " << navigationMetrics_.dirtyRegionHistoryMisses << ",\n";
+    file << "      \"averagePathfindingMilliseconds\": " << navigationMetrics_.AveragePathfindingMilliseconds() << ",\n";
+    file << "      \"repaths\": " << navigationMetrics_.repaths << ",\n";
+    file << "      \"movementFailures\": " << navigationMetrics_.movementFailures << ",\n";
+    file << "      \"movementFailuresByMovement\": {";
+    for (std::size_t movement = 0; movement < kMovementTypeCount; ++movement)
+    {
+        if (movement > 0) file << ", ";
+        file << "\"" << ToString(static_cast<MovementType>(movement)) << "\": "
+             << navigationMetrics_.movementFailuresByMovement[movement];
+    }
+    file << "},\n";
+    file << "      \"stuckEvents\": " << navigationMetrics_.stuckEvents << ",\n";
+    file << "      \"stuckEventsByMovement\": {";
+    for (std::size_t movement = 0; movement < kMovementTypeCount; ++movement)
+    {
+        if (movement > 0) file << ", ";
+        file << "\"" << ToString(static_cast<MovementType>(movement)) << "\": "
+             << navigationMetrics_.stuckEventsByMovement[movement];
+    }
+    file << "},\n";
+    file << "      \"recenterRecoveryAttempts\": " << navigationMetrics_.recenterRecoveryAttempts << ",\n";
+    file << "      \"recenterRecoveryRetries\": " << navigationMetrics_.recenterRecoveryRetries << ",\n";
+    file << "      \"actionRecoveryAttempts\": " << navigationMetrics_.actionRecoveryAttempts << ",\n";
+    file << "      \"actionRecoverySuccesses\": " << navigationMetrics_.actionRecoverySuccesses << ",\n";
+    file << "      \"actionRecoveryFailures\": " << navigationMetrics_.actionRecoveryFailures << ",\n";
+    file << "      \"gapToBridgeAttempts\": " << navigationMetrics_.gapToBridgeAttempts << ",\n";
+    file << "      \"gapToBridgeSuccesses\": " << navigationMetrics_.gapToBridgeSuccesses << ",\n";
+    file << "      \"gapToBridgeFailures\": " << navigationMetrics_.gapToBridgeFailures << ",\n";
+    file << "      \"routeAbandonments\": " << navigationMetrics_.routeAbandonments << ",\n";
+    file << "      \"bridgeBlocksUsed\": " << navigationMetrics_.bridgeBlocksUsed << ",\n";
+    file << "      \"blocksBrokenForNavigation\": " << navigationMetrics_.blocksBrokenForNavigation << ",\n";
+    file << "      \"failedJumps\": " << navigationMetrics_.failedJumps << ",\n";
+    file << "      \"successfulGapJumps\": " << navigationMetrics_.successfulGapJumps << ",\n";
+    file << "      \"recoveredJumpLandings\": " << navigationMetrics_.recoveredJumpLandings << ",\n";
+    file << "      \"emergencySaveAttempts\": " << navigationMetrics_.emergencySaveAttempts << ",\n";
+    file << "      \"emergencySaves\": " << navigationMetrics_.emergencySaves << ",\n";
+    file << "      \"voidDeaths\": " << totalVoidFalls << ",\n";
+    file << "      \"unforcedVoidDeaths\": " << navigationMetrics_.unforcedVoidDeaths << ",\n";
+    file << "      \"combatAttributedVoidDeaths\": " << navigationMetrics_.combatAttributedVoidDeaths << ",\n";
+    file << "      \"voidDeathsOutsideNavigation\": " << navigationMetrics_.voidDeathsOutsideNavigation << ",\n";
+    file << "      \"voidDeathsByMovement\": {";
+    for (std::size_t movement = 0; movement < kMovementTypeCount; ++movement)
+    {
+        if (movement > 0) file << ", ";
+        file << "\"" << ToString(static_cast<MovementType>(movement)) << "\": "
+             << navigationMetrics_.voidDeathsByMovement[movement];
+    }
+    file << "},\n";
+    file << "      \"unforcedVoidDeathsByMovement\": {";
+    for (std::size_t movement = 0; movement < kMovementTypeCount; ++movement)
+    {
+        if (movement > 0) file << ", ";
+        file << "\"" << ToString(static_cast<MovementType>(movement)) << "\": "
+             << navigationMetrics_.unforcedVoidDeathsByMovement[movement];
+    }
+    file << "},\n";
+    file << "      \"momentumPreservedTransitions\": " << navigationMetrics_.momentumPreservedTransitions << ",\n";
+    file << "      \"edgeBrakeActions\": " << navigationMetrics_.edgeBrakeActions << ",\n";
+    file << "      \"edgeBrakeCompletions\": " << navigationMetrics_.edgeBrakeCompletions << ",\n";
+    file << "      \"cancelledActions\": " << navigationMetrics_.cancelledActions << ",\n";
+    file << "      \"corridorPlans\": " << navigationMetrics_.corridorPlans << ",\n";
+    file << "      \"corridorReuses\": " << navigationMetrics_.corridorReuses << ",\n";
+    file << "      \"corridorAdvances\": " << navigationMetrics_.corridorAdvances << ",\n";
+    file << "      \"corridorFailures\": " << navigationMetrics_.corridorFailures << ",\n";
+    file << "      \"routeBridgeSegmentsStarted\": " << navigationMetrics_.routeBridgeSegmentsStarted << ",\n";
+    file << "      \"routeBridgeSegmentsCompleted\": " << navigationMetrics_.routeBridgeSegmentsCompleted << ",\n";
+    file << "      \"routeBridgeFollowersHeld\": " << navigationMetrics_.routeBridgeFollowersHeld << ",\n";
+    file << "      \"averageRouteEfficiency\": " << navigationMetrics_.AverageRouteEfficiency() << ",\n";
+    file << "      \"repathReasons\": {\n";
+    for (std::size_t reason = 1; reason < kRepathReasonCount; ++reason)
+    {
+        file << "        \"" << ToString(static_cast<RepathReason>(reason)) << "\": "
+             << navigationMetrics_.repathReasons[reason]
+             << (reason + 1 < kRepathReasonCount ? "," : "") << "\n";
+    }
+    file << "      }\n";
+    file << "    },\n";
+    const BotTuningGenome effectiveTiming = ScaledBotTuningForTeam(0);
+    file << "    \"effectiveStrategicTimings\": {";
+    file << "\"earlyEconomy\": " << effectiveTiming.earlyEconomySeconds << ", ";
+    file << "\"pressure\": " << effectiveTiming.pressurePhaseSeconds << ", ";
+    file << "\"latePressure\": " << effectiveTiming.latePressureSeconds << ", ";
+    file << "\"allIn\": " << effectiveTiming.allInSeconds << "},\n";
     file << "    \"botTuningByTeam\": [\n";
     for (int teamId = 0; teamId < 4; ++teamId)
     {
@@ -599,8 +1317,17 @@ void Game::WriteAutomatchStatsJson() const
         file << "      {";
         file << "\"teamId\": " << teamId << ", ";
         file << "\"id\": \"" << JsonEscape(genome.id) << "\", ";
+        file << "\"schemaVersion\": " << genome.schemaVersion << ", ";
         file << "\"generation\": " << genome.generation << ", ";
-        file << "\"hash\": " << BotTuningGenomeHash(genome);
+        file << "\"hash\": " << BotTuningGenomeHash(genome) << ", ";
+        file << "\"navigation\": {";
+        file << "\"runupDistanceBlocks\": " << genome.navigationRunupDistanceBlocks << ", ";
+        file << "\"takeoffDelaySeconds\": " << genome.navigationTakeoffDelaySeconds << ", ";
+        file << "\"takeoffEdgeOffsetBlocks\": " << genome.navigationTakeoffEdgeOffsetBlocks << ", ";
+        file << "\"takeoffGapScale\": " << genome.navigationTakeoffGapScale << ", ";
+        file << "\"airControlScale\": " << genome.navigationAirControlScale << ", ";
+        file << "\"landingCorrectionGain\": " << genome.navigationLandingCorrectionGain << ", ";
+        file << "\"fallRiskPenalty\": " << genome.navigationFallRiskPenalty << "}";
         file << "}" << (teamId < 3 ? "," : "") << "\n";
     }
     file << "    ],\n";
@@ -662,7 +1389,38 @@ void Game::WriteAutomatchStatsJson() const
                 file << "            \"" << ToString(static_cast<BotIntent>(intent)) << "\": " << teamStats.intentSamples[intent]
                     << (intent < 9 ? "," : "") << "\n";
             }
-            file << "          }\n";
+            file << "          },\n";
+            file << "          \"strategicGoalSamples\": {\n";
+            for (int goal = 0; goal < 7; ++goal)
+            {
+                file << "            \"" << ToString(static_cast<StrategicGoal>(goal)) << "\": " << teamStats.strategicGoalSamples[goal]
+                    << (goal < 6 ? "," : "") << "\n";
+            }
+            file << "          },\n";
+            file << "          \"objectiveProgress\": {";
+            file << "\"samples\": " << teamStats.objectiveSamples << ", ";
+            file << "\"progress\": " << teamStats.objectiveProgressSamples << ", ";
+            file << "\"noProgress\": " << teamStats.objectiveNoProgressSamples << ", ";
+            file << "\"regression\": " << teamStats.objectiveRegressionSamples << ", ";
+            file << "\"reached\": " << teamStats.objectiveReachedSamples << ", ";
+            file << "\"strategicStall\": " << teamStats.strategicStallSamples << "},\n";
+            file << "          \"mapControl\": {";
+            file << "\"midProximitySamples\": " << teamStats.midProximitySamples << ", ";
+            file << "\"midReachSamples\": " << teamStats.midReachSamples << ", ";
+            file << "\"enemyBaseSamples\": " << teamStats.enemyBaseSamples << ", ";
+            file << "\"enemyCoreReachSamples\": " << teamStats.enemyCoreReachSamples << ", ";
+            file << "\"firstMidReachTime\": " << teamStats.firstMidReachTime << ", ";
+            file << "\"firstEnemyBaseTime\": " << teamStats.firstEnemyBaseTime << "},\n";
+            file << "          \"authoredRoute\": {";
+            file << "\"samples\": " << teamStats.authoredRouteSamples << ", ";
+            file << "\"advances\": " << teamStats.authoredRouteAdvances << ", ";
+            file << "\"maxIndex\": " << teamStats.maxAuthoredRouteIndex << ", ";
+            file << "\"markerCount\": " << teamStats.authoredRouteMarkerCount << ", ";
+            file << "\"markerSamples\": {";
+            file << "\"Rally\": " << teamStats.authoredRouteMarkerSamples[0] << ", ";
+            file << "\"Lane\": " << teamStats.authoredRouteMarkerSamples[1] << ", ";
+            file << "\"Chokepoint\": " << teamStats.authoredRouteMarkerSamples[2] << ", ";
+            file << "\"Highground\": " << teamStats.authoredRouteMarkerSamples[3] << "}}\n";
             file << "        }" << (teamId < 3 ? "," : "") << "\n";
         }
         file << "      ],\n";
@@ -680,6 +1438,41 @@ void Game::WriteAutomatchStatsJson() const
             file << "\"value\": " << event.value << ", ";
             file << "\"text\": \"" << JsonEscape(event.text) << "\"";
             file << "}" << (eventIndex + 1 < run.timeline.size() ? "," : "") << "\n";
+        }
+        file << "      ],\n";
+        file << "      \"memorableMoments\": [\n";
+        for (std::size_t momentIndex = 0; momentIndex < run.memorableMoments.size(); ++momentIndex)
+        {
+            const MemorableMoment& moment = run.memorableMoments[momentIndex];
+            file << "        {";
+            file << "\"tick\": " << moment.tick << ", ";
+            file << "\"seed\": " << moment.seed << ", ";
+            file << "\"map\": \"" << JsonEscape(moment.map) << "\", ";
+            file << "\"category\": \"" << JsonEscape(moment.category) << "\", ";
+            file << "\"primaryTeamId\": " << moment.primaryTeamId << ", ";
+            file << "\"secondaryTeamId\": " << moment.secondaryTeamId << ", ";
+            file << "\"participants\": [";
+            for (std::size_t p = 0; p < moment.participants.size(); ++p)
+            {
+                file << (p == 0 ? "" : ", ") << moment.participants[p];
+            }
+            file << "], \"coreHealth\": [";
+            for (int teamId = 0; teamId < 4; ++teamId)
+            {
+                file << (teamId == 0 ? "" : ", ") << moment.coreHealth[teamId];
+            }
+            file << "], \"actorHealth\": " << moment.actorHealth;
+            file << ", \"targetHealth\": " << moment.targetHealth;
+            file << ", \"carriedResourceValue\": " << moment.carriedResourceValue;
+            file << ", \"precedingActions\": [";
+            for (std::size_t action = 0; action < moment.precedingActions.size(); ++action)
+            {
+                file << (action == 0 ? "" : ", ") << "\"" << JsonEscape(moment.precedingActions[action]) << "\"";
+            }
+            file << "], \"description\": \"" << JsonEscape(moment.description) << "\"";
+            file << ", \"significance\": " << moment.significance;
+            file << ", \"botDecisionDriven\": " << (moment.botDecisionDriven ? "true" : "false");
+            file << "}" << (momentIndex + 1 < run.memorableMoments.size() ? "," : "") << "\n";
         }
         file << "      ]\n";
         file << "    }" << (i + 1 < automatch_.runs.size() ? "," : "") << "\n";
@@ -720,6 +1513,58 @@ void Game::WriteAutomatchStatsJson() const
         file << "      \"deaths\": " << stats.deaths << ",\n";
         file << "      \"finalDeaths\": " << stats.finalDeaths << ",\n";
         file << "      \"coreDamage\": " << stats.coreDamage << ",\n";
+        file << "      \"archetype\": \"" << JsonEscape(stats.archetype) << "\",\n";
+        file << "      \"shopItems\": [\n";
+        const std::vector<ShopItem> shopItems = shop_.GetItems();
+        for (std::size_t itemIndex = 0; itemIndex < shopItems.size(); ++itemIndex)
+        {
+            const ShopItem& item = shopItems[itemIndex];
+            const auto purchases = stats.shopPurchases.find(item.choice);
+            const auto uses = stats.shopUses.find(item.choice);
+            file << "        {\"choice\": " << item.choice
+                 << ", \"category\": \"" << JsonEscape(item.category)
+                 << "\", \"name\": \"" << JsonEscape(item.name)
+                 << "\", \"usageMode\": \"" << ShopUsageModeName(item.usageMode)
+                 << "\", \"grantCount\": " << item.grantCount
+                 << ", \"purchased\": " << (purchases != stats.shopPurchases.end() ? purchases->second : 0)
+                 << ", \"used\": " << (uses != stats.shopUses.end() ? uses->second : 0) << "}"
+                 << (itemIndex + 1 < shopItems.size() ? "," : "") << "\n";
+        }
+        file << "      ],\n";
+        file << "      \"shopExplosives\": {";
+        file << "\"fireball\": {\"purchased\": " << stats.fireballsPurchased
+             << ", \"used\": " << stats.fireballsUsed
+             << ", \"enemyDefenseBlocksDestroyed\": " << stats.fireballDefenseBlocksDestroyed
+             << ", \"bridgeOpportunities\": " << stats.fireballBridgeOpportunities
+             << ", \"defenseOpportunities\": " << stats.fireballDefenseOpportunities
+             << ", \"tacticalUses\": " << stats.fireballTacticalUses << "}, ";
+        file << "\"tnt\": {\"purchased\": " << stats.tntPurchased
+             << ", \"activated\": " << stats.tntActivated
+             << ", \"enemyDefenseBlocksDestroyed\": " << stats.tntDefenseBlocksDestroyed << "}},\n";
+        file << "      \"strategy\": {";
+        file << "\"planStarts\": " << stats.planStarts << ", ";
+        file << "\"stageAdvances\": " << stats.planStageAdvances << ", ";
+        file << "\"completions\": " << stats.planCompletions << ", ";
+        file << "\"cancellations\": " << stats.planCancellations << ", ";
+        file << "\"cancellationsByReason\": {\"expired\": " << stats.planExpiryCancellations
+             << ", \"evidence\": " << stats.planEvidenceCancellations
+             << ", \"routeFailure\": " << stats.planRouteFailureCancellations
+             << ", \"void\": " << stats.planVoidCancellations << "}, ";
+        file << "\"averageHoldSeconds\": " << (stats.planStarts > 0 ? stats.planHoldSeconds / static_cast<float>(stats.planStarts) : 0.0f) << ", ";
+        file << "\"retreats\": " << stats.retreats << ", ";
+        file << "\"repeatedRouteDeaths\": " << stats.repeatedRouteDeaths << "},\n";
+        const float inventorySamples = static_cast<float>(std::max(1, stats.samples));
+        file << "      \"inventory\": {\n";
+        file << "        \"averageBlocks\": " << static_cast<float>(stats.blocksHeld) / inventorySamples << ",\n";
+        file << "        \"maxBlocks\": " << stats.maxBlocksHeld << ",\n";
+        file << "        \"finalBlocks\": " << stats.finalBlocksHeld << ",\n";
+        file << "        \"averageResources\": {\"Iron\": " << static_cast<float>(stats.resourcesHeld[0]) / inventorySamples
+            << ", \"Gold\": " << static_cast<float>(stats.resourcesHeld[1]) / inventorySamples
+            << ", \"Crystal\": " << static_cast<float>(stats.resourcesHeld[2]) / inventorySamples << "},\n";
+        file << "        \"finalResources\": {\"Iron\": " << stats.finalResourcesHeld[0]
+            << ", \"Gold\": " << stats.finalResourcesHeld[1]
+            << ", \"Crystal\": " << stats.finalResourcesHeld[2] << "}\n";
+        file << "      },\n";
         file << "      \"roleSamples\": {\n";
         file << "        \"Defender\": " << stats.roleSamples[0] << ",\n";
         file << "        \"Rusher\": " << stats.roleSamples[1] << ",\n";
@@ -732,6 +1577,44 @@ void Game::WriteAutomatchStatsJson() const
             file << "        \"" << ToString(static_cast<BotIntent>(intent)) << "\": " << stats.intentSamples[intent]
                 << (intent < 9 ? "," : "") << "\n";
         }
+        file << "      },\n";
+        file << "      \"strategicGoalSamples\": {\n";
+        for (int goal = 0; goal < 7; ++goal)
+        {
+            file << "        \"" << ToString(static_cast<StrategicGoal>(goal)) << "\": " << stats.strategicGoalSamples[goal]
+                << (goal < 6 ? "," : "") << "\n";
+        }
+        file << "      },\n";
+        file << "      \"objectiveProgress\": {\n";
+        file << "        \"samples\": " << stats.objectiveSamples << ",\n";
+        file << "        \"progress\": " << stats.objectiveProgressSamples << ",\n";
+        file << "        \"noProgress\": " << stats.objectiveNoProgressSamples << ",\n";
+        file << "        \"regression\": " << stats.objectiveRegressionSamples << ",\n";
+        file << "        \"reached\": " << stats.objectiveReachedSamples << ",\n";
+        file << "        \"strategicStall\": " << stats.strategicStallSamples << ",\n";
+        file << "        \"targetChanges\": " << stats.objectiveTargetChanges << ",\n";
+        file << "        \"maxNoProgressSeconds\": " << stats.maxNoProgressSamples << ",\n";
+        file << "        \"netDistanceChange\": " << stats.netObjectiveDistanceChange << ",\n";
+        file << "        \"closestDistance\": " << stats.closestObjectiveDistance << "\n";
+        file << "      },\n";
+        file << "      \"mapControl\": {\n";
+        file << "        \"midProximitySamples\": " << stats.midProximitySamples << ",\n";
+        file << "        \"midReachSamples\": " << stats.midReachSamples << ",\n";
+        file << "        \"enemyBaseSamples\": " << stats.enemyBaseSamples << ",\n";
+        file << "        \"enemyCoreReachSamples\": " << stats.enemyCoreReachSamples << ",\n";
+        file << "        \"firstMidReachTime\": " << stats.firstMidReachTime << ",\n";
+        file << "        \"firstEnemyBaseTime\": " << stats.firstEnemyBaseTime << "\n";
+        file << "      },\n";
+        file << "      \"authoredRoute\": {\n";
+        file << "        \"samples\": " << stats.authoredRouteSamples << ",\n";
+        file << "        \"advances\": " << stats.authoredRouteAdvances << ",\n";
+        file << "        \"maxIndex\": " << stats.maxAuthoredRouteIndex << ",\n";
+        file << "        \"markerCount\": " << stats.authoredRouteMarkerCount << ",\n";
+        file << "        \"markerSamples\": {";
+        file << "\"Rally\": " << stats.authoredRouteMarkerSamples[0] << ", ";
+        file << "\"Lane\": " << stats.authoredRouteMarkerSamples[1] << ", ";
+        file << "\"Chokepoint\": " << stats.authoredRouteMarkerSamples[2] << ", ";
+        file << "\"Highground\": " << stats.authoredRouteMarkerSamples[3] << "}\n";
         file << "      },\n";
         file << "      \"movement\": {\n";
         file << "        \"totalDistance\": " << stats.totalDistance << ",\n";

@@ -47,7 +47,38 @@ enum class ItemType
     AlarmTrap,
     IronResource,
     GoldResource,
-    CrystalResource
+    CrystalResource,
+    SmoothStoneBlock,
+    DarkBrickBlock,
+    LightBrickBlock,
+    MetalBlock,
+    GlowBlock,
+    PlankBlock,
+    DecorativeTileBlock,
+    TrimBlock,
+    // Creative/imported-map construction materials.  No shop/loadout grants
+    // reference these values, so they remain unavailable in normal matches.
+    CobblestoneBlock,
+    AndesiteBlock,
+    PolishedAndesiteBlock,
+    StoneBrickBlock,
+    ChiseledStoneBrickBlock,
+    StoneSlabBlock,
+    StoneBrickSlabBlock,
+    StoneBrickStairsBlock,
+    BirchPlankBlock,
+    BirchSlabBlock,
+    BirchStairsBlock,
+    ColoredGlassBlock,
+    ColoredClayBlock,
+    LapisBlock,
+    DiamondBlock,
+    EmeraldBlock,
+    GoldBlock,
+    IronBarsBlock,
+    LadderBlock,
+    TorchBlock,
+    BarrierBlock
 };
 
 struct ItemStack

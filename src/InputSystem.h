@@ -16,7 +16,6 @@ struct KeyBindings
     int moveRight = KEY_D;
     int jump = KEY_SPACE;
     int sneak = KEY_LEFT_SHIFT;
-    int bridgeMode = KEY_C;
     int sprint = KEY_LEFT_CONTROL;
     int attack = MouseBinding(MOUSE_BUTTON_LEFT);
     int place = MouseBinding(MOUSE_BUTTON_RIGHT);
@@ -65,7 +64,6 @@ struct PlayerInput
     bool placePressed = false;
     bool placeHeld = false;
     bool sneak = false;
-    bool bridgeMode = false;
     bool scopeHeld = false;
     bool cameraTogglePressed = false;
     bool sprint = false;

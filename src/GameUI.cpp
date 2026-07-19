@@ -24,9 +24,6 @@
 
 namespace
 {
-// Must match Game.cpp's kCoreCollapseSeconds (sudden death at the 12th minute).
-constexpr float kCoreCollapseSeconds = 12.0f * 60.0f;
-
 struct WindowResolution
 {
     int width = 1280;
@@ -86,7 +83,10 @@ Vector3 Normalize2D(Vector3 value)
 
 void DrawCenteredText(const std::string& text, int y, int fontSize, Color color)
 {
-    DrawText(text.c_str(), GetScreenWidth() / 2 - MeasureText(text.c_str(), fontSize) / 2, y, fontSize, color);
+    const int x = GetScreenWidth() / 2 - MeasureText(text.c_str(), fontSize) / 2;
+    const int off = fontSize >= 30 ? 3 : 2; // pixel drop shadow (MC style)
+    DrawText(text.c_str(), x + off, y + off, fontSize, Fade(BLACK, 0.62f));
+    DrawText(text.c_str(), x, y, fontSize, color);
 }
 
 const char* GamepadButtonLabel(int button)
@@ -216,15 +216,15 @@ std::string AbilityMetaText(const HeroAbilityDefinition& ability)
     std::string result;
     if (ability.cooldownSeconds > 0.0f)
     {
-        result += "Кулдаун: " + FormatTenths(ability.cooldownSeconds) + " с";
+        result += "КД: " + FormatTenths(ability.cooldownSeconds) + " с";
     }
     if (ability.durationSeconds > 0.0f)
     {
         if (!result.empty())
         {
-            result += " | ";
+            result += '\n';
         }
-        result += "Длительность: " + FormatTenths(ability.durationSeconds) + " с";
+        result += "Длит.: " + FormatTenths(ability.durationSeconds) + " с";
     }
     return result;
 }
@@ -346,22 +346,40 @@ std::string ClipTextToWidth(std::string text, int maxWidth, int fontSize)
 }
 
 // ---------------------------------------------------------------------------
-// Menu kit: one shared dark theme + rounded widgets so every menu screen draws
-// from the same vocabulary instead of ad-hoc rectangles. raylib 5.0's
-// DrawRectangleRounded / DrawRectangleRoundedLines back all of these.
+// Menu kit: one shared PIXEL theme (Minecraft-style) so every menu screen draws
+// from the same vocabulary. Rules of the style: sharp corners only, 2px borders,
+// bevelled edges (light top/left, dark bottom/right), drop-shadowed text, and a
+// dark translucent panel like modern Minecraft's settings. All sizes chunky.
 // ---------------------------------------------------------------------------
 
-constexpr Color kMenuPanel { 16, 20, 28, 235 };
-constexpr Color kMenuField { 11, 14, 20, 255 };
-constexpr Color kMenuRowIdle { 18, 21, 29, 150 };
-constexpr Color kMenuRowSel { 40, 50, 60, 240 };
+constexpr Color kMenuPanel { 17, 18, 22, 240 };
+constexpr Color kMenuField { 9, 10, 13, 255 };
+constexpr Color kMenuRowIdle { 0, 0, 0, 80 };
+constexpr Color kMenuRowSel { 54, 58, 68, 255 };
 constexpr Color kAccentGold { 255, 235, 142, 255 };
 constexpr Color kAccentCyan { 112, 232, 255, 255 };
 constexpr Color kAccentGreen { 140, 235, 150, 255 };
 constexpr Color kAccentRed { 240, 120, 120, 255 };
-constexpr Color kTextBright { 231, 236, 242, 255 };
+constexpr Color kTextBright { 236, 240, 245, 255 };
 constexpr Color kTextDim { 170, 180, 195, 255 };
 constexpr Color kTextFaint { 120, 130, 145, 255 };
+constexpr Color kPixelOutline { 0, 0, 0, 225 };
+constexpr Color kButtonTop { 106, 110, 122, 255 };
+constexpr Color kButtonBottom { 82, 86, 98, 255 };
+
+Color MenuHeroColor(HeroId id)
+{
+    switch (id)
+    {
+    case HeroId::Radon: return Color { 92, 164, 255, 255 };
+    case HeroId::Orbita: return Color { 255, 96, 82, 255 };
+    case HeroId::Brom: return Color { 96, 202, 118, 255 };
+    case HeroId::Konvoy: return Color { 92, 210, 255, 255 };
+    case HeroId::Likho: return Color { 104, 238, 92, 255 };
+    case HeroId::Svidetel: return Color { 180, 104, 255, 255 };
+    }
+    return WHITE;
+}
 
 enum class MenuButtonStyle { Accent, Primary, Danger, Ghost };
 
@@ -382,18 +400,63 @@ int CenteredTextY(const Rectangle& rect, int fontSize)
     return static_cast<int>(rect.y + (rect.height - static_cast<float>(fontSize)) * 0.5f);
 }
 
+// 4 side strips — a sharp pixel frame (raylib's DrawRectangleLines is 1px only).
+void PixelBorder(Rectangle rect, int thickness, Color color)
+{
+    const int x = static_cast<int>(rect.x);
+    const int y = static_cast<int>(rect.y);
+    const int w = static_cast<int>(rect.width);
+    const int h = static_cast<int>(rect.height);
+    DrawRectangle(x, y, w, thickness, color);
+    DrawRectangle(x, y + h - thickness, w, thickness, color);
+    DrawRectangle(x, y + thickness, thickness, h - thickness * 2, color);
+    DrawRectangle(x + w - thickness, y + thickness, thickness, h - thickness * 2, color);
+}
+
+// Classic bevel: raised = light top/left + dark bottom/right; sunken inverts.
+void PixelBevel(Rectangle rect, int thickness, bool sunken, float strength = 1.0f)
+{
+    const Color light = Fade(WHITE, 0.30f * strength);
+    const Color dark = Fade(BLACK, 0.45f * strength);
+    const int x = static_cast<int>(rect.x);
+    const int y = static_cast<int>(rect.y);
+    const int w = static_cast<int>(rect.width);
+    const int h = static_cast<int>(rect.height);
+    DrawRectangle(x, y, w, thickness, sunken ? dark : light);
+    DrawRectangle(x, y + thickness, thickness, h - thickness, sunken ? dark : light);
+    DrawRectangle(x + thickness, y + h - thickness, w - thickness, thickness, sunken ? light : dark);
+    DrawRectangle(x + w - thickness, y + thickness, thickness, h - thickness * 2, sunken ? light : dark);
+}
+
+// Minecraft-style drop shadow: a dark copy one "design pixel" down-right.
+void DrawTextShadow(const char* text, int x, int y, int fontSize, Color color)
+{
+    const int off = fontSize >= 30 ? 3 : 2;
+    DrawText(text, x + off, y + off, fontSize, Fade(BLACK, 0.62f));
+    DrawText(text, x, y, fontSize, color);
+}
+
 void MenuPanel(Rectangle rect)
 {
-    DrawRectangleRounded(rect, 0.045f, 8, kMenuPanel);
-    DrawRectangleRoundedLines(rect, 0.045f, 8, 1.0f, Fade(WHITE, 0.10f));
+    DrawRectangleRec(rect, kMenuPanel);
+    PixelBorder(rect, 2, kPixelOutline);
+    // A faint inner top highlight sells the "plate" without rounding anything.
+    DrawRectangle(static_cast<int>(rect.x) + 2, static_cast<int>(rect.y) + 2,
+                  static_cast<int>(rect.width) - 4, 2, Fade(WHITE, 0.07f));
 }
 
 void MenuRow(Rectangle rect, bool selected, Color accent)
 {
-    DrawRectangleRounded(rect, 0.32f, 6, selected ? kMenuRowSel : kMenuRowIdle);
     if (selected)
     {
-        DrawRectangleRoundedLines(rect, 0.32f, 6, 1.0f, Fade(accent, 0.55f));
+        DrawRectangleRec(rect, kMenuRowSel);
+        PixelBorder(rect, 2, Fade(WHITE, 0.85f)); // MC hover = white frame
+        DrawRectangle(static_cast<int>(rect.x) + 2, static_cast<int>(rect.y) + 2,
+                      4, static_cast<int>(rect.height) - 4, accent); // accent notch
+    }
+    else
+    {
+        DrawRectangleRec(rect, kMenuRowIdle);
     }
 }
 
@@ -403,14 +466,67 @@ void MenuLabelValueRow(Rectangle rect, const char* label, const std::string& val
                        bool selected, Color accent, int fontSize = 20)
 {
     MenuRow(rect, selected, accent);
-    const Color color = selected ? accent : Fade(kTextBright, 0.82f);
+    const Color color = selected ? accent : Fade(kTextBright, 0.86f);
     const int ty = CenteredTextY(rect, fontSize);
-    DrawText(label, static_cast<int>(rect.x) + 22, ty, fontSize, color);
+    DrawTextShadow(label, static_cast<int>(rect.x) + 24, ty, fontSize, color);
     if (!value.empty())
     {
         const int vw = MeasureText(value.c_str(), fontSize);
-        DrawText(value.c_str(), static_cast<int>(rect.x + rect.width) - 22 - vw, ty, fontSize, color);
+        DrawTextShadow(value.c_str(), static_cast<int>(rect.x + rect.width) - 22 - vw, ty, fontSize, color);
     }
+}
+
+struct MenuStepperGeometry
+{
+    Rectangle leftArrow {};
+    Rectangle value {};
+    Rectangle rightArrow {};
+};
+
+MenuStepperGeometry BuildMenuStepperGeometry(Rectangle rect)
+{
+    const float controlWidth = std::min(230.0f, rect.width * 0.46f);
+    const float arrowWidth = 34.0f;
+    const float inset = 5.0f;
+    const float x = rect.x + rect.width - controlWidth - 12.0f;
+    return MenuStepperGeometry {
+        Rectangle { x, rect.y + inset, arrowWidth, rect.height - inset * 2.0f },
+        Rectangle { x + arrowWidth, rect.y + inset,
+                    controlWidth - arrowWidth * 2.0f, rect.height - inset * 2.0f },
+        Rectangle { x + controlWidth - arrowWidth, rect.y + inset,
+                    arrowWidth, rect.height - inset * 2.0f }
+    };
+}
+
+int MenuStepperClickDelta(Rectangle rect, Vector2 mouse)
+{
+    if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+    {
+        return 0;
+    }
+    const MenuStepperGeometry geometry = BuildMenuStepperGeometry(rect);
+    if (CheckCollisionPointRec(mouse, geometry.leftArrow))
+    {
+        return -1;
+    }
+    if (CheckCollisionPointRec(mouse, geometry.rightArrow))
+    {
+        return 1;
+    }
+    return 0;
+}
+
+int MenuCellStepperClickDelta(Rectangle rect, Vector2 mouse)
+{
+    if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+    {
+        return 0;
+    }
+    const Rectangle left { rect.x, rect.y, std::min(36.0f, rect.width * 0.25f), rect.height };
+    const Rectangle right { rect.x + rect.width - left.width, rect.y, left.width, rect.height };
+    if (CheckCollisionPointRec(mouse, left)) return -1;
+    if (CheckCollisionPointRec(mouse, right)) return 1;
+    return 0;
 }
 
 // Label on the left, "< value >" stepper group right-aligned.
@@ -418,39 +534,46 @@ void MenuStepperRow(Rectangle rect, const char* label, const std::string& value,
                     bool selected, int fontSize = 20)
 {
     MenuRow(rect, selected, kAccentCyan);
-    const Color labelColor = selected ? kAccentGold : Fade(kTextBright, 0.82f);
-    const Color chevron = selected ? kAccentCyan : Fade(kAccentCyan, 0.55f);
+    const Color labelColor = selected ? kAccentGold : Fade(kTextBright, 0.86f);
+    const Color chevron = selected ? kAccentCyan : Fade(kAccentCyan, 0.45f);
     const int ty = CenteredTextY(rect, fontSize);
-    DrawText(label, static_cast<int>(rect.x) + 22, ty, fontSize, labelColor);
+    DrawTextShadow(label, static_cast<int>(rect.x) + 24, ty, fontSize, labelColor);
 
-    const int right = static_cast<int>(rect.x + rect.width) - 22;
-    DrawText(">", right - 10, ty, fontSize, chevron);
-    const int vw = MeasureText(value.c_str(), fontSize);
-    const int vx = right - 10 - 14 - vw;
-    DrawText(value.c_str(), vx, ty, fontSize, labelColor);
-    DrawText("<", vx - 18, ty, fontSize, chevron);
+    const MenuStepperGeometry geometry = BuildMenuStepperGeometry(rect);
+    const int leftWidth = MeasureText("<", fontSize);
+    const int rightWidth = MeasureText(">", fontSize);
+    const int valueWidth = MeasureText(value.c_str(), fontSize);
+    DrawTextShadow("<", static_cast<int>(geometry.leftArrow.x + (geometry.leftArrow.width - leftWidth) * 0.5f),
+                   ty, fontSize, chevron);
+    DrawTextShadow(value.c_str(), static_cast<int>(geometry.value.x + (geometry.value.width - valueWidth) * 0.5f),
+                   ty, fontSize, labelColor);
+    DrawTextShadow(">", static_cast<int>(geometry.rightArrow.x + (geometry.rightArrow.width - rightWidth) * 0.5f),
+                   ty, fontSize, chevron);
 }
 
-// Label on the left, a sliding on/off pill on the right.
+// Label on the left, a Minecraft-style checkbox on the right (kept the old
+// "pill" name — every toggle row calls this).
 void MenuTogglePill(Rectangle rect, const char* label, bool on, bool selected, int fontSize = 18)
 {
     MenuRow(rect, selected, on ? kAccentGreen : kTextFaint);
-    DrawText(label, static_cast<int>(rect.x) + 18, CenteredTextY(rect, fontSize), fontSize,
-             selected ? kAccentGold : Fade(kTextBright, 0.82f));
+    DrawTextShadow(label, static_cast<int>(rect.x) + 24, CenteredTextY(rect, fontSize), fontSize,
+                   selected ? kAccentGold : Fade(kTextBright, 0.86f));
 
-    const float pw = 38.0f;
-    const float ph = 20.0f;
-    const Rectangle pill {
-        rect.x + rect.width - 18.0f - pw,
-        rect.y + (rect.height - ph) * 0.5f,
-        pw,
-        ph
+    const float box = 22.0f;
+    const Rectangle check {
+        rect.x + rect.width - 20.0f - box,
+        rect.y + (rect.height - box) * 0.5f,
+        box,
+        box
     };
-    DrawRectangleRounded(pill, 1.0f, 8, on ? Fade(kAccentGreen, 0.30f) : Fade(WHITE, 0.10f));
-    const float knob = ph - 6.0f;
-    const float kx = on ? pill.x + pill.width - knob - 3.0f : pill.x + 3.0f;
-    DrawCircle(static_cast<int>(kx + knob * 0.5f), static_cast<int>(pill.y + ph * 0.5f),
-               knob * 0.5f, on ? kAccentGreen : Fade(WHITE, 0.55f));
+    DrawRectangleRec(check, kMenuField);
+    PixelBevel(check, 2, true);
+    PixelBorder(check, 2, on ? Fade(kAccentGreen, 0.9f) : Fade(WHITE, selected ? 0.55f : 0.28f));
+    if (on)
+    {
+        DrawRectangle(static_cast<int>(check.x) + 6, static_cast<int>(check.y) + 6,
+                      static_cast<int>(box) - 12, static_cast<int>(box) - 12, kAccentGreen);
+    }
 }
 
 // Horizontal segmented control (tabs, public/private). Returns nothing; the
@@ -458,12 +581,9 @@ void MenuTogglePill(Rectangle rect, const char* label, bool on, bool selected, i
 void MenuSegmented(Rectangle rect, const char* const* labels, int count, int active,
                    bool selected, Color accent, int fontSize = 16)
 {
-    DrawRectangleRounded(rect, 0.5f, 6, kMenuField);
-    if (selected)
-    {
-        DrawRectangleRoundedLines(rect, 0.5f, 6, 1.0f, Fade(accent, 0.5f));
-    }
-    const float pad = 3.0f;
+    DrawRectangleRec(rect, kMenuField);
+    PixelBorder(rect, 2, selected ? Fade(accent, 0.7f) : kPixelOutline);
+    const float pad = 4.0f;
     const float segW = (rect.width - pad * 2.0f) / static_cast<float>(count);
     for (int i = 0; i < count; ++i)
     {
@@ -476,12 +596,13 @@ void MenuSegmented(Rectangle rect, const char* const* labels, int count, int act
         const bool isActive = i == active;
         if (isActive)
         {
-            DrawRectangleRounded(seg, 0.5f, 6, Fade(accent, 0.16f));
+            DrawRectangleRec(seg, Fade(accent, 0.22f));
+            PixelBorder(seg, 2, Fade(accent, 0.85f));
         }
         const Color tc = isActive ? accent : Fade(kTextDim, 0.85f);
         const int tw = MeasureText(labels[i], fontSize);
-        DrawText(labels[i], static_cast<int>(seg.x + (seg.width - tw) * 0.5f),
-                 CenteredTextY(seg, fontSize), fontSize, tc);
+        DrawTextShadow(labels[i], static_cast<int>(seg.x + (seg.width - tw) * 0.5f),
+                       CenteredTextY(seg, fontSize), fontSize, tc);
     }
 }
 
@@ -490,9 +611,9 @@ void MenuSegmented(Rectangle rect, const char* const* labels, int count, int act
 void MenuTextField(Rectangle rect, const std::string& value, bool masked, bool focused,
                    bool caretOn, const char* placeholder = "", int fontSize = 16)
 {
-    DrawRectangleRounded(rect, 0.30f, 6, kMenuField);
-    DrawRectangleRoundedLines(rect, 0.30f, 6, 1.0f,
-                              focused ? Fade(kAccentGold, 0.70f) : Fade(WHITE, 0.12f));
+    DrawRectangleRec(rect, kMenuField);
+    PixelBevel(rect, 2, true);
+    PixelBorder(rect, 2, focused ? Fade(kAccentGold, 0.80f) : kPixelOutline);
 
     std::string shown = masked ? std::string(value.size(), '*') : value;
     const bool empty = shown.empty();
@@ -502,28 +623,201 @@ void MenuTextField(Rectangle rect, const std::string& value, bool masked, bool f
     }
     if (focused && caretOn)
     {
-        shown.push_back('|');
+        shown.push_back('_');
     }
     const std::string clipped = ClipTextToWidth(shown, static_cast<int>(rect.width) - 22, fontSize);
     const Color tc = (empty && !focused) ? Fade(kTextFaint, 0.85f) : kTextBright;
-    DrawText(clipped.c_str(), static_cast<int>(rect.x) + 12, CenteredTextY(rect, fontSize), fontSize, tc);
+    DrawTextShadow(clipped.c_str(), static_cast<int>(rect.x) + 12, CenteredTextY(rect, fontSize), fontSize, tc);
 }
 
+Color MixColor(Color a, Color b, float t)
+{
+    const auto mix = [t](unsigned char x, unsigned char y)
+    {
+        return static_cast<unsigned char>(static_cast<float>(x) + (static_cast<float>(y) - static_cast<float>(x)) * t);
+    };
+    return Color { mix(a.r, b.r), mix(a.g, b.g), mix(a.b, b.b), a.a };
+}
+
+// Classic Minecraft beveled button: stone-grey two-tone fill tinted toward the
+// style accent, black frame (white when selected/hovered), light/dark bevel.
 void MenuButton(Rectangle rect, const char* label, MenuButtonStyle style, bool selected,
                 bool enabled, int fontSize = 18)
 {
     const Color accent = MenuButtonAccent(style);
-    const float fillAlpha = !enabled ? 0.05f : (style == MenuButtonStyle::Ghost ? 0.0f : (selected ? 0.20f : 0.13f));
-    if (fillAlpha > 0.001f)
+    const float tint = style == MenuButtonStyle::Ghost ? 0.0f : 0.14f;
+    Color top = MixColor(kButtonTop, accent, tint);
+    Color bottom = MixColor(kButtonBottom, accent, tint);
+    if (!enabled)
     {
-        DrawRectangleRounded(rect, 0.30f, 6, Fade(accent, fillAlpha));
+        top = Color { 44, 46, 52, 255 };
+        bottom = Color { 38, 40, 46, 255 };
     }
-    const float borderAlpha = !enabled ? 0.22f : (selected ? 0.95f : 0.48f);
-    DrawRectangleRoundedLines(rect, 0.30f, 6, selected ? 1.6f : 1.0f, Fade(accent, borderAlpha));
+    else if (selected)
+    {
+        top = MixColor(top, WHITE, 0.10f);
+        bottom = MixColor(bottom, WHITE, 0.08f);
+    }
+    const int halfH = static_cast<int>(rect.height) / 2;
+    DrawRectangle(static_cast<int>(rect.x), static_cast<int>(rect.y),
+                  static_cast<int>(rect.width), halfH, top);
+    DrawRectangle(static_cast<int>(rect.x), static_cast<int>(rect.y) + halfH,
+                  static_cast<int>(rect.width), static_cast<int>(rect.height) - halfH, bottom);
+    PixelBevel(rect, 2, false, enabled ? 1.0f : 0.4f);
+    PixelBorder(rect, 2, selected && enabled ? Color { 245, 245, 245, 255 } : kPixelOutline);
 
-    const Color tc = enabled ? accent : Fade(accent, 0.45f);
+    const Color tc = !enabled ? Fade(kTextDim, 0.5f)
+        : (style == MenuButtonStyle::Ghost ? Fade(kTextBright, selected ? 1.0f : 0.8f)
+                                           : (selected ? WHITE : Fade(kTextBright, 0.95f)));
+    const Color labelColor = enabled && style != MenuButtonStyle::Ghost && selected
+        ? MixColor(tc, accent, 0.35f) : tc;
     const int tw = MeasureText(label, fontSize);
-    DrawText(label, static_cast<int>(rect.x + (rect.width - tw) * 0.5f), CenteredTextY(rect, fontSize), fontSize, tc);
+    DrawTextShadow(label, static_cast<int>(rect.x + (rect.width - tw) * 0.5f),
+                   CenteredTextY(rect, fontSize), fontSize, labelColor);
+}
+
+// ---------------------------------------------------------------------------
+// Settings screen geometry — one source shared by RenderSettings and
+// HandleSettingsInput so mouse hit-testing can never drift from the pixels.
+// Layout follows modern Minecraft settings: category sidebar on the left,
+// scrollable option rows on the right.
+// ---------------------------------------------------------------------------
+constexpr int kSettingsVisibleShared = 12;
+constexpr int kSettingsSidebarW = 204;
+
+struct SettingsSection
+{
+    const char* name;
+    int firstRow;
+};
+constexpr SettingsSection kSettingsSections[] {
+    { "Ввод", 0 },
+    { "Экран", 4 },
+    { "Графика", 9 },
+    { "Звук", 14 },
+    { "Интерфейс", 18 },
+};
+constexpr int kSettingsSectionCount = static_cast<int>(std::size(kSettingsSections));
+
+Rectangle SettingsPanelRect()
+{
+    constexpr int width = 952;
+    constexpr int height = kSettingsVisibleShared * 38 + 28;
+    return Rectangle {
+        static_cast<float>(GetScreenWidth() / 2 - width / 2), 118.0f,
+        static_cast<float>(width), static_cast<float>(height)
+    };
+}
+
+Rectangle SettingsRowRect(int visibleIndex)
+{
+    const Rectangle panel = SettingsPanelRect();
+    const float x = panel.x + 14.0f + static_cast<float>(kSettingsSidebarW) + 18.0f;
+    return Rectangle {
+        x,
+        panel.y + 14.0f + static_cast<float>(visibleIndex) * 38.0f,
+        panel.x + panel.width - 32.0f - x,
+        31.0f
+    };
+}
+
+Rectangle SettingsSidebarRect(int sectionIndex)
+{
+    const Rectangle panel = SettingsPanelRect();
+    return Rectangle {
+        panel.x + 14.0f,
+        panel.y + 14.0f + static_cast<float>(sectionIndex) * 42.0f,
+        static_cast<float>(kSettingsSidebarW),
+        34.0f
+    };
+}
+
+int SettingsSectionForRow(int row)
+{
+    int active = 0;
+    for (int i = 0; i < kSettingsSectionCount; ++i)
+    {
+        if (kSettingsSections[i].firstRow <= row)
+        {
+            active = i;
+        }
+    }
+    return active;
+}
+
+constexpr int kHeroMatchSettingCount = 8;
+
+struct HeroSelectLayout
+{
+    Rectangle panel {};
+    Rectangle heroPane {};
+    Rectangle stagePane {};
+    Rectangle abilityPane {};
+    Rectangle matchPane {};
+    Rectangle preview {};
+    Rectangle startButton {};
+    Rectangle backButton {};
+};
+
+HeroSelectLayout BuildHeroSelectLayout()
+{
+    const float width = static_cast<float>(GetScreenWidth());
+    const float height = static_cast<float>(GetScreenHeight());
+    const float bottomHeight = 112.0f;
+    const Rectangle matchPane { 24.0f, height - bottomHeight - 10.0f, width - 48.0f, bottomHeight };
+    const Rectangle heroPane { 32.0f, 78.0f, 326.0f, matchPane.y - 92.0f };
+    const Rectangle abilityPane { width - 348.0f, 78.0f, 316.0f, matchPane.y - 92.0f };
+    const Rectangle stagePane {
+        heroPane.x + heroPane.width + 12.0f,
+        58.0f,
+        abilityPane.x - (heroPane.x + heroPane.width) - 24.0f,
+        matchPane.y - 60.0f
+    };
+    return HeroSelectLayout {
+        Rectangle { 0.0f, 0.0f, width, height },
+        heroPane,
+        stagePane,
+        abilityPane,
+        matchPane,
+        Rectangle { stagePane.x, stagePane.y + 18.0f, stagePane.width, stagePane.height - 18.0f },
+        Rectangle { matchPane.x + matchPane.width - 292.0f, matchPane.y + 48.0f, 184.0f, 42.0f },
+        Rectangle { matchPane.x + matchPane.width - 98.0f, matchPane.y + 48.0f, 84.0f, 42.0f }
+    };
+}
+
+Rectangle HeroSelectHeroRow(const HeroSelectLayout& layout, int index)
+{
+    const float horizontalGap = 8.0f;
+    const float rowWidth = (layout.heroPane.width - horizontalGap * 2.0f) / 3.0f;
+    // Preserve room for the selected hero's name, role and passive on short
+    // displays instead of letting the second row push that text below screen.
+    const float rowHeight = std::clamp((layout.heroPane.height - 194.0f) * 0.5f, 78.0f, 108.0f);
+    return Rectangle {
+        layout.heroPane.x + static_cast<float>(index % 3) * (rowWidth + horizontalGap),
+        layout.heroPane.y + 42.0f + static_cast<float>(index / 3) * (rowHeight + 8.0f),
+        rowWidth,
+        rowHeight
+    };
+}
+
+float HeroSelectDetailY(const HeroSelectLayout& layout)
+{
+    const Rectangle lastRow = HeroSelectHeroRow(layout, HeroSystem::kHeroCount - 1);
+    return lastRow.y + lastRow.height + 10.0f;
+}
+
+Rectangle HeroSelectMatchRow(const HeroSelectLayout& layout, int index)
+{
+    const float available = layout.matchPane.width - 326.0f;
+    const float gap = 6.0f;
+    const float cellWidth = (available - gap * static_cast<float>(kHeroMatchSettingCount - 1))
+        / static_cast<float>(kHeroMatchSettingCount);
+    return Rectangle {
+        layout.matchPane.x + 12.0f + static_cast<float>(index) * (cellWidth + gap),
+        layout.matchPane.y + 44.0f,
+        cellWidth,
+        48.0f
+    };
 }
 
 // Small caption label above a field/control.
@@ -651,10 +945,10 @@ MultiplayerLayout BuildMultiplayerLayout(int tab)
     return layout;
 }
 
-Rectangle PausePanelRect()
+Rectangle PausePanelRect(int rows = 5)
 {
     constexpr int panelWidth = 360;
-    constexpr int panelHeight = 224;
+    const int panelHeight = 29 + rows * 39;
     return Rectangle {
         static_cast<float>(GetScreenWidth() / 2 - panelWidth / 2),
         static_cast<float>(GetScreenHeight() / 2 - 92),
@@ -663,9 +957,9 @@ Rectangle PausePanelRect()
     };
 }
 
-Rectangle PauseRowRect(int row)
+Rectangle PauseRowRect(int row, int rows = 5)
 {
-    const Rectangle panel = PausePanelRect();
+    const Rectangle panel = PausePanelRect(rows);
     return Rectangle {
         panel.x + 18.0f,
         panel.y + 24.0f + static_cast<float>(row) * 39.0f - 7.0f,
@@ -673,11 +967,95 @@ Rectangle PauseRowRect(int row)
         29.0f
     };
 }
+
+constexpr int kCreativeMapBrowserVisibleRows = 8;
+
+int CreativeMapBrowserFirstRow(int itemCount, int selected)
+{
+    const int visible = std::min(kCreativeMapBrowserVisibleRows, itemCount);
+    return std::clamp(selected - visible / 2, 0, std::max(0, itemCount - visible));
+}
+
+Rectangle CreativeMapBrowserPanelRect(int rows)
+{
+    constexpr int panelWidth = 620;
+    const int panelHeight = 54 + rows * 39 + 38;
+    return Rectangle {
+        static_cast<float>(GetScreenWidth() / 2 - panelWidth / 2),
+        static_cast<float>(GetScreenHeight() / 2 - panelHeight / 2),
+        static_cast<float>(panelWidth),
+        static_cast<float>(panelHeight)
+    };
+}
+
+Rectangle CreativeMapBrowserRowRect(int row, int rows)
+{
+    const Rectangle panel = CreativeMapBrowserPanelRect(rows);
+    return Rectangle { panel.x + 18.0f, panel.y + 48.0f + static_cast<float>(row) * 39.0f,
+                       panel.width - 36.0f, 29.0f };
+}
+
+// The pause menu differs by session kind: a stock match, the creative editor
+// (map test/save/load) and a creative map test (back to the editor). One entry
+// list drives both input handling and rendering so they can't drift apart.
+enum class PauseEntryAction
+{
+    Resume,
+    RestartMatch,
+    TestMap,
+    RestartTest,
+    SaveMap,
+    LoadMap,
+    BackToEditor,
+    OpenSettings,
+    MainMenu,
+    ExitGame
+};
+
+struct PauseEntry
+{
+    const char* label;
+    PauseEntryAction action;
+};
+
+std::vector<PauseEntry> BuildPauseEntries(bool creativeEditor, bool creativeTest)
+{
+    if (creativeEditor)
+    {
+        return {
+            { "Продолжить", PauseEntryAction::Resume },
+            { "Тест карты", PauseEntryAction::TestMap },
+            { "Сохранить карту", PauseEntryAction::SaveMap },
+            { "Загрузить карту", PauseEntryAction::LoadMap },
+            { "Настройки", PauseEntryAction::OpenSettings },
+            { "Главное меню", PauseEntryAction::MainMenu },
+            { "Выйти из игры", PauseEntryAction::ExitGame }
+        };
+    }
+    if (creativeTest)
+    {
+        return {
+            { "Продолжить", PauseEntryAction::Resume },
+            { "Вернуться в редактор", PauseEntryAction::BackToEditor },
+            { "Перезапустить тест", PauseEntryAction::RestartTest },
+            { "Настройки", PauseEntryAction::OpenSettings },
+            { "Главное меню", PauseEntryAction::MainMenu },
+            { "Выйти из игры", PauseEntryAction::ExitGame }
+        };
+    }
+    return {
+        { "Продолжить", PauseEntryAction::Resume },
+        { "Перезапустить матч", PauseEntryAction::RestartMatch },
+        { "Настройки", PauseEntryAction::OpenSettings },
+        { "Главное меню", PauseEntryAction::MainMenu },
+        { "Выйти из игры", PauseEntryAction::ExitGame }
+    };
+}
 }
 void Game::HandleMenuInput()
 {
 #if DAIBED_DEVELOPER_BUILD
-    constexpr int kMenuRows = 16;
+    constexpr int kMenuRows = 6;
 #else
     constexpr int kMenuRows = 7;
 #endif
@@ -724,95 +1102,11 @@ void Game::HandleMenuInput()
         menuIndex_ = (menuIndex_ + kMenuRows - 1) % kMenuRows;
     }
 
-    const auto isActionRow = [](int row)
-    {
-#if DAIBED_DEVELOPER_BUILD
-        return row == 0 || row == 1 || row == 9 || row == 13 || row == 14 || row == 15;
-#else
-        return row == 0 || row == 1 || row == 2 || row == 4 || row == 5 || row == 6;
-#endif
-    };
-
-    int delta = (IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_D)) ? 1 : ((IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_A)) ? -1 : 0);
     bool activate = IsKeyPressed(KEY_ENTER);
     if (hoveredRow >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
     {
         menuIndex_ = hoveredRow;
-        if (isActionRow(hoveredRow))
-        {
-            activate = true;
-        }
-        else
-        {
-            delta = 1;
-        }
-    }
-    if (hoveredRow >= 0 && !isActionRow(hoveredRow) && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))
-    {
-        menuIndex_ = hoveredRow;
-        delta = -1;
-    }
-
-    if (delta != 0)
-    {
-#if DAIBED_DEVELOPER_BUILD
-        if (menuIndex_ == 2)
-        {
-            const int value = (static_cast<int>(selectedMode_) + delta + 4) % 4;
-            selectedMode_ = static_cast<MatchMode>(value);
-            selectedTeamId_ = std::clamp(selectedTeamId_, 0, TeamCountForMode() - 1);
-            selectedBotCount_ = std::clamp(selectedBotCount_, 0, MaxBotCountForSelection());
-        }
-        else if (menuIndex_ == 3)
-        {
-            const int teamCount = TeamCountForMode();
-            selectedTeamId_ = (selectedTeamId_ + delta + teamCount) % teamCount;
-        }
-        else if (menuIndex_ == 4)
-        {
-            selectedTeamSize_ = ((selectedTeamSize_ - 1 + delta + 4) % 4) + 1;
-            selectedBotCount_ = std::clamp(selectedBotCount_, 0, MaxBotCountForSelection());
-        }
-        else if (menuIndex_ == 5)
-        {
-            const int maxBots = MaxBotCountForSelection();
-            selectedBotCount_ = (selectedBotCount_ + delta + maxBots + 1) % (maxBots + 1);
-        }
-        else if (menuIndex_ == 6)
-        {
-            const int value = (static_cast<int>(botDifficulty_) + delta + 3) % 3;
-            botDifficulty_ = static_cast<BotDifficulty>(value);
-        }
-        else if (menuIndex_ == 7)
-        {
-            const int value = (static_cast<int>(arenaLayout_) + delta + 2) % 2;
-            arenaLayout_ = static_cast<ArenaLayout>(value);
-        }
-        else if (menuIndex_ == 8)
-        {
-            const int value = (static_cast<int>(arenaBiome_) + delta + 5) % 5;
-            arenaBiome_ = static_cast<ArenaBiome>(value);
-        }
-        else if (menuIndex_ == 10)
-        {
-            automatchRunTarget_ = std::clamp(automatchRunTarget_ + delta, 1, 50);
-        }
-        else if (menuIndex_ == 11)
-        {
-            automatchTicksPerFrame_ = std::clamp(automatchTicksPerFrame_ + delta, 1, 32);
-        }
-        else if (menuIndex_ == 12)
-        {
-            automatchMaxMinutes_ = std::clamp(automatchMaxMinutes_ + delta, 3, 30);
-        }
-#else
-        if (menuIndex_ == 3)
-        {
-            const int value = (static_cast<int>(botDifficulty_) + delta + 3) % 3;
-            botDifficulty_ = static_cast<BotDifficulty>(value);
-        }
-#endif
-        SaveSettings();
+        activate = true;
     }
 
     if (activate)
@@ -821,6 +1115,7 @@ void Game::HandleMenuInput()
         if (menuIndex_ == 0)
         {
             heroSelectIndex_ = HeroSystem::IndexOf(selectedHeroId_);
+            heroSelectControlIndex_ = heroSelectIndex_;
             screen_ = GameScreen::HeroSelect;
         }
         else if (menuIndex_ == 1)
@@ -828,21 +1123,21 @@ void Game::HandleMenuInput()
             multiplayerIndex_ = 0;
             screen_ = GameScreen::Multiplayer;
         }
-        else if (menuIndex_ == 9)
+        else if (menuIndex_ == 2)
         {
-            StartAutomatch();
+            StartCreativeSession();
         }
-        else if (menuIndex_ == 13)
+        else if (menuIndex_ == 3)
         {
             returnScreen_ = GameScreen::MainMenu;
             screen_ = GameScreen::Settings;
         }
-        else if (menuIndex_ == 14)
+        else if (menuIndex_ == 4)
         {
             controlsReturnScreen_ = GameScreen::MainMenu;
             screen_ = GameScreen::Controls;
         }
-        else if (menuIndex_ == 15)
+        else if (menuIndex_ == 5)
         {
             exitRequested_ = true;
         }
@@ -860,9 +1155,14 @@ void Game::HandleMenuInput()
             arenaLayout_ = ArenaLayout::Classic;
             arenaBiome_ = ArenaBiome::Arena;
             heroSelectIndex_ = HeroSystem::IndexOf(selectedHeroId_);
+            heroSelectControlIndex_ = heroSelectIndex_;
             screen_ = GameScreen::HeroSelect;
         }
         else if (menuIndex_ == 2)
+        {
+            StartCreativeSession();
+        }
+        else if (menuIndex_ == 3)
         {
             StartTutorialMatch();
         }
@@ -1141,7 +1441,6 @@ void Game::HandleMultiplayerInput()
     }
 
     const bool leftClick = hovered >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
-    const bool rightClick = hovered >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT);
     if (leftClick)
     {
         multiplayerIndex_ = hovered;
@@ -1178,10 +1477,14 @@ void Game::HandleMultiplayerInput()
         }
     }
 
-    // --- Value changes (arrows/A-D, left=+1, right=-1) and button presses. --
+    // Value controls change only through keyboard direction keys or their
+    // visible arrow hit-zones. Clicking the value itself merely focuses it.
     int change = (IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_D)) ? 1
                : ((IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_A)) ? -1 : 0);
-    if (rightClick) change = -1;
+    if (leftClick && (idx == 1 || idx == 3 || idx == 5 || idx == 7))
+    {
+        change = MenuCellStepperClickDelta(rects[static_cast<std::size_t>(idx)], mouse);
+    }
 
     const auto cycle = [](int value, int delta, int modulo) {
         int v = (value + delta) % modulo;
@@ -1196,11 +1499,6 @@ void Game::HandleMultiplayerInput()
         return;
     }
 
-    // Host tab. Value controls also respond to a left-click / Enter as "+1".
-    if (idx <= 9 && change == 0 && (leftClick || enter))
-    {
-        change = 1;
-    }
     switch (idx)
     {
     case 1:
@@ -1226,10 +1524,10 @@ void Game::HandleMultiplayerInput()
         if (change) serverConfig_.maxPlayers = std::clamp(serverConfig_.maxPlayers + change, 2, 32);
         break;
     case 8:
-        if (change) serverConfig_.requireAllReady = !serverConfig_.requireAllReady;
+        if (change || leftClick || enter) serverConfig_.requireAllReady = !serverConfig_.requireAllReady;
         break;
     case 9:
-        if (change) serverConfig_.enforceUniqueHeroesPerTeam = !serverConfig_.enforceUniqueHeroesPerTeam;
+        if (change || leftClick || enter) serverConfig_.enforceUniqueHeroesPerTeam = !serverConfig_.enforceUniqueHeroesPerTeam;
         break;
     case 10:
         if (enter || leftClick) StartGuiHostAndConnect();
@@ -1258,38 +1556,79 @@ void Game::HandleMultiplayerInput()
 void Game::HandleHeroSelectInput()
 {
     constexpr int heroCount = HeroSystem::kHeroCount;
+    constexpr int startControl = heroCount + kHeroMatchSettingCount;
+    constexpr int backControl = startControl + 1;
+    constexpr int controlCount = backControl + 1;
+    heroSelectControlIndex_ = std::clamp(heroSelectControlIndex_, 0, controlCount - 1);
+
+    const HeroSelectLayout layout = BuildHeroSelectLayout();
+    const Vector2 mouse = GetMousePosition();
+
+    const auto applyMatchChange = [this](int setting, int delta)
+    {
+        if (delta == 0) return;
+        switch (setting)
+        {
+        case 0:
+            selectedMode_ = static_cast<MatchMode>((static_cast<int>(selectedMode_) + delta + 4) % 4);
+            selectedTeamId_ = std::clamp(selectedTeamId_, 0, TeamCountForMode() - 1);
+            selectedBotCount_ = std::clamp(selectedBotCount_, 0, MaxBotCountForSelection());
+            break;
+        case 1:
+        {
+            const int teamCount = TeamCountForMode();
+            selectedTeamId_ = (selectedTeamId_ + delta + teamCount) % teamCount;
+            break;
+        }
+        case 2:
+            selectedTeamSize_ = ((selectedTeamSize_ - 1 + delta + 4) % 4) + 1;
+            selectedBotCount_ = std::clamp(selectedBotCount_, 0, MaxBotCountForSelection());
+            break;
+        case 3:
+        {
+            const int maxBots = MaxBotCountForSelection();
+            selectedBotCount_ = (selectedBotCount_ + delta + maxBots + 1) % (maxBots + 1);
+            break;
+        }
+        case 4:
+            botDifficulty_ = static_cast<BotDifficulty>((static_cast<int>(botDifficulty_) + delta + 3) % 3);
+            break;
+        case 5:
+            botStrategyProfile_ = static_cast<BotStrategyProfile>((static_cast<int>(botStrategyProfile_) + delta + 2) % 2);
+            break;
+        case 6:
+            arenaLayout_ = static_cast<ArenaLayout>((static_cast<int>(arenaLayout_) + delta + 2) % 2);
+            break;
+        case 7:
+            arenaBiome_ = static_cast<ArenaBiome>((static_cast<int>(arenaBiome_) + delta + 5) % 5);
+            break;
+        default:
+            return;
+        }
+        SaveSettings();
+    };
+
     if (IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_S))
     {
-        heroSelectIndex_ = (heroSelectIndex_ + 1) % heroCount;
+        heroSelectControlIndex_ = (heroSelectControlIndex_ + 1) % controlCount;
     }
     if (IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_W))
     {
-        heroSelectIndex_ = (heroSelectIndex_ + heroCount - 1) % heroCount;
+        heroSelectControlIndex_ = (heroSelectControlIndex_ + controlCount - 1) % controlCount;
     }
-    const float wheel = GetMouseWheelMove();
-    if (wheel > 0.01f)
+    if (heroSelectControlIndex_ < heroCount)
     {
-        heroSelectIndex_ = (heroSelectIndex_ + heroCount - 1) % heroCount;
-    }
-    if (wheel < -0.01f)
-    {
-        heroSelectIndex_ = (heroSelectIndex_ + 1) % heroCount;
+        heroSelectIndex_ = heroSelectControlIndex_;
     }
 
-    const int panelWidth = std::min(1040, GetScreenWidth() - 72);
-    const int panelHeight = std::min(560, GetScreenHeight() - 142);
-    const int panelX = GetScreenWidth() / 2 - panelWidth / 2;
-    const int panelY = 116;
-    const int listX = panelX + 22;
-    const int listY = panelY + 56;
-    const int rowHeight = 54;
-    const Rectangle previewRect {
-        static_cast<float>(panelX + panelWidth - 214),
-        static_cast<float>(panelY + 18),
-        184.0f,
-        184.0f
-    };
-    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), previewRect))
+    const int keyboardDelta = (IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_D)) ? 1
+        : ((IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_A)) ? -1 : 0);
+    if (heroSelectControlIndex_ >= heroCount && heroSelectControlIndex_ < startControl)
+    {
+        applyMatchChange(heroSelectControlIndex_ - heroCount, keyboardDelta);
+    }
+
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, layout.preview))
     {
         heroPreviewDragging_ = true;
     }
@@ -1301,46 +1640,40 @@ void Game::HandleHeroSelectInput()
     {
         heroPreviewYaw_ += GetMouseDelta().x * 0.85f;
     }
-    const Rectangle startButton {
-        static_cast<float>(panelX + panelWidth - 276),
-        static_cast<float>(panelY + panelHeight - 60),
-        128.0f,
-        38.0f
-    };
-    const Rectangle backButton {
-        static_cast<float>(panelX + panelWidth - 136),
-        static_cast<float>(panelY + panelHeight - 60),
-        92.0f,
-        38.0f
-    };
-
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
     {
-        const Vector2 mouse = GetMousePosition();
         for (int i = 0; i < heroCount; ++i)
         {
-            const Rectangle row {
-                static_cast<float>(listX),
-                static_cast<float>(listY + i * rowHeight),
-                286.0f,
-                static_cast<float>(rowHeight - 8)
-            };
-            if (CheckCollisionPointRec(mouse, row))
+            if (CheckCollisionPointRec(mouse, HeroSelectHeroRow(layout, i)))
             {
                 heroSelectIndex_ = i;
+                heroSelectControlIndex_ = i;
                 break;
             }
         }
 
-        if (CheckCollisionPointRec(mouse, startButton))
+        for (int i = 0; i < kHeroMatchSettingCount; ++i)
         {
+            const Rectangle row = HeroSelectMatchRow(layout, i);
+            if (CheckCollisionPointRec(mouse, row))
+            {
+                heroSelectControlIndex_ = heroCount + i;
+                applyMatchChange(i, MenuCellStepperClickDelta(row, mouse));
+                break;
+            }
+        }
+
+        if (CheckCollisionPointRec(mouse, layout.startButton))
+        {
+            heroSelectControlIndex_ = startControl;
             selectedHeroId_ = HeroSystem::IdFromIndex(heroSelectIndex_);
             SaveSettings();
             StartSelectedMatch();
             return;
         }
-        if (CheckCollisionPointRec(mouse, backButton))
+        if (CheckCollisionPointRec(mouse, layout.backButton))
         {
+            heroSelectControlIndex_ = backControl;
             screen_ = GameScreen::MainMenu;
             return;
         }
@@ -1348,9 +1681,16 @@ void Game::HandleHeroSelectInput()
 
     if (IsKeyPressed(KEY_ENTER))
     {
-        selectedHeroId_ = HeroSystem::IdFromIndex(heroSelectIndex_);
-        SaveSettings();
-        StartSelectedMatch();
+        if (heroSelectControlIndex_ == backControl)
+        {
+            screen_ = GameScreen::MainMenu;
+        }
+        else if (heroSelectControlIndex_ == startControl || heroSelectControlIndex_ < heroCount)
+        {
+            selectedHeroId_ = HeroSystem::IdFromIndex(heroSelectIndex_);
+            SaveSettings();
+            StartSelectedMatch();
+        }
     }
     if (IsKeyPressed(KEY_ESCAPE))
     {
@@ -1360,33 +1700,53 @@ void Game::HandleHeroSelectInput()
 
 void Game::HandleSettingsInput()
 {
-    constexpr int kSettingsRows = 24;
+    constexpr int kSettingsRows = 22;
     constexpr int kVisibleRows = 12;
+    constexpr int kMaxFirstVisible = kSettingsRows - kVisibleRows;
+    settingsIndex_ = std::clamp(settingsIndex_, 0, kSettingsRows - 1);
+    auto clampSettingsScroll = [&]()
+    {
+        settingsFirstVisible_ = std::clamp(settingsFirstVisible_, 0, kMaxFirstVisible);
+    };
+    auto keepSelectionVisible = [&]()
+    {
+        clampSettingsScroll();
+        if (settingsIndex_ < settingsFirstVisible_)
+        {
+            settingsFirstVisible_ = settingsIndex_;
+        }
+        else if (settingsIndex_ >= settingsFirstVisible_ + kVisibleRows)
+        {
+            settingsFirstVisible_ = settingsIndex_ - kVisibleRows + 1;
+        }
+        clampSettingsScroll();
+    };
+    clampSettingsScroll();
+
     const bool pad = IsGamepadAvailable(0);
     const bool down = IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_S)
         || (pad && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_DOWN));
     const bool up = IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_W)
         || (pad && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_UP));
-    if (down) settingsIndex_ = (settingsIndex_ + 1) % kSettingsRows;
-    if (up) settingsIndex_ = (settingsIndex_ + kSettingsRows - 1) % kSettingsRows;
+    if (down)
+    {
+        settingsIndex_ = (settingsIndex_ + 1) % kSettingsRows;
+        keepSelectionVisible();
+    }
+    if (up)
+    {
+        settingsIndex_ = (settingsIndex_ + kSettingsRows - 1) % kSettingsRows;
+        keepSelectionVisible();
+    }
 
-    const int firstVisible = std::clamp(settingsIndex_ - kVisibleRows / 2, 0, kSettingsRows - kVisibleRows);
-    const int panelWidth = 680;
-    const int panelX = GetScreenWidth() / 2 - panelWidth / 2;
-    const int panelY = 118;
+    const int firstVisible = settingsFirstVisible_;
     const Vector2 mouse = GetMousePosition();
     const Vector2 mouseMove = GetMouseDelta();
     int hoveredRow = -1;
     for (int visible = 0; visible < kVisibleRows; ++visible)
     {
         const int index = firstVisible + visible;
-        const Rectangle row {
-            static_cast<float>(panelX + 20),
-            static_cast<float>(panelY + 22 + visible * 38 - 8),
-            static_cast<float>(panelWidth - 40),
-            31.0f
-        };
-        if (CheckCollisionPointRec(mouse, row))
+        if (CheckCollisionPointRec(mouse, SettingsRowRect(visible)))
         {
             hoveredRow = index;
             break;
@@ -1396,9 +1756,44 @@ void Game::HandleSettingsInput()
     {
         settingsIndex_ = hoveredRow;
     }
+    // Sidebar: clicking a category jumps the list to its first row.
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+    {
+        for (int i = 0; i < kSettingsSectionCount; ++i)
+        {
+            if (CheckCollisionPointRec(mouse, SettingsSidebarRect(i)))
+            {
+                settingsIndex_ = kSettingsSections[i].firstRow;
+                settingsFirstVisible_ = std::clamp(settingsIndex_, 0, kMaxFirstVisible);
+                return;
+            }
+        }
+    }
     const float wheel = GetMouseWheelMove();
-    if (wheel < -0.01f) settingsIndex_ = (settingsIndex_ + 1) % kSettingsRows;
-    else if (wheel > 0.01f) settingsIndex_ = (settingsIndex_ + kSettingsRows - 1) % kSettingsRows;
+    if (wheel < -0.01f)
+    {
+        settingsFirstVisible_ = std::min(settingsFirstVisible_ + 1, kMaxFirstVisible);
+        if (settingsIndex_ < settingsFirstVisible_)
+        {
+            settingsIndex_ = settingsFirstVisible_;
+        }
+        else if (settingsIndex_ >= settingsFirstVisible_ + kVisibleRows)
+        {
+            settingsIndex_ = settingsFirstVisible_ + kVisibleRows - 1;
+        }
+    }
+    else if (wheel > 0.01f)
+    {
+        settingsFirstVisible_ = std::max(settingsFirstVisible_ - 1, 0);
+        if (settingsIndex_ < settingsFirstVisible_)
+        {
+            settingsIndex_ = settingsFirstVisible_;
+        }
+        else if (settingsIndex_ >= settingsFirstVisible_ + kVisibleRows)
+        {
+            settingsIndex_ = settingsFirstVisible_ + kVisibleRows - 1;
+        }
+    }
 
     int delta = (IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_D)
         || (pad && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_RIGHT))) ? 1
@@ -1409,16 +1804,22 @@ void Game::HandleSettingsInput()
     if (hoveredRow >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
     {
         settingsIndex_ = hoveredRow;
-        if (hoveredRow == 22 || hoveredRow == 23) activate = true;
-        else delta = 1;
-    }
-    if (hoveredRow >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))
-    {
-        settingsIndex_ = hoveredRow;
-        delta = -1;
+        if (hoveredRow >= 20)
+        {
+            activate = true;
+        }
+        else if (hoveredRow == 6 || hoveredRow == 12 || hoveredRow == 13
+                 || hoveredRow == 18 || hoveredRow == 19)
+        {
+            delta = 1;
+        }
+        else
+        {
+            delta = MenuStepperClickDelta(SettingsRowRect(hoveredRow - firstVisible), mouse);
+        }
     }
 
-    if (activate && settingsIndex_ < 22)
+    if (activate && settingsIndex_ < 20)
     {
         delta = 1;
     }
@@ -1464,10 +1865,8 @@ void Game::HandleSettingsInput()
         case 15: musicVolume_ = std::clamp(musicVolume_ + delta * 0.1f, 0.0f, 1.0f); break;
         case 16: sfxVolume_ = std::clamp(sfxVolume_ + delta * 0.1f, 0.0f, 1.0f); break;
         case 17: ambientVolume_ = std::clamp(ambientVolume_ + delta * 0.1f, 0.0f, 1.0f); break;
-        case 18: showControlHints_ = !showControlHints_; break;
-        case 19: showMinimap_ = !showMinimap_; break;
-        case 20: reducedCameraShake_ = !reducedCameraShake_; break;
-        case 21: reducedFlashes_ = !reducedFlashes_; break;
+        case 18: reducedCameraShake_ = !reducedCameraShake_; break;
+        case 19: reducedFlashes_ = !reducedFlashes_; break;
         default: break;
         }
         audio_.SetVolume(masterVolume_);
@@ -1478,13 +1877,13 @@ void Game::HandleSettingsInput()
 
     if (activate)
     {
-        if (settingsIndex_ == 22)
+        if (settingsIndex_ == 20)
         {
             controlsReturnScreen_ = GameScreen::Settings;
             screen_ = GameScreen::Controls;
             waitingForKey_ = false;
         }
-        else if (settingsIndex_ == 23)
+        else if (settingsIndex_ == 21)
         {
             SaveSettings();
             screen_ = returnScreen_;
@@ -1506,11 +1905,11 @@ void Game::HandleSettingsInput()
 void Game::HandleControlsInput()
 {
 #if DAIBED_DEVELOPER_BUILD
-    constexpr int kActionCount = 25;
+    constexpr int kActionCount = 17;
 #else
     constexpr int kActionCount = 16;
 #endif
-    constexpr int kControlRows = kActionCount + 1;
+    constexpr int kControlRows = kActionCount;
     constexpr int kRowsPerColumn = 12;
     KeyBindings& bindings = input_.MutableBindings();
     GamepadBindings& padBindings = input_.MutableGamepadBindings();
@@ -1526,9 +1925,6 @@ void Game::HandleControlsInput()
                 &bindings.moveRight,
                 &bindings.jump,
                 &bindings.sneak,
-#if DAIBED_DEVELOPER_BUILD
-                &bindings.bridgeMode,
-#endif
                 &bindings.sprint,
                 &bindings.attack,
                 &bindings.place,
@@ -1580,81 +1976,48 @@ void Game::HandleControlsInput()
             bindings.sneak = key;
             break;
         case 6:
-#if DAIBED_DEVELOPER_BUILD
-            bindings.bridgeMode = key;
-#else
             bindings.sprint = key;
-#endif
             break;
         case 7:
-#if DAIBED_DEVELOPER_BUILD
-            bindings.sprint = key;
-#else
             bindings.attack = key;
-#endif
             break;
         case 8:
-#if DAIBED_DEVELOPER_BUILD
-            bindings.attack = key;
-#else
             bindings.place = key;
-#endif
             break;
         case 9:
-#if DAIBED_DEVELOPER_BUILD
-            bindings.place = key;
-#else
             bindings.interact = key;
-#endif
             break;
         case 10:
-#if DAIBED_DEVELOPER_BUILD
-            bindings.interact = key;
-#else
             bindings.inventory = key;
-#endif
             break;
         case 11:
-#if DAIBED_DEVELOPER_BUILD
-            bindings.inventory = key;
-#else
             bindings.drop = key;
-#endif
             break;
         case 12:
-#if DAIBED_DEVELOPER_BUILD
-            bindings.drop = key;
-#else
             bindings.cameraToggle = key;
-#endif
             break;
         case 13:
 #if DAIBED_DEVELOPER_BUILD
-            bindings.cameraToggle = key;
+            bindings.debugRespawn = key;
 #else
             bindings.heroActive1 = key;
 #endif
             break;
         case 14:
 #if DAIBED_DEVELOPER_BUILD
-            bindings.debugRespawn = key;
+            bindings.heroActive1 = key;
 #else
             bindings.heroActive2 = key;
 #endif
             break;
         case 15:
 #if DAIBED_DEVELOPER_BUILD
-            bindings.heroActive1 = key;
+            bindings.heroActive2 = key;
 #else
             bindings.heroUltimate = key;
 #endif
             break;
         case 16:
-#if DAIBED_DEVELOPER_BUILD
-            bindings.heroActive2 = key;
-#endif
-            break;
-        case 17:
 #if DAIBED_DEVELOPER_BUILD
             bindings.heroUltimate = key;
 #endif
@@ -1706,16 +2069,16 @@ void Game::HandleControlsInput()
         case 4: padBindings.jump = button; break;
         case 5: padBindings.sneak = button; break;
 #if DAIBED_DEVELOPER_BUILD
-        case 7: padBindings.sprint = button; break;
-        case 8: padBindings.attack = button; break;
-        case 9: padBindings.place = button; break;
-        case 10: padBindings.interact = button; break;
-        case 11: padBindings.inventory = button; break;
-        case 12: padBindings.drop = button; break;
-        case 13: padBindings.cameraToggle = button; break;
-        case 15: padBindings.heroActive1 = button; break;
-        case 16: padBindings.heroActive2 = button; break;
-        case 17: padBindings.heroUltimate = button; break;
+        case 6: padBindings.sprint = button; break;
+        case 7: padBindings.attack = button; break;
+        case 8: padBindings.place = button; break;
+        case 9: padBindings.interact = button; break;
+        case 10: padBindings.inventory = button; break;
+        case 11: padBindings.drop = button; break;
+        case 12: padBindings.cameraToggle = button; break;
+        case 14: padBindings.heroActive1 = button; break;
+        case 15: padBindings.heroActive2 = button; break;
+        case 16: padBindings.heroUltimate = button; break;
 #else
         case 6: padBindings.sprint = button; break;
         case 7: padBindings.attack = button; break;
@@ -1844,18 +2207,7 @@ void Game::HandleControlsInput()
         {
             controlsIndex_ = hoveredRow;
         }
-        if (controlsIndex_ == kActionCount)
-        {
-            screen_ = controlsReturnScreen_;
-            if (screen_ == GameScreen::Playing)
-            {
-                DisableCursor();
-            }
-        }
-        else
-        {
-            waitingForKey_ = true;
-        }
+        waitingForKey_ = true;
     }
     if (IsKeyPressed(KEY_ESCAPE))
     {
@@ -1869,21 +2221,87 @@ void Game::HandleControlsInput()
 
 void Game::HandlePauseInput()
 {
-    constexpr int kPauseRows = 5;
+    if (creativeMapBrowserOpen_)
+    {
+        const int itemCount = static_cast<int>(creativeMapBrowserPaths_.size());
+        if (itemCount <= 0)
+        {
+            creativeMapBrowserOpen_ = false;
+            return;
+        }
+        creativeMapBrowserIndex_ = std::clamp(creativeMapBrowserIndex_, 0, itemCount - 1);
+        if (IsKeyPressed(KEY_ESCAPE))
+        {
+            creativeMapBrowserOpen_ = false;
+            return;
+        }
+        if (IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_S))
+        {
+            creativeMapBrowserIndex_ = (creativeMapBrowserIndex_ + 1) % itemCount;
+        }
+        if (IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_W))
+        {
+            creativeMapBrowserIndex_ = (creativeMapBrowserIndex_ + itemCount - 1) % itemCount;
+        }
+        const float wheel = GetMouseWheelMove();
+        if (wheel < -0.01f)
+        {
+            creativeMapBrowserIndex_ = (creativeMapBrowserIndex_ + 1) % itemCount;
+        }
+        else if (wheel > 0.01f)
+        {
+            creativeMapBrowserIndex_ = (creativeMapBrowserIndex_ + itemCount - 1) % itemCount;
+        }
+
+        const int visible = std::min(kCreativeMapBrowserVisibleRows, itemCount);
+        const int first = CreativeMapBrowserFirstRow(itemCount, creativeMapBrowserIndex_);
+        const Vector2 mouse = GetMousePosition();
+        int hovered = -1;
+        for (int row = 0; row < visible; ++row)
+        {
+            if (CheckCollisionPointRec(mouse, CreativeMapBrowserRowRect(row, visible)))
+            {
+                hovered = first + row;
+                break;
+            }
+        }
+        if (hovered >= 0 && (std::fabs(GetMouseDelta().x) > 0.5f || std::fabs(GetMouseDelta().y) > 0.5f))
+        {
+            creativeMapBrowserIndex_ = hovered;
+        }
+        const bool activate = IsKeyPressed(KEY_ENTER) || (hovered >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT));
+        if (activate)
+        {
+            if (hovered >= 0)
+            {
+                creativeMapBrowserIndex_ = hovered;
+            }
+            if (LoadCreativeMapBrowserSelection())
+            {
+                screen_ = GameScreen::Playing;
+                DisableCursor();
+            }
+        }
+        return;
+    }
+
+    const std::vector<PauseEntry> entries = BuildPauseEntries(creativeMode_, creativeTestActive_);
+    const int rowCount = static_cast<int>(entries.size());
+    pauseIndex_ = std::clamp(pauseIndex_, 0, rowCount - 1);
     if (IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_S))
     {
-        pauseIndex_ = (pauseIndex_ + 1) % kPauseRows;
+        pauseIndex_ = (pauseIndex_ + 1) % rowCount;
     }
     if (IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_W))
     {
-        pauseIndex_ = (pauseIndex_ + kPauseRows - 1) % kPauseRows;
+        pauseIndex_ = (pauseIndex_ + rowCount - 1) % rowCount;
     }
     const Vector2 mouse = GetMousePosition();
     const Vector2 mouseMove = GetMouseDelta();
     int hoveredRow = -1;
-    for (int i = 0; i < kPauseRows; ++i)
+    for (int i = 0; i < rowCount; ++i)
     {
-        if (CheckCollisionPointRec(mouse, PauseRowRect(i)))
+        if (CheckCollisionPointRec(mouse, PauseRowRect(i, rowCount)))
         {
             hoveredRow = i;
             break;
@@ -1896,11 +2314,11 @@ void Game::HandlePauseInput()
     const float wheel = GetMouseWheelMove();
     if (wheel < -0.01f)
     {
-        pauseIndex_ = (pauseIndex_ + 1) % kPauseRows;
+        pauseIndex_ = (pauseIndex_ + 1) % rowCount;
     }
     else if (wheel > 0.01f)
     {
-        pauseIndex_ = (pauseIndex_ + kPauseRows - 1) % kPauseRows;
+        pauseIndex_ = (pauseIndex_ + rowCount - 1) % rowCount;
     }
     if (IsKeyPressed(KEY_ESCAPE))
     {
@@ -1918,28 +2336,45 @@ void Game::HandlePauseInput()
         return;
     }
 
-    if (pauseIndex_ == 0)
+    switch (entries[static_cast<std::size_t>(pauseIndex_)].action)
     {
+    case PauseEntryAction::Resume:
         screen_ = GameScreen::Playing;
         DisableCursor();
-    }
-    else if (pauseIndex_ == 1)
-    {
+        break;
+    case PauseEntryAction::RestartMatch:
         StartSelectedMatch();
-    }
-    else if (pauseIndex_ == 2)
-    {
+        break;
+    case PauseEntryAction::TestMap:
+        StartCreativeMapTest();
+        break;
+    case PauseEntryAction::RestartTest:
+        RestartCreativeMapTest();
+        break;
+    case PauseEntryAction::SaveMap:
+        SaveCreativeMapToFile();
+        screen_ = GameScreen::Playing;
+        DisableCursor();
+        break;
+    case PauseEntryAction::LoadMap:
+        OpenCreativeMapBrowser();
+        break;
+    case PauseEntryAction::BackToEditor:
+        ReturnToCreativeEditor();
+        break;
+    case PauseEntryAction::OpenSettings:
         returnScreen_ = GameScreen::Paused;
         screen_ = GameScreen::Settings;
-    }
-    else if (pauseIndex_ == 3)
-    {
+        break;
+    case PauseEntryAction::MainMenu:
         screen_ = GameScreen::MainMenu;
+        creativeMode_ = false; // leaving a creative session back to the menu
+        creativeTestActive_ = false;
         EnableCursor();
-    }
-    else if (pauseIndex_ == 4)
-    {
+        break;
+    case PauseEntryAction::ExitGame:
         exitRequested_ = true;
+        break;
     }
 }
 
@@ -2026,17 +2461,7 @@ void Game::RenderMainMenu() const
     const char* labels[] {
         "Начать матч",
         "Сетевая игра",
-        "Режим",
-        "Команда",
-        "Размер команды",
-        "Боты",
-        "Сложность ботов",
-        "План арены",
-        "Биом",
-        "Запустить автоматч",
-        "Прогонов автоматча",
-        "Скорость автоматча",
-        "Лимит времени автоматча",
+        "Креатив",
         "Настройки",
         "Управление",
         "Выход"
@@ -2044,17 +2469,7 @@ void Game::RenderMainMenu() const
     const std::string values[] {
         "",
         "",
-        MatchModeName(),
-        TeamName(selectedTeamId_),
-        TeamSizeName(),
-        BotCountName(),
-        BotDifficultyName(),
-        ArenaLayoutName(),
-        ArenaBiomeName(),
         "",
-        AutomatchRunCountName(),
-        AutomatchSpeedName(),
-        AutomatchDurationName(),
         "",
         "",
         ""
@@ -2062,9 +2477,9 @@ void Game::RenderMainMenu() const
 #else
     const char* labels[] {
         "Сетевая игра",
-        "Начать матч 4x4x4x4",
+        "Одиночная игра",
+        "Креатив",
         "Обучение",
-        "Сложность ботов",
         "Настройки",
         "Управление",
         "Выход"
@@ -2073,19 +2488,22 @@ void Game::RenderMainMenu() const
         "",
         "",
         "",
-        BotDifficultyName(),
+        "",
         "",
         "",
         ""
     };
 #endif
 
-    DrawCenteredText("DaiBed " DAIBED_VERSION, 48, 40, kTextBright);
+    // Minecraft-style title block: big pixel logotype + subtitle, version pinned
+    // to the bottom-left corner like MC's splash screen.
+    DrawCenteredText("DaiBed", 34, 56, kAccentGold);
 #if DAIBED_DEVELOPER_BUILD
-    DrawCenteredText("Настройка матча для разработчика", 92, 18, Fade(kTextDim, 0.85f));
+    DrawCenteredText("Геройский BedWars на изменяемых аренах", 96, 18, Fade(kTextDim, 0.9f));
 #else
-    DrawCenteredText("Геройский BedWars против ботов", 92, 18, Fade(kTextDim, 0.85f));
+    DrawCenteredText("Геройский BedWars против ботов", 96, 18, Fade(kTextDim, 0.9f));
 #endif
+    DrawTextShadow("DaiBed " DAIBED_VERSION, 10, GetScreenHeight() - 26, 16, Fade(kTextDim, 0.8f));
 
     const int panelWidth = 640;
     const int panelX = GetScreenWidth() / 2 - panelWidth / 2;
@@ -2108,7 +2526,8 @@ void Game::RenderMainMenu() const
         }
         else
         {
-            MenuLabelValueRow(row, labels[i], "", selected, kAccentGold);
+            // Action rows are classic beveled buttons (the reference look).
+            MenuButton(row, labels[i], MenuButtonStyle::Accent, selected, true);
         }
     }
 
@@ -2131,11 +2550,8 @@ void Game::RenderMainMenu() const
     case ArenaBiome::Arena:
         break;
     }
-    DrawCenteredText("Стрелки/WASD: выбор | Влево/вправо: изменить | Enter: подтвердить", GetScreenHeight() - 70, 18, Fade(WHITE, 0.62f));
-    DrawCenteredText(biomeHint.c_str(), GetScreenHeight() - 42, 16, Fade(WHITE, 0.48f));
+    (void)biomeHint;
 #else
-    DrawCenteredText("W/S или стрелки: выбор | Enter: подтвердить", GetScreenHeight() - 70, 18, Fade(WHITE, 0.62f));
-    DrawCenteredText("Классическая арена | 4 команды по 4 игрока", GetScreenHeight() - 42, 16, Fade(WHITE, 0.48f));
 #endif
 }
 
@@ -2230,116 +2646,187 @@ void Game::RenderMultiplayerMenu() const
         MenuButton(layout.hostBack, "Назад", MenuButtonStyle::Ghost, sel(13), true);
     }
 
-    DrawCenteredText("Q/E: вкладка | W/S/Tab: выбор | </>: изменить | Enter/ЛКМ: действие | Esc: назад",
-                     GetScreenHeight() - 48, 15, Fade(kTextDim, 0.70f));
 }
 
 void Game::RenderHeroSelect() const
 {
-    const int panelWidth = std::min(1040, GetScreenWidth() - 72);
-    const int panelHeight = std::min(560, GetScreenHeight() - 142);
-    const int panelX = GetScreenWidth() / 2 - panelWidth / 2;
-    const int panelY = 116;
-    const int listX = panelX + 22;
-    const int listY = panelY + 56;
-    const int rowHeight = 54;
-    const int detailX = panelX + 340;
-    const int detailWidth = panelWidth - 382;
+    constexpr int heroCount = HeroSystem::kHeroCount;
+    constexpr int startControl = heroCount + kHeroMatchSettingCount;
+    constexpr int backControl = startControl + 1;
+    const HeroSelectLayout layout = BuildHeroSelectLayout();
+    const Vector2 mouse = GetMousePosition();
     const auto& selected = HeroSystem::GetDefinitionByIndex(heroSelectIndex_);
 
-    DrawCenteredText("Выбор героя", 42, 38, kTextBright);
-    DrawCenteredText("Стрелки/WASD - выбрать | Enter - начать матч | Esc - назад", 86, 18, Fade(kTextDim, 0.80f));
-    MenuPanel(Rectangle { static_cast<float>(panelX), static_cast<float>(panelY),
-                          static_cast<float>(panelWidth), static_cast<float>(panelHeight) });
-    DrawText("Герои", listX, panelY + 22, 22, kTextBright);
+    // Full-screen hero showcase: broad cinematic bands and angular separators,
+    // without the lobby/currency/meta-navigation chrome from the reference.
+    DrawRectangleGradientV(0, 0, GetScreenWidth(), GetScreenHeight(),
+                           Color { 5, 7, 11, 255 }, Color { 11, 16, 24, 255 });
+    DrawRectangleGradientH(0, 58, GetScreenWidth(), GetScreenHeight() - 170,
+                           Fade(MenuHeroColor(selected.id), 0.07f), Fade(BLACK, 0.15f));
+    DrawLineEx(Vector2 { 24.0f, 58.0f }, Vector2 { 424.0f, 58.0f }, 2.0f, Fade(WHITE, 0.24f));
+    DrawLineEx(Vector2 { 424.0f, 58.0f }, Vector2 { 454.0f, 78.0f }, 2.0f, Fade(WHITE, 0.24f));
+    DrawLineEx(Vector2 { static_cast<float>(GetScreenWidth()) - 24.0f, 58.0f },
+               Vector2 { static_cast<float>(GetScreenWidth()) - 424.0f, 58.0f }, 2.0f, Fade(WHITE, 0.24f));
+    DrawLineEx(Vector2 { static_cast<float>(GetScreenWidth()) - 424.0f, 58.0f },
+               Vector2 { static_cast<float>(GetScreenWidth()) - 454.0f, 78.0f }, 2.0f, Fade(WHITE, 0.24f));
+    DrawTextShadow("DaiBed", 22, 22, 16, Fade(kTextDim, 0.76f));
+    DrawCenteredText("ВЫБОР ГЕРОЯ", 23, 25, kTextBright);
 
-    for (int i = 0; i < HeroSystem::kHeroCount; ++i)
+    DrawTextShadow("ГЕРОИ", static_cast<int>(layout.heroPane.x),
+                   static_cast<int>(layout.heroPane.y) + 5, 18, kTextBright);
+
+    for (int i = 0; i < heroCount; ++i)
     {
         const HeroDefinition& hero = HeroSystem::GetDefinitionByIndex(i);
-        const int y = listY + i * rowHeight;
+        const Rectangle row = HeroSelectHeroRow(layout, i);
         const bool current = i == heroSelectIndex_;
-        const Rectangle rowRect { static_cast<float>(listX), static_cast<float>(y), 286.0f,
-                                  static_cast<float>(rowHeight - 8) };
-        DrawRectangleRounded(rowRect, 0.22f, 6, current ? kMenuRowSel : kMenuRowIdle);
-        if (current)
+        const bool hovered = CheckCollisionPointRec(mouse, row);
+        const bool focused = heroSelectControlIndex_ == i;
+        const Color heroColor = MenuHeroColor(hero.id);
+        DrawRectangleRec(row, current ? Fade(heroColor, 0.30f)
+                                      : (hovered ? Fade(Color { 62, 70, 84, 255 }, 0.90f)
+                                                 : Fade(Color { 16, 20, 28, 255 }, 0.82f)));
+        DrawRectangleGradientV(static_cast<int>(row.x) + 2, static_cast<int>(row.y) + 2,
+                               static_cast<int>(row.width) - 4, static_cast<int>(row.height) - 4,
+                               Fade(heroColor, current ? 0.22f : 0.08f), Fade(BLACK, 0.24f));
+        if (current || hovered || focused)
         {
-            DrawRectangleRoundedLines(rowRect, 0.22f, 6, 1.0f, Fade(kAccentGold, 0.70f));
+            PixelBorder(row, focused ? 2 : 1,
+                        current ? Fade(heroColor, 0.96f) : Fade(WHITE, 0.74f));
         }
-        DrawText(hero.name.c_str(), listX + 14, y + 8, 20, current ? kAccentGold : Fade(kTextBright, 0.82f));
-        DrawText(hero.passiveName.c_str(), listX + 14, y + 30, 14, Fade(kTextDim, current ? 0.85f : 0.55f));
+        DrawCircle(static_cast<int>(row.x + row.width * 0.5f), static_cast<int>(row.y + 31.0f),
+                   19.0f, Fade(heroColor, current ? 0.90f : 0.46f));
+        DrawCircleLines(static_cast<int>(row.x + row.width * 0.5f), static_cast<int>(row.y + 31.0f),
+                        22.0f, Fade(WHITE, current || hovered ? 0.72f : 0.18f));
+        DrawRectangle(static_cast<int>(row.x + row.width * 0.5f) - 9,
+                      static_cast<int>(row.y) + 23, 18, 18, Fade(Color { 8, 10, 14, 255 }, 0.72f));
+        const int nameWidth = MeasureText(hero.name.c_str(), 15);
+        DrawTextShadow(hero.name.c_str(), static_cast<int>(row.x + (row.width - nameWidth) * 0.5f),
+                       static_cast<int>(row.y) + 62, 15,
+                       current ? heroColor : (hovered ? WHITE : Fade(kTextBright, 0.80f)));
     }
 
-    DrawText(selected.name.c_str(), detailX, panelY + 22, 30, kAccentGold);
-    const Rectangle previewRect {
-        static_cast<float>(panelX + panelWidth - 214),
-        static_cast<float>(panelY + 18),
-        184.0f,
-        184.0f
-    };
+    const float detailY = HeroSelectDetailY(layout);
+    DrawTextShadow(selected.name.c_str(), static_cast<int>(layout.heroPane.x),
+                   static_cast<int>(detailY), 28, WHITE);
+    DrawText(selected.role.c_str(), static_cast<int>(layout.heroPane.x),
+             static_cast<int>(detailY) + 34, 15, MenuHeroColor(selected.id));
+    DrawTextShadow(selected.passiveName.c_str(), static_cast<int>(layout.heroPane.x),
+                   static_cast<int>(detailY) + 60, 16, kAccentGold);
+    const int passiveLines = std::max(2, std::min(5,
+        static_cast<int>((layout.matchPane.y - (detailY + 84.0f) - 8.0f) / 18.0f)));
+    DrawWrappedTextLimited(selected.passiveDescription,
+                           static_cast<int>(layout.heroPane.x),
+                           static_cast<int>(detailY) + 84, 13,
+                           static_cast<int>(layout.heroPane.width) - 8, passiveLines, Fade(kTextBright, 0.76f));
 
-    renderer_.RenderHeroPreview(selected.id, previewRect, heroPreviewYaw_);
-    DrawText("Тяните мышью для вращения", static_cast<int>(previewRect.x) + 43, static_cast<int>(previewRect.y + previewRect.height) - 20, 12, Fade(WHITE, 0.58f));
+    renderer_.RenderHeroPreview(selected.id, layout.preview, heroPreviewYaw_);
+    const char* rotateHint = "Зажмите и тяните, чтобы повернуть";
+    DrawText(rotateHint,
+             static_cast<int>(layout.stagePane.x + (layout.stagePane.width - MeasureText(rotateHint, 12)) * 0.5f),
+             static_cast<int>(layout.matchPane.y) - 19, 12, Fade(kTextDim, 0.66f));
 
-    int y = panelY + 64;
-    const int contentBottom = panelY + panelHeight - 78;
-    const auto drawSection = [&y, detailX, detailWidth, contentBottom, previewRect](const std::string& title, const std::string& description, const std::string& meta, int maxLines)
+    DrawTextShadow("СПОСОБНОСТИ", static_cast<int>(layout.abilityPane.x),
+                   static_cast<int>(layout.abilityPane.y) + 5, 18, kTextBright);
+    int abilityY = static_cast<int>(layout.abilityPane.y) + 42;
+    const int abilityHeight = std::max(88, static_cast<int>(
+        (layout.matchPane.y - static_cast<float>(abilityY) - 8.0f) / 3.0f));
+    const auto drawAbilityBlock = [&](const char* key, const std::string& title,
+                                      const std::string& description, const std::string& meta,
+                                      Color color, int height)
     {
-        if (y >= contentBottom)
+        const Rectangle block { layout.abilityPane.x, static_cast<float>(abilityY),
+                                layout.abilityPane.width, static_cast<float>(height - 7) };
+        const bool hovered = CheckCollisionPointRec(mouse, block);
+        DrawRectangleRec(block, Fade(Color { 11, 15, 22, 255 }, hovered ? 0.92f : 0.68f));
+        if (hovered) PixelBorder(block, 1, Fade(color, 0.62f));
+        const Rectangle icon { block.x + 2.0f, block.y + 5.0f, 48.0f, 48.0f };
+        DrawRectangleRec(icon, Fade(color, 0.16f));
+        PixelBorder(icon, 1, Fade(color, 0.72f));
+        const int keyWidth = MeasureText(key, 18);
+        DrawTextShadow(key, static_cast<int>(icon.x + (icon.width - keyWidth) * 0.5f),
+                       static_cast<int>(icon.y) + 14, 18, color);
+        DrawTextShadow(title.c_str(), static_cast<int>(block.x) + 62,
+                       static_cast<int>(block.y) + 4, 16, color);
+        const int textY = static_cast<int>(block.y) + 28;
+        const int metaLineCount = meta.empty()
+            ? 0
+            : 1 + static_cast<int>(std::count(meta.begin(), meta.end(), '\n'));
+        const int reservedMetaHeight = metaLineCount == 0 ? 5 : metaLineCount * 13 + 5;
+        const int maxDescriptionLines = std::max(2,
+            (static_cast<int>(block.height) - 28 - reservedMetaHeight - 5) / 17);
+        DrawWrappedTextLimited(description, static_cast<int>(block.x) + 62, textY, 12,
+                               static_cast<int>(block.width) - 68, maxDescriptionLines,
+                               Fade(kTextBright, 0.78f));
+        if (!meta.empty())
         {
-            return;
+            std::istringstream metaStream(meta);
+            std::string metaLine;
+            int metaY = static_cast<int>(block.y + block.height) - metaLineCount * 13 - 2;
+            while (std::getline(metaStream, metaLine))
+            {
+                DrawText(metaLine.c_str(), static_cast<int>(block.x) + 62, metaY, 11,
+                         Fade(kTextDim, 0.78f));
+                metaY += 13;
+            }
         }
-        DrawText(title.c_str(), detailX, y, 17, Color { 112, 232, 255, 255 });
-        y += 22;
-        if (!meta.empty() && y < contentBottom)
-        {
-            DrawText(meta.c_str(), detailX, y, 14, Color { 255, 235, 142, 255 });
-            y += 19;
-        }
-        const int availableWidth = y < static_cast<int>(previewRect.y + previewRect.height)
-            ? detailWidth - static_cast<int>(previewRect.width) - 18
-            : detailWidth;
-        y = DrawWrappedTextLimited(description, detailX, y, 13, availableWidth, maxLines, Fade(WHITE, 0.76f));
-        y += 10;
+        abilityY += height;
     };
+    drawAbilityBlock(KeyLabel(input_.GetBindings().heroActive1), selected.active1.name,
+                     selected.active1.description, AbilityMetaText(selected.active1), kAccentCyan, abilityHeight);
+    drawAbilityBlock(KeyLabel(input_.GetBindings().heroActive2), selected.active2.name,
+                     selected.active2.description, AbilityMetaText(selected.active2), kAccentCyan, abilityHeight);
+    drawAbilityBlock(KeyLabel(input_.GetBindings().heroUltimate), selected.ultimate.name,
+                     selected.ultimate.description, AbilityMetaText(selected.ultimate), kAccentGold, abilityHeight);
 
-    drawSection("Пассивка: " + selected.passiveName, selected.passiveDescription, "", 2);
-    drawSection(std::string(KeyLabel(input_.GetBindings().heroActive1)) + ": " + selected.active1.name, selected.active1.description, AbilityMetaText(selected.active1), 3);
-    drawSection(std::string(KeyLabel(input_.GetBindings().heroActive2)) + ": " + selected.active2.name, selected.active2.description, AbilityMetaText(selected.active2), 3);
-    drawSection(std::string(KeyLabel(input_.GetBindings().heroUltimate)) + ": " + selected.ultimate.name, selected.ultimate.description, AbilityMetaText(selected.ultimate), 3);
-
-    if (y < contentBottom - 24)
+    DrawRectangleRec(layout.matchPane, Fade(Color { 6, 8, 12, 255 }, 0.94f));
+    PixelBorder(layout.matchPane, 2, Fade(WHITE, 0.16f));
+    DrawRectangle(static_cast<int>(layout.matchPane.x) + 2, static_cast<int>(layout.matchPane.y) + 2,
+                  static_cast<int>(layout.matchPane.width) - 4, 3, Fade(kAccentCyan, 0.62f));
+    DrawTextShadow("ПАРАМЕТРЫ МАТЧА", static_cast<int>(layout.matchPane.x) + 12,
+                   static_cast<int>(layout.matchPane.y) + 13, 16, kTextBright);
+    const char* settingLabels[kHeroMatchSettingCount] {
+        "Режим", "Команда", "Размер команды", "Боты", "Сложность", "Стратегия", "План арены", "Биом"
+    };
+    const std::string settingValues[kHeroMatchSettingCount] {
+        MatchModeName(), TeamName(selectedTeamId_), TeamSizeName(), BotCountName(),
+        BotDifficultyName(), BotStrategyProfileName(), ArenaLayoutName(), ArenaBiomeName()
+    };
+    for (int i = 0; i < kHeroMatchSettingCount; ++i)
     {
-        DrawText("Заряд ульты", detailX, y, 17, Color { 112, 232, 255, 255 });
-        y += 22;
-        DrawWrappedTextLimited(selected.ultimateChargeDescription, detailX, y, 13, detailWidth, 2, Fade(WHITE, 0.76f));
+        const Rectangle row = HeroSelectMatchRow(layout, i);
+        const bool hovered = CheckCollisionPointRec(mouse, row);
+        const bool focused = heroSelectControlIndex_ == heroCount + i;
+        DrawRectangleRec(row, Fade(Color { 20, 24, 32, 255 }, hovered || focused ? 0.96f : 0.72f));
+        PixelBorder(row, focused ? 2 : 1,
+                    hovered || focused ? Fade(kAccentCyan, 0.78f) : Fade(WHITE, 0.14f));
+        const int labelWidth = MeasureText(settingLabels[i], 10);
+        DrawText(settingLabels[i], static_cast<int>(row.x + (row.width - labelWidth) * 0.5f),
+                 static_cast<int>(row.y) + 5, 10, Fade(kTextDim, 0.82f));
+        DrawText("<", static_cast<int>(row.x) + 7, static_cast<int>(row.y) + 24, 14, kAccentCyan);
+        DrawText(">", static_cast<int>(row.x + row.width) - 15, static_cast<int>(row.y) + 24, 14, kAccentCyan);
+        const std::string clipped = ClipTextToWidth(settingValues[i], static_cast<int>(row.width) - 34, 12);
+        const int valueWidth = MeasureText(clipped.c_str(), 12);
+        DrawTextShadow(clipped.c_str(), static_cast<int>(row.x + (row.width - valueWidth) * 0.5f),
+                       static_cast<int>(row.y) + 25, 12, hovered || focused ? WHITE : Fade(kTextBright, 0.84f));
     }
 
-    const Rectangle startButton {
-        static_cast<float>(panelX + panelWidth - 276),
-        static_cast<float>(panelY + panelHeight - 60),
-        128.0f,
-        38.0f
-    };
-    const Rectangle backButton {
-        static_cast<float>(panelX + panelWidth - 136),
-        static_cast<float>(panelY + panelHeight - 60),
-        92.0f,
-        38.0f
-    };
-    MenuButton(startButton, "Старт", MenuButtonStyle::Accent, false, true);
-    MenuButton(backButton, "Назад", MenuButtonStyle::Ghost, false, true);
+    MenuButton(layout.startButton, "НАЧАТЬ МАТЧ", MenuButtonStyle::Accent,
+               heroSelectControlIndex_ == startControl || CheckCollisionPointRec(mouse, layout.startButton), true, 17);
+    MenuButton(layout.backButton, "Назад", MenuButtonStyle::Ghost,
+               heroSelectControlIndex_ == backControl || CheckCollisionPointRec(mouse, layout.backButton), true, 16);
 }
 
 void Game::RenderSettings() const
 {
-    constexpr int kSettingsRows = 24;
+    constexpr int kSettingsRows = 22;
     constexpr int kVisibleRows = 12;
     const char* labels[kSettingsRows] {
         "Чувствительность мыши", "Чувствительность геймпада", "Мёртвая зона стиков", "Угол обзора",
         "Разрешение", "Режим окна", "VSync", "Ограничение FPS", "Масштаб рендера", "Дальность прорисовки",
         "Качество теней", "Качество эффектов", "Постобработка", "Свечение", "Общая громкость", "Музыка",
-        "Эффекты", "Окружение", "Подсказки управления", "Мини-карта", "Ослабить тряску камеры",
-        "Ослабить вспышки", "Настроить управление", "Назад"
+        "Эффекты", "Окружение", "Ослабить тряску камеры", "Ослабить вспышки",
+        "Настроить управление", "Назад"
     };
     const auto percent = [](float value)
     {
@@ -2357,42 +2844,82 @@ void Game::RenderSettings() const
         toggle(vsyncEnabled_), FpsLimitName(), percent(kRenderScales[renderScaleIndex_]),
         std::to_string(static_cast<int>(kDrawDistances[drawDistanceIndex_])) + " м", quality(shadowQuality_),
         quality(effectsQuality_), toggle(postProcessing_), toggle(bloomEnabled_), percent(masterVolume_),
-        percent(musicVolume_), percent(sfxVolume_), percent(ambientVolume_), toggle(showControlHints_),
-        toggle(showMinimap_), toggle(reducedCameraShake_), toggle(reducedFlashes_), "", ""
+        percent(musicVolume_), percent(sfxVolume_), percent(ambientVolume_),
+        toggle(reducedCameraShake_), toggle(reducedFlashes_), "", ""
     };
 
-    DrawCenteredText("Настройки", 60, 40, kTextBright);
-    const int panelWidth = 680;
-    const int panelX = GetScreenWidth() / 2 - panelWidth / 2;
-    const int panelY = 118;
-    const int panelHeight = kVisibleRows * 38 + 24;
-    const int firstVisible = std::clamp(settingsIndex_ - kVisibleRows / 2, 0, kSettingsRows - kVisibleRows);
-    MenuPanel(Rectangle { static_cast<float>(panelX), static_cast<float>(panelY),
-                          static_cast<float>(panelWidth), static_cast<float>(panelHeight) });
-    BeginScissorMode(panelX + 12, panelY + 8, panelWidth - 24, panelHeight - 16);
+    DrawCenteredText("Настройки", 56, 40, kTextBright);
+    const Rectangle panel = SettingsPanelRect();
+    const int firstVisible = std::clamp(settingsFirstVisible_, 0, kSettingsRows - kVisibleRows);
+    MenuPanel(panel);
+
+    // Category sidebar (click jumps to the section; highlight follows the
+    // selected row).
+    const int activeSection = SettingsSectionForRow(settingsIndex_);
+    for (int i = 0; i < kSettingsSectionCount; ++i)
+    {
+        const Rectangle item = SettingsSidebarRect(i);
+        const bool active = i == activeSection;
+        if (active)
+        {
+            DrawRectangleRec(item, kMenuRowSel);
+            PixelBorder(item, 2, Fade(WHITE, 0.35f));
+            DrawRectangle(static_cast<int>(item.x) + 2, static_cast<int>(item.y) + 2,
+                          4, static_cast<int>(item.height) - 4, kAccentCyan);
+        }
+        DrawTextShadow(kSettingsSections[i].name, static_cast<int>(item.x) + 20,
+                       CenteredTextY(item, 18), 18, active ? kTextBright : Fade(kTextDim, 0.9f));
+    }
+    const int sepX = static_cast<int>(panel.x) + 14 + kSettingsSidebarW + 9;
+    DrawRectangle(sepX, static_cast<int>(panel.y) + 10, 2,
+                  static_cast<int>(panel.height) - 20, Fade(WHITE, 0.08f));
+
+    // Boolean rows draw as checkboxes (reference look), actions as buttons,
+    // everything else as < value > steppers.
+    const auto isToggleRow = [](int i)
+    {
+        return i == 6 || i == 12 || i == 13 || i == 18 || i == 19;
+    };
+    const Rectangle firstRow = SettingsRowRect(0);
+    BeginScissorMode(static_cast<int>(firstRow.x) - 4, static_cast<int>(panel.y) + 8,
+                     static_cast<int>(firstRow.width) + 8, static_cast<int>(panel.height) - 16);
     for (int visible = 0; visible < kVisibleRows; ++visible)
     {
         const int i = firstVisible + visible;
-        const int y = panelY + 22 + visible * 38;
         const bool selected = i == settingsIndex_;
-        const Rectangle row { static_cast<float>(panelX + 20), static_cast<float>(y - 8),
-                              static_cast<float>(panelWidth - 40), 31.0f };
-        if (!values[i].empty())
+        const Rectangle row = SettingsRowRect(visible);
+        if (i >= 20)
         {
-            MenuStepperRow(row, labels[i], values[i], selected, 18);
+            MenuButton(row, labels[i], MenuButtonStyle::Accent, selected, true, 18);
+        }
+        else if (isToggleRow(i))
+        {
+            MenuTogglePill(row, labels[i], values[i] == "Вкл.", selected, 18);
         }
         else
         {
-            MenuLabelValueRow(row, labels[i], "", selected, kAccentGold, 18);
+            MenuStepperRow(row, labels[i], values[i], selected, 18);
         }
     }
     EndScissorMode();
+
+    // Pixel scrollbar (right edge of the list, reference style).
     const float scrollFraction = static_cast<float>(firstVisible) / static_cast<float>(kSettingsRows - kVisibleRows);
-    const int trackHeight = panelHeight - 28;
-    const int thumbHeight = std::max(48, trackHeight * kVisibleRows / kSettingsRows);
-    DrawRectangle(panelX + panelWidth - 12, panelY + 14, 4, trackHeight, Fade(WHITE, 0.12f));
-    DrawRectangle(panelX + panelWidth - 12, panelY + 14 + static_cast<int>((trackHeight - thumbHeight) * scrollFraction), 4, thumbHeight, Fade(kAccentCyan, 0.55f));
-    DrawCenteredText("Стрелки/WASD или геймпад — изменить | Enter/A — выбрать | Esc — назад", GetScreenHeight() - 46, 17, Fade(WHITE, 0.62f));
+    const Rectangle track {
+        panel.x + panel.width - 26.0f, panel.y + 14.0f,
+        12.0f, panel.height - 28.0f
+    };
+    DrawRectangleRec(track, kMenuField);
+    PixelBorder(track, 2, kPixelOutline);
+    const float thumbH = std::max(44.0f, track.height * static_cast<float>(kVisibleRows) / static_cast<float>(kSettingsRows));
+    const Rectangle thumb {
+        track.x + 2.0f,
+        track.y + 2.0f + (track.height - 4.0f - thumbH) * scrollFraction,
+        track.width - 4.0f,
+        thumbH
+    };
+    DrawRectangleRec(thumb, MixColor(kButtonTop, kAccentCyan, 0.18f));
+    PixelBevel(thumb, 2, false);
 }
 
 void Game::RenderControls() const
@@ -2406,9 +2933,6 @@ void Game::RenderControls() const
         "Вправо",
         "Прыжок",
         "Присесть",
-#if DAIBED_DEVELOPER_BUILD
-        "Мост",
-#endif
         "Спринт",
         "Атака / ломать",
         "Использовать / ставить",
@@ -2421,17 +2945,7 @@ void Game::RenderControls() const
 #endif
         "Активка 1",
         "Активка 2",
-        "Ульта",
-#if DAIBED_DEVELOPER_BUILD
-        "Огненный шар",
-        "Быстрый огонь",
-        "Лечение",
-        "Телепорт",
-        "Рывок",
-        "Молотов",
-        "Сигнал",
-#endif
-        "Назад"
+        "Ульта"
     };
     const int keys[] {
         bindings.moveForward,
@@ -2440,9 +2954,6 @@ void Game::RenderControls() const
         bindings.moveRight,
         bindings.jump,
         bindings.sneak,
-#if DAIBED_DEVELOPER_BUILD
-        bindings.bridgeMode,
-#endif
         bindings.sprint,
         bindings.attack,
         bindings.place,
@@ -2455,17 +2966,7 @@ void Game::RenderControls() const
 #endif
         bindings.heroActive1,
         bindings.heroActive2,
-        bindings.heroUltimate,
-#if DAIBED_DEVELOPER_BUILD
-        bindings.shoot,
-        bindings.fireball,
-        bindings.heal,
-        bindings.teleport,
-        bindings.dash,
-        bindings.molotov,
-        bindings.alarm,
-#endif
-        KEY_NULL
+        bindings.heroUltimate
     };
     const int padButtons[] {
         GAMEPAD_BUTTON_UNKNOWN,
@@ -2474,9 +2975,6 @@ void Game::RenderControls() const
         GAMEPAD_BUTTON_UNKNOWN,
         padBindings.jump,
         padBindings.sneak,
-#if DAIBED_DEVELOPER_BUILD
-        GAMEPAD_BUTTON_UNKNOWN,
-#endif
         padBindings.sprint,
         padBindings.attack,
         padBindings.place,
@@ -2489,24 +2987,14 @@ void Game::RenderControls() const
 #endif
         padBindings.heroActive1,
         padBindings.heroActive2,
-        padBindings.heroUltimate,
-#if DAIBED_DEVELOPER_BUILD
-        GAMEPAD_BUTTON_UNKNOWN,
-        GAMEPAD_BUTTON_UNKNOWN,
-        GAMEPAD_BUTTON_UNKNOWN,
-        GAMEPAD_BUTTON_UNKNOWN,
-        GAMEPAD_BUTTON_UNKNOWN,
-        GAMEPAD_BUTTON_UNKNOWN,
-        GAMEPAD_BUTTON_UNKNOWN,
-#endif
-        GAMEPAD_BUTTON_UNKNOWN
+        padBindings.heroUltimate
     };
 #if DAIBED_DEVELOPER_BUILD
-    constexpr int kActionCount = 25;
+    constexpr int kActionCount = 18;
 #else
     constexpr int kActionCount = 16;
 #endif
-    constexpr int kControlRows = kActionCount + 1;
+    constexpr int kControlRows = kActionCount;
     constexpr int kRowsPerColumn = 12;
     constexpr int kColumnWidth = 440;
 
@@ -2543,18 +3031,55 @@ void Game::RenderControls() const
 
 void Game::RenderPauseOverlay() const
 {
-    const char* labels[] { "Продолжить", "Перезапустить матч", "Настройки", "Главное меню", "Выйти из игры" };
-    DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Fade(BLACK, 0.55f));
-    DrawCenteredText("Пауза", GetScreenHeight() / 2 - 154, 42, kTextBright);
-
-    const Rectangle panel = PausePanelRect();
-    MenuPanel(panel);
-    for (int i = 0; i < 5; ++i)
+    if (creativeMapBrowserOpen_)
     {
-        const Rectangle row = PauseRowRect(i);
+        DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Fade(BLACK, 0.68f));
+        const int itemCount = static_cast<int>(creativeMapBrowserPaths_.size());
+        const int visible = std::min(kCreativeMapBrowserVisibleRows, itemCount);
+        const int first = itemCount > 0 ? CreativeMapBrowserFirstRow(itemCount, creativeMapBrowserIndex_) : 0;
+        DrawCenteredText("Загрузить карту", GetScreenHeight() / 2 - 232, 38, kTextBright);
+        DrawCenteredText("Enter/ЛКМ — открыть | Esc — отмена", GetScreenHeight() / 2 - 195, 16, Fade(kTextDim, 0.82f));
+        const Rectangle panel = CreativeMapBrowserPanelRect(std::max(1, visible));
+        MenuPanel(panel);
+        if (itemCount == 0)
+        {
+            DrawCenteredText("В папке maps нет .dbmap карт.", static_cast<int>(panel.y + 56.0f), 18, kTextDim);
+            return;
+        }
+        for (int row = 0; row < visible; ++row)
+        {
+            const int index = first + row;
+            const Rectangle bounds = CreativeMapBrowserRowRect(row, visible);
+            const bool selected = index == creativeMapBrowserIndex_;
+            MenuRow(bounds, selected, kAccentGold);
+            DrawText(creativeMapBrowserPaths_[static_cast<std::size_t>(index)].c_str(),
+                     static_cast<int>(bounds.x + 18.0f), static_cast<int>(bounds.y + 7.0f), 18,
+                     selected ? kAccentGold : Fade(kTextBright, 0.84f));
+        }
+        if (itemCount > visible)
+        {
+            const std::string counter = std::to_string(creativeMapBrowserIndex_ + 1) + " / " + std::to_string(itemCount);
+            DrawText(counter.c_str(), static_cast<int>(panel.x + panel.width - 66.0f),
+                     static_cast<int>(panel.y + panel.height - 25.0f), 14, Fade(kTextDim, 0.75f));
+        }
+        return;
+    }
+
+    const std::vector<PauseEntry> entries = BuildPauseEntries(creativeMode_, creativeTestActive_);
+    const int rowCount = static_cast<int>(entries.size());
+    DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Fade(BLACK, 0.55f));
+    const char* title = creativeMode_ ? "Креатив — пауза" : (creativeTestActive_ ? "Тест карты — пауза" : "Пауза");
+    DrawCenteredText(title, GetScreenHeight() / 2 - 154, 42, kTextBright);
+
+    const Rectangle panel = PausePanelRect(rowCount);
+    MenuPanel(panel);
+    for (int i = 0; i < rowCount; ++i)
+    {
+        const Rectangle row = PauseRowRect(i, rowCount);
         const bool selected = i == pauseIndex_;
         MenuRow(row, selected, kAccentGold);
-        DrawText(labels[i], static_cast<int>(row.x + 20.0f), static_cast<int>(row.y + 7.0f), 20,
+        DrawText(entries[static_cast<std::size_t>(i)].label,
+                 static_cast<int>(row.x + 20.0f), static_cast<int>(row.y + 7.0f), 20,
                  selected ? kAccentGold : Fade(kTextBright, 0.80f));
     }
 }
@@ -2583,7 +3108,6 @@ void Game::RenderGameHints(const Player& localPlayer) const
     const std::string mainHints = std::string(KeyLabel(bindings.interact)) + " магазин"
         + " | " + KeyLabel(bindings.sneak) + " присесть"
 #if DAIBED_DEVELOPER_BUILD
-        + " | " + KeyLabel(bindings.bridgeMode) + " мост"
 #endif
         + " | " + KeyLabel(bindings.sprint) + " / двойной " + KeyLabel(bindings.moveForward) + " спринт"
         + " | " + KeyLabel(bindings.cameraToggle) + " камера"
@@ -2728,7 +3252,7 @@ void Game::RenderCoreCollapseTimer() const
         return;
     }
 
-    const float remaining = std::max(0.0f, kCoreCollapseSeconds - matchSimulation_.MatchTimeSeconds());
+    const float remaining = std::max(0.0f, coreCollapseSeconds_ - matchSimulation_.MatchTimeSeconds());
     const int minutes = static_cast<int>(remaining) / 60;
     const int seconds = static_cast<int>(remaining) % 60;
     std::string text = "Коллапс ядер ";
@@ -2967,8 +3491,7 @@ void Game::RenderChestOverlay() const
 
         DrawRectangle(sx + 8, sy + 7, slotSize - 16, slotSize - 17, itemColor(stack.type));
         DrawRectangleLines(sx + 8, sy + 7, slotSize - 16, slotSize - 17, Fade(WHITE, 0.38f));
-        DrawText(ItemShortName(stack.type), sx + 4, sy + slotSize - 12, 9, Fade(WHITE, 0.82f));
-        if (stack.count > 1)
+        if (stack.count > 0)
         {
             const std::string count = std::to_string(stack.count);
             DrawText(count.c_str(), sx + slotSize - MeasureText(count.c_str(), 12) - 3, sy + 3, 12, WHITE);
@@ -3079,15 +3602,80 @@ void Game::RenderBotDebug() const
             continue;
         }
 
+        std::string navigationLabel;
+        const auto controller = botNavigationControllers_.find(player.GetId());
+        if (controller != botNavigationControllers_.end())
+        {
+            const NavigationDebugSnapshot& nav = controller->second.DebugSnapshot();
+            navigationLabel = " / nav:" + std::string(ToString(nav.executionStatus))
+                + ':' + ToString(nav.phase)
+                + " #" + std::to_string(nav.movementIndex)
+                + " repath=" + ToString(nav.lastRepath)
+                + " stuck=" + std::to_string(static_cast<int>(nav.noProgressSeconds * 10.0f))
+                + " threat=" + std::to_string(static_cast<int>(nav.currentThreat));
+        }
         const std::string label = std::string(ToString(memory->role)) + " / " + ToString(memory->intent)
             + " " + std::to_string(static_cast<int>(memory->intentScore))
             + " / план: " + ToString(memory->currentPlan.goal)
             + (memory->currentPlan.targetTeamId >= 0 ? "->" + std::to_string(memory->currentPlan.targetTeamId) : "")
             + (memory->intentReason.empty() ? "" : " / " + memory->intentReason)
-            + (memory->roleReason.empty() ? "" : " / роль: " + memory->roleReason);
+            + (memory->roleReason.empty() ? "" : " / роль: " + memory->roleReason)
+            + navigationLabel;
         const int width = MeasureText(label.c_str(), 14) + 12;
         DrawRectangle(static_cast<int>(screen.x) - width / 2, static_cast<int>(screen.y) - 4, width, 22, Fade(BLACK, 0.55f));
         DrawText(label.c_str(), static_cast<int>(screen.x) - width / 2 + 6, static_cast<int>(screen.y), 14, Color { 255, 235, 142, 255 });
+    }
+}
+
+void Game::RenderNavigationDebugScene() const
+{
+    const auto movementColor = [](MovementType type)
+    {
+        switch (type)
+        {
+        case MovementType::Walk:
+        case MovementType::Sprint: return Color { 82, 232, 118, 230 };
+        case MovementType::StepUp:
+        case MovementType::JumpUp:
+        case MovementType::GapJump:
+        case MovementType::DropDown: return Color { 80, 208, 255, 230 };
+        case MovementType::SneakBridge:
+        case MovementType::PlaceBlock: return Color { 255, 220, 72, 230 };
+        case MovementType::BreakBlock: return Color { 255, 82, 82, 230 };
+        case MovementType::Wait: return Color { 210, 210, 220, 210 };
+        }
+        return WHITE;
+    };
+
+    for (const auto& entry : botNavigationControllers_)
+    {
+        const NavigationDebugSnapshot& debug = entry.second.DebugSnapshot();
+        const NavigationPath& path = debug.path;
+        if (path.movements.empty())
+        {
+            continue;
+        }
+        const std::size_t begin = std::min(debug.movementIndex, path.movements.size());
+        for (std::size_t index = begin; index < path.movements.size(); ++index)
+        {
+            const PlannedMovement& movement = path.movements[index];
+            const Vector3 from = world_.GridToWorld(movement.from);
+            const Vector3 to = world_.GridToWorld(movement.to);
+            const Vector3 raisedFrom { from.x, from.y + 1.13f, from.z };
+            const Vector3 raisedTo { to.x, to.y + 1.13f, to.z };
+            const Color color = debug.pathStale
+                ? Color { 148, 148, 158, 190 }
+                : movementColor(movement.type);
+            DrawLine3D(raisedFrom, raisedTo, color);
+            DrawSphere(raisedTo, index == begin ? 0.12f : 0.07f, color);
+            if (movement.affectedBlock.has_value())
+            {
+                const Vector3 block = world_.GridToWorld(*movement.affectedBlock);
+                DrawCubeWires(block, 1.04f, 1.04f, 1.04f, color);
+            }
+        }
+        const Vector3 goal = world_.GridToWorld(path.resolvedGoal);
+        DrawSphere(Vector3 { goal.x, goal.y + 1.20f, goal.z }, 0.16f, WHITE);
     }
 }
 

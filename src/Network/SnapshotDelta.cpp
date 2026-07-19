@@ -123,6 +123,7 @@ bool BlockDeltaEqual(const BlockDelta& a, const BlockDelta& b)
 {
     return a.tick == b.tick && a.position == b.position && a.oldType == b.oldType
         && a.newType == b.newType && a.oldTeamId == b.oldTeamId && a.newTeamId == b.newTeamId
+        && a.oldVariant == b.oldVariant && a.newVariant == b.newVariant
         && a.ownerPlayerId == b.ownerPlayerId && a.reason == b.reason;
 }
 
@@ -139,7 +140,7 @@ bool ExplosiveEqual(const ExplosiveSnapshot& a, const ExplosiveSnapshot& b)
     return a.id == b.id && VecEqual(a.position, b.position)
         && a.ownerPlayerId == b.ownerPlayerId && a.ownerTeamId == b.ownerTeamId
         && a.remainingTimer == b.remainingTimer && a.radius == b.radius
-        && a.visibility == b.visibility;
+        && a.visibility == b.visibility && VecEqual(a.velocity, b.velocity);
 }
 
 bool HazardZoneEqual(const HazardZoneSnapshot& a, const HazardZoneSnapshot& b)

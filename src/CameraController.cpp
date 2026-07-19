@@ -15,6 +15,7 @@ constexpr float kCameraLift = 1.15f;
 // Minecraft-style sneak: the eye dips noticeably so crouch is felt.
 constexpr float kCrouchEyeDrop = 0.34f;
 constexpr float kCrouchBlendSharpness = 14.0f;
+constexpr float kFirstPersonStepSmoothing = 18.0f;
 
 float Length2D(Vector3 value)
 {
@@ -37,6 +38,8 @@ void CameraController::Reset(float yaw, float pitch, Vector3 focus)
 
     const Vector3 look = LookDirection();
     const Vector3 target { focus.x, focus.y + kEyeHeight, focus.z };
+    firstPersonFocusY_ = focus.y;
+    firstPersonAimOrigin_ = target;
     camera_.target = Vector3 {
         target.x + look.x * 4.5f,
         target.y + look.y * 4.5f,
@@ -64,9 +67,20 @@ void CameraController::Update(Vector3 focus, float dt)
     crouchBlend_ += (crouchTarget - crouchBlend_) * std::min(1.0f, kCrouchBlendSharpness * dt);
 
     const Vector3 look = LookDirection();
+    // The collision capsule must step onto a slab in one tick or it catches
+    // on the lip.  Smooth only the first-person camera's upward focus; real
+    // movement and all collision checks stay immediate.
+    const float visualFocusY = mode_ == ViewMode::FirstPerson && focus.y > firstPersonFocusY_
+        ? firstPersonFocusY_ + (focus.y - firstPersonFocusY_)
+            * (1.0f - std::exp(-kFirstPersonStepSmoothing * dt))
+        : focus.y;
+    firstPersonFocusY_ = visualFocusY;
+    const float eyeHeight = (mode_ == ViewMode::FirstPerson ? kEyeHeight : kFocusHeight)
+        - crouchBlend_ * kCrouchEyeDrop;
+    firstPersonAimOrigin_ = Vector3 { focus.x, focus.y + kEyeHeight - crouchBlend_ * kCrouchEyeDrop, focus.z };
     const Vector3 targetBase {
         focus.x,
-        focus.y + (mode_ == ViewMode::FirstPerson ? kEyeHeight : kFocusHeight) - crouchBlend_ * kCrouchEyeDrop,
+        visualFocusY + eyeHeight,
         focus.z
     };
     Vector3 desiredTarget {
@@ -149,7 +163,7 @@ const Camera3D& CameraController::GetCamera() const
 
 Vector3 CameraController::GetAimOrigin() const
 {
-    return camera_.position;
+    return mode_ == ViewMode::FirstPerson ? firstPersonAimOrigin_ : camera_.position;
 }
 
 Vector3 CameraController::GetAimDirection() const

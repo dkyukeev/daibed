@@ -18,6 +18,7 @@ import random
 import subprocess
 import threading
 import time
+import statistics
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,7 @@ from typing import Any
 ROLE_KEYS = ("defender", "rusher", "collector", "fighter")
 
 DEFAULT_GENOME: dict[str, float | int | str] = {
+    "schemaVersion": 2,
     "id": "seed",
     "generation": 0,
     "fitness": 0.0,
@@ -105,6 +107,13 @@ DEFAULT_GENOME: dict[str, float | int | str] = {
     "pressurePhaseSeconds": 42.0,
     "latePressureSeconds": 120.0,
     "allInSeconds": 185.0,
+    "navigation.runupDistanceBlocks": 0.55,
+    "navigation.takeoffDelaySeconds": 0.052,
+    "navigation.takeoffEdgeOffsetBlocks": 0.30,
+    "navigation.takeoffGapScale": 0.116,
+    "navigation.airControlScale": 0.76,
+    "navigation.landingCorrectionGain": 0.84,
+    "navigation.fallRiskPenalty": 0.50,
 }
 
 BOUNDS: dict[str, tuple[float, float]] = {
@@ -150,6 +159,13 @@ BOUNDS: dict[str, tuple[float, float]] = {
     "pressurePhaseSeconds": (18.0, 95.0),
     "latePressureSeconds": (70.0, 190.0),
     "allInSeconds": (110.0, 290.0),
+    "navigation.runupDistanceBlocks": (0.55, 2.75),
+    "navigation.takeoffDelaySeconds": (0.04, 0.34),
+    "navigation.takeoffEdgeOffsetBlocks": (0.02, 0.45),
+    "navigation.takeoffGapScale": (0.0, 0.35),
+    "navigation.airControlScale": (0.25, 1.0),
+    "navigation.landingCorrectionGain": (0.15, 1.0),
+    "navigation.fallRiskPenalty": (0.25, 4.0),
 }
 
 
@@ -356,6 +372,8 @@ class TournamentTask:
     speed: int
     minutes: int
     seed: int
+    map_path: str = ""
+    map_index: int = 0
 
 
 class PersistentWorker:
@@ -371,8 +389,12 @@ class PersistentWorker:
     def start(self) -> None:
         self.stop()
         command = [str(self.args.exe_path), "--automatch-worker"]
+        if self.args.map and not self.args.train_maps:
+            command.extend(["--map", self.args.map])
         if self.args.biome:
             command.extend(["--biome", self.args.biome])
+        if self.args.difficulty:
+            command.extend(["--difficulty", self.args.difficulty])
         self.output = queue.Queue()
         self.process = subprocess.Popen(
             command,
@@ -413,6 +435,7 @@ class PersistentWorker:
                 str(task.seed),
                 str(task.tuning_path),
                 str(task.stats_path),
+                task.map_path,
             ]
         )
         output_lines: list[str] = []
@@ -451,6 +474,18 @@ class PersistentWorker:
                 if 0 <= team_id < 4:
                     scores[team_id] += team_score(run, team)
                     counts[team_id] += 1
+        # Per-bot diagnostics are batch totals, so normalize them by the same
+        # run count before applying a team-specific navigation penalty.
+        navigation_penalty = [0.0, 0.0, 0.0, 0.0]
+        for bot in stats.get("bots", []):
+            team_id = int(bot.get("teamId", -1))
+            if 0 <= team_id < 4:
+                navigation_penalty[team_id] += (
+                    float(bot.get("voidFalls", 0)) * 70.0
+                    + float(bot.get("stuckSamples", 0)) * 1.4
+                )
+        for team_id in range(4):
+            scores[team_id] -= navigation_penalty[team_id]
         return [scores[index] / max(1, counts[index]) for index in task.score_indexes]
 
     def stop(self, force: bool = False) -> None:
@@ -487,18 +522,29 @@ class WorkerPool:
     def _run_task(self, task: TournamentTask) -> tuple[TournamentTask, list[float]]:
         worker = self.available.get()
         try:
-            return task, worker.run(task)
-        except Exception as exc:
+            last_error: Exception | None = None
+            for attempt in range(self.args.task_retries + 1):
+                try:
+                    if attempt:
+                        worker.start()
+                        print(f"retrying tournament: {task.job_id} attempt={attempt + 1}")
+                    return task, worker.run(task)
+                except Exception as exc:
+                    last_error = exc
+                    worker.stop(force=True)
+            assert last_error is not None
             failure = {
-                "reason": str(exc),
+                "reason": str(last_error),
                 "jobId": task.job_id,
                 "tuning": str(task.tuning_path),
                 "stats": str(task.stats_path),
+                "map": task.map_path,
+                "attempts": self.args.task_retries + 1,
             }
             task.tuning_path.with_suffix(".failed.json").write_text(
                 json.dumps(failure, indent=2), encoding="utf-8"
             )
-            print(f"tournament failed: {task.job_id}: {exc}")
+            print(f"tournament failed: {task.job_id}: {last_error}")
             return task, [self.args.failure_penalty for _ in task.score_indexes]
         finally:
             self.available.put(worker)
@@ -519,12 +565,13 @@ class WorkerPool:
         self.close()
 
 
-def evaluation_seed(args: argparse.Namespace, generation: int, rotation: int, stage: str) -> int:
+def evaluation_seed(args: argparse.Namespace, generation: int, rotation: int, stage: str, map_index: int = 0) -> int:
     stage_salt = 0xC2B2AE35 if stage == "final" else 0x27D4EB2F
     seed = (
         args.evaluation_seed
         + generation * 0x9E3779B9
         + rotation * 0x85EBCA6B
+        + map_index * 0x165667B1
         + stage_salt
     ) & 0xFFFFFFFF
     return seed or 1
@@ -539,63 +586,161 @@ def evaluate_genomes(
     runs: int,
     rotations: int,
     stage: str,
+    maps: list[str] | None = None,
 ) -> list[float]:
     groups = [genomes[start:start + 4] for start in range(0, len(genomes), 4)]
     totals = [[0.0 for _ in group] for group in groups]
     counts = [[0 for _ in group] for group in groups]
     tasks: list[TournamentTask] = []
 
+    evaluation_maps = maps or ([args.map] if args.map else [""])
     for group_index, group in enumerate(groups):
         padded = [copy.deepcopy(item) for item in group]
         while len(padded) < 4:
             padded.append(copy.deepcopy(padded[-1]))
-        for rotation in range(max(1, min(rotations, 4))):
-            order = [(slot + rotation) % 4 for slot in range(4)]
-            candidates = [copy.deepcopy(padded[index]) for index in order]
-            stamp = time.time_ns()
-            name = f"gen{generation:04d}_{stage}_g{group_index:03d}_r{rotation}_{stamp}"
-            tuning_path = run_dir / f"{name}.json"
-            stats_path = run_dir / f"{name}.stats.json"
-            write_team_tuning(tuning_path, candidates)
-            tasks.append(
-                TournamentTask(
-                    job_id=name,
-                    group_index=group_index,
-                    tuning_path=tuning_path,
-                    stats_path=stats_path,
-                    score_indexes=[order.index(index) for index in range(len(group))],
-                    runs=max(1, runs),
-                    speed=args.speed,
-                    minutes=args.minutes,
-                    seed=evaluation_seed(args, generation, rotation, stage),
+        for map_index, map_path in enumerate(evaluation_maps):
+            for rotation in range(max(1, min(rotations, 4))):
+                order = [(slot + rotation) % 4 for slot in range(4)]
+                candidates = [copy.deepcopy(padded[index]) for index in order]
+                stamp = time.time_ns()
+                name = f"gen{generation:04d}_{stage}_m{map_index:02d}_g{group_index:03d}_r{rotation}_{stamp}"
+                tuning_path = run_dir / f"{name}.json"
+                stats_path = run_dir / f"{name}.stats.json"
+                write_team_tuning(tuning_path, candidates)
+                tasks.append(
+                    TournamentTask(
+                        job_id=name,
+                        group_index=group_index,
+                        tuning_path=tuning_path,
+                        stats_path=stats_path,
+                        score_indexes=[order.index(index) for index in range(len(group))],
+                        runs=max(1, runs),
+                        speed=args.speed,
+                        minutes=args.minutes,
+                        seed=evaluation_seed(args, generation, rotation, stage, map_index),
+                        map_path=map_path,
+                        map_index=map_index,
+                    )
                 )
-            )
 
+    map_totals = [[[0.0 for _ in evaluation_maps] for _ in group] for group in groups]
+    map_counts = [[[0 for _ in evaluation_maps] for _ in group] for group in groups]
     for task, scores in pool.run_all(tasks):
         for index, score in enumerate(scores):
             totals[task.group_index][index] += score
             counts[task.group_index][index] += 1
+            map_totals[task.group_index][index][task.map_index] += score
+            map_counts[task.group_index][index][task.map_index] += 1
 
     result: list[float] = []
     for group_index, group in enumerate(groups):
-        result.extend(
-            totals[group_index][index] / max(1, counts[group_index][index])
-            for index in range(len(group))
-        )
+        for index in range(len(group)):
+            per_map = [
+                map_totals[group_index][index][map_index] /
+                max(1, map_counts[group_index][index][map_index])
+                for map_index in range(len(evaluation_maps))
+            ]
+            # Reward average quality but make a weak course materially hurt.
+            result.append(statistics.fmean(per_map) * 0.70 + min(per_map) * 0.30)
     return result
 
 
-def make_initial_population(size: int) -> list[dict[str, Any]]:
-    population = [copy.deepcopy(DEFAULT_GENOME)]
-    population[0]["id"] = "seed"
+def parse_map_list(cwd: str, value: str) -> list[str]:
+    """Resolve a comma-separated list of files/directories/globs deterministically."""
+    if not value:
+        return []
+    result: list[Path] = []
+    for raw in value.split(","):
+        token = raw.strip()
+        if not token:
+            continue
+        source = Path(token)
+        base = Path(cwd)
+        if source.is_dir() or (not source.is_absolute() and (base / source).is_dir()):
+            directory = source if source.is_absolute() else base / source
+            result.extend(sorted(directory.glob("*.dbmap")))
+        elif any(char in token for char in "*?["):
+            result.extend(sorted(base.glob(token)))
+        else:
+            result.append(source if source.is_absolute() else base / source)
+    unique: list[str] = []
+    seen: set[Path] = set()
+    for path in result:
+        resolved = path.resolve()
+        if resolved not in seen:
+            if not resolved.is_file():
+                raise FileNotFoundError(f"map does not exist: {resolved}")
+            seen.add(resolved)
+            unique.append(str(resolved))
+    return unique
+
+
+def unlocked_train_maps(args: argparse.Namespace, generation: int) -> list[str]:
+    if not args.train_maps:
+        return [args.map] if args.map else [""]
+    count = min(
+        len(args.train_maps),
+        max(1, args.curriculum_start_maps + generation // args.curriculum_interval),
+    )
+    return args.train_maps[:count]
+
+
+def write_holdout_report(
+    args: argparse.Namespace,
+    pool: WorkerPool,
+    run_dir: Path,
+    champion: dict[str, Any],
+) -> bool:
+    if not args.holdout_maps:
+        return True
+    per_map: list[dict[str, Any]] = []
+    scores: list[float] = []
+    for map_path in args.holdout_maps:
+        score = evaluate_genomes(
+            args, pool, run_dir, args.generations, [copy.deepcopy(champion)],
+            args.holdout_runs, args.holdout_rotations, "holdout", [map_path],
+        )[0]
+        scores.append(score)
+        per_map.append({"map": map_path, "score": score})
+    passed = min(scores) >= args.holdout_min_score
+    report = {
+        "championId": champion.get("id", ""),
+        "passed": passed,
+        "minimumRequired": args.holdout_min_score,
+        "mean": statistics.fmean(scores),
+        "worst": min(scores),
+        "maps": per_map,
+    }
+    (run_dir / "holdout_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    if passed:
+        promoted = copy.deepcopy(champion)
+        promoted["holdoutMean"] = report["mean"]
+        promoted["holdoutWorst"] = report["worst"]
+        (run_dir / "promoted.json").write_text(json.dumps(promoted, indent=2), encoding="utf-8")
+    print(f"holdout: passed={passed} mean={report['mean']:.2f} worst={report['worst']:.2f}")
+    return passed
+
+
+def make_initial_population(size: int, seed_genome: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    base = copy.deepcopy(DEFAULT_GENOME)
+    if seed_genome:
+        for key, value in seed_genome.items():
+            if key in base and isinstance(value, (int, float, str)):
+                base[key] = value
+    for key in ("screeningFitness", "evaluationStage", "fitnessLast", "fitnessMean", "fitnessBestSeen", "evaluations"):
+        base.pop(key, None)
+    base["id"] = "seed"
+    base["generation"] = 0
+    base["fitness"] = 0.0
+    population = [base]
     while len(population) < size:
-        population.append(mutate(DEFAULT_GENOME, 0, 0.055))
+        population.append(mutate(base, 0, 0.055))
     return population
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--exe", default="build/Release/DaiBed.exe")
+    parser.add_argument("--exe", default="build-release/Release/DaiBed.exe")
     parser.add_argument("--cwd", default=".")
     parser.add_argument("--out", default="tuning_runs")
     parser.add_argument("--generations", type=int, default=20)
@@ -606,19 +751,34 @@ def main() -> int:
     parser.add_argument("--finalist-count", type=int, default=8)
     parser.add_argument("--hall-challengers", type=int, default=4)
     parser.add_argument("--workers", type=int, default=min(4, os.cpu_count() or 1))
-    parser.add_argument("--speed", type=int, default=256)
+    parser.add_argument("--speed", type=int, default=1024)
     parser.add_argument("--minutes", type=int, default=14)
     parser.add_argument("--mutation", type=float, default=0.045)
     parser.add_argument("--biome", default="")
+    parser.add_argument("--difficulty", default="hard")
+    parser.add_argument("--map", default="")
+    parser.add_argument("--train-maps", default="", help="comma list, directory, or glob")
+    parser.add_argument("--holdout-maps", default="", help="unseen maps evaluated only after training")
+    parser.add_argument("--curriculum-start-maps", type=int, default=2)
+    parser.add_argument("--curriculum-interval", type=int, default=3)
+    parser.add_argument("--holdout-runs", type=int, default=3)
+    parser.add_argument("--holdout-rotations", type=int, default=4)
+    parser.add_argument("--holdout-min-score", type=float, default=0.0)
+    parser.add_argument("--seed-genome", default="", help="continue from an existing best.json")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--failure-penalty", type=float, default=-1000000.0)
     parser.add_argument("--process-timeout-seconds", type=int, default=180)
+    parser.add_argument("--task-retries", type=int, default=2)
     parser.add_argument("--screening-rotations", type=int, default=1)
     parser.add_argument("--slot-rotations", type=int, default=4)
     args = parser.parse_args()
     args.exe_path = resolve_from_cwd(args.cwd, args.exe)
     args.workers = max(1, args.workers)
     args.finalist_count = max(args.elite, min(args.population, args.finalist_count))
+    args.train_maps = parse_map_list(args.cwd, args.train_maps)
+    args.holdout_maps = parse_map_list(args.cwd, args.holdout_maps)
+    args.curriculum_start_maps = max(1, args.curriculum_start_maps)
+    args.curriculum_interval = max(1, args.curriculum_interval)
 
     if args.seed:
         random.seed(args.seed)
@@ -626,8 +786,23 @@ def main() -> int:
 
     run_dir = resolve_from_cwd(args.cwd, args.out) / time.strftime("%Y%m%d_%H%M%S")
     run_dir.mkdir(parents=True, exist_ok=True)
-    population = make_initial_population(args.population)
+    seed_genome = None
+    if args.seed_genome:
+        seed_path = resolve_from_cwd(args.cwd, args.seed_genome)
+        seed_genome = json.loads(seed_path.read_text(encoding="utf-8"))
+    population = make_initial_population(args.population, seed_genome)
     hall_of_fame: list[dict[str, Any]] = []
+    (run_dir / "training_config.json").write_text(json.dumps({
+        "evaluationSeed": args.evaluation_seed,
+        "trainMaps": args.train_maps,
+        "holdoutMaps": args.holdout_maps,
+        "seedGenome": args.seed_genome,
+        "generations": args.generations,
+        "population": args.population,
+        "curriculumStartMaps": args.curriculum_start_maps,
+        "curriculumInterval": args.curriculum_interval,
+        "holdoutMinimumScore": args.holdout_min_score,
+    }, indent=2), encoding="utf-8")
 
     print(
         f"workers={args.workers} screening={args.screening_runs}x{args.screening_rotations} "
@@ -638,6 +813,10 @@ def main() -> int:
             generation_started = time.monotonic()
             random.shuffle(population)
             scored = [copy.deepcopy(item) for item in population]
+            curriculum_maps = unlocked_train_maps(args, generation)
+            # Screening rotates one unlocked course per generation. Finalists
+            # must generalize across every course unlocked so far.
+            screen_maps = [curriculum_maps[generation % len(curriculum_maps)]]
             screening_scores = evaluate_genomes(
                 args,
                 pool,
@@ -647,6 +826,7 @@ def main() -> int:
                 args.screening_runs,
                 args.screening_rotations,
                 "screen",
+                screen_maps,
             )
             for genome, score in zip(scored, screening_scores):
                 genome["screeningFitness"] = score
@@ -674,6 +854,7 @@ def main() -> int:
                 args.runs_per_tournament,
                 args.slot_rotations,
                 "final",
+                curriculum_maps,
             )
             verified_by_id: dict[str, dict[str, Any]] = {}
             for genome, score in zip(validation, final_scores):
@@ -724,6 +905,8 @@ def main() -> int:
                     child = copy.deepcopy(random.choice(elites))
                 next_population.append(mutate(child, generation + 1, args.mutation))
             population = next_population
+
+        write_holdout_report(args, pool, run_dir, hall_of_fame[0])
 
     return 0
 

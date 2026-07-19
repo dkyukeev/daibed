@@ -1,0 +1,293 @@
+{
+  "version": 1,
+  "maps": [
+    {
+      "file": "maps\\parkour_curriculum\\train\\parkour_train_00.dbmap",
+      "split": "train",
+      "seed": 41001,
+      "biome": 1,
+      "gapOrder": [
+        2,
+        3,
+        1
+      ],
+      "runLengths": [
+        9,
+        9,
+        6
+      ],
+      "anchorSides": [
+        1,
+        1,
+        1,
+        -1,
+        -1,
+        1,
+        1,
+        1,
+        -1,
+        1,
+        -1,
+        -1
+      ],
+      "lanes": 12,
+      "blocks": 4920
+    },
+    {
+      "file": "maps\\parkour_curriculum\\train\\parkour_train_01.dbmap",
+      "split": "train",
+      "seed": 48920,
+      "biome": 0,
+      "gapOrder": [
+        1,
+        2,
+        3
+      ],
+      "runLengths": [
+        9,
+        8,
+        9
+      ],
+      "anchorSides": [
+        1,
+        1,
+        -1,
+        -1,
+        -1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "lanes": 12,
+      "blocks": 4920
+    },
+    {
+      "file": "maps\\parkour_curriculum\\train\\parkour_train_02.dbmap",
+      "split": "train",
+      "seed": 56839,
+      "biome": 4,
+      "gapOrder": [
+        1,
+        3,
+        2
+      ],
+      "runLengths": [
+        6,
+        8,
+        6
+      ],
+      "anchorSides": [
+        -1,
+        1,
+        1,
+        -1,
+        1,
+        1,
+        1,
+        -1,
+        -1,
+        1,
+        1,
+        1
+      ],
+      "lanes": 12,
+      "blocks": 4920
+    },
+    {
+      "file": "maps\\parkour_curriculum\\train\\parkour_train_03.dbmap",
+      "split": "train",
+      "seed": 64758,
+      "biome": 3,
+      "gapOrder": [
+        2,
+        3,
+        1
+      ],
+      "runLengths": [
+        9,
+        8,
+        7
+      ],
+      "anchorSides": [
+        1,
+        1,
+        1,
+        -1,
+        1,
+        1,
+        1,
+        -1,
+        -1,
+        1,
+        1,
+        -1
+      ],
+      "lanes": 12,
+      "blocks": 4920
+    },
+    {
+      "file": "maps\\parkour_curriculum\\train\\parkour_train_04.dbmap",
+      "split": "train",
+      "seed": 72677,
+      "biome": 2,
+      "gapOrder": [
+        3,
+        2,
+        1
+      ],
+      "runLengths": [
+        7,
+        7,
+        6
+      ],
+      "anchorSides": [
+        1,
+        -1,
+        -1,
+        1,
+        1,
+        1,
+        -1,
+        -1,
+        -1,
+        1,
+        -1,
+        -1
+      ],
+      "lanes": 12,
+      "blocks": 4920
+    },
+    {
+      "file": "maps\\parkour_curriculum\\train\\parkour_train_05.dbmap",
+      "split": "train",
+      "seed": 80596,
+      "biome": 1,
+      "gapOrder": [
+        3,
+        2,
+        1
+      ],
+      "runLengths": [
+        6,
+        9,
+        9
+      ],
+      "anchorSides": [
+        -1,
+        -1,
+        1,
+        1,
+        -1,
+        -1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        -1
+      ],
+      "lanes": 12,
+      "blocks": 4920
+    },
+    {
+      "file": "maps\\parkour_curriculum\\holdout\\parkour_holdout_00.dbmap",
+      "split": "holdout",
+      "seed": 2779055500,
+      "biome": 0,
+      "gapOrder": [
+        3,
+        1,
+        2
+      ],
+      "runLengths": [
+        8,
+        8,
+        9
+      ],
+      "anchorSides": [
+        -1,
+        -1,
+        -1,
+        1,
+        -1,
+        -1,
+        -1,
+        1,
+        -1,
+        1,
+        -1,
+        1
+      ],
+      "lanes": 12,
+      "blocks": 4920
+    },
+    {
+      "file": "maps\\parkour_curriculum\\holdout\\parkour_holdout_01.dbmap",
+      "split": "holdout",
+      "seed": 2779028629,
+      "biome": 4,
+      "gapOrder": [
+        3,
+        2,
+        1
+      ],
+      "runLengths": [
+        6,
+        6,
+        8
+      ],
+      "anchorSides": [
+        -1,
+        1,
+        -1,
+        -1,
+        -1,
+        -1,
+        1,
+        1,
+        -1,
+        -1,
+        1,
+        -1
+      ],
+      "lanes": 12,
+      "blocks": 4920
+    },
+    {
+      "file": "maps\\parkour_curriculum\\holdout\\parkour_holdout_02.dbmap",
+      "split": "holdout",
+      "seed": 2779133886,
+      "biome": 1,
+      "gapOrder": [
+        1,
+        2,
+        3
+      ],
+      "runLengths": [
+        6,
+        6,
+        9
+      ],
+      "anchorSides": [
+        -1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        -1,
+        1,
+        -1,
+        1,
+        1
+      ],
+      "lanes": 12,
+      "blocks": 4920
+    }
+  ]
+}

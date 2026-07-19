@@ -402,7 +402,11 @@ const char* CombatSystem::HitZoneName(HitZone hitZone)
 
 float CombatSystem::AttackRange(WeaponType weapon, int swordLevel)
 {
-    const float base = 2.45f + std::min(3, swordLevel) * 0.10f;
+    // Match Minecraft's standard melee reach: sword tier affects damage and
+    // cadence, not the distance at which a normal hit can connect.
+    (void)swordLevel;
+    constexpr float kSwordAttackRange = 3.0f;
+    const float base = kSwordAttackRange;
     switch (weapon)
     {
     case WeaponType::Axe:

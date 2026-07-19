@@ -155,6 +155,40 @@ std::string FormatTenths(float value)
     const int tenths = static_cast<int>(value * 10.0f + 0.5f);
     return std::to_string(tenths / 10) + "." + std::to_string(tenths % 10);
 }
+
+HeroVoiceEvent DefaultHeroVoiceEvent(HeroAbilitySlot slot)
+{
+    switch (slot)
+    {
+    case HeroAbilitySlot::Active1:
+        return HeroVoiceEvent::Active1;
+    case HeroAbilitySlot::Active2:
+        return HeroVoiceEvent::Active2;
+    case HeroAbilitySlot::Ultimate:
+        return HeroVoiceEvent::Ultimate;
+    }
+    return HeroVoiceEvent::Count;
+}
+
+HeroVoiceEvent HeroVoiceFallback(HeroVoiceEvent event)
+{
+    switch (event)
+    {
+    case HeroVoiceEvent::Active1CoreDestroyed:
+    case HeroVoiceEvent::Active1OverchargeFail:
+        return HeroVoiceEvent::Active1;
+    case HeroVoiceEvent::Active2CoreDestroyed:
+        return HeroVoiceEvent::Active2;
+    case HeroVoiceEvent::UltimateCoreAlive:
+    case HeroVoiceEvent::UltimateCoreDestroyed:
+    case HeroVoiceEvent::UltimateRevealed:
+    case HeroVoiceEvent::UltimateLikhoDetected:
+        return HeroVoiceEvent::Ultimate;
+    default:
+        break;
+    }
+    return HeroVoiceEvent::Count;
+}
 }
 
 void Game::UseHeroAbilityInputs(Player& player)
@@ -312,6 +346,8 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
                     accent,
                     2.6f });
                 result.success = true;
+                result.playHeroVoice = true;
+                result.heroVoiceEvent = HeroVoiceEvent::UltimateCoreAlive;
                 result.playPickupSound = true;
                 return result;
             }
@@ -358,6 +394,8 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
             result.cameraShakeStrength = 0.28f;
             result.cameraShakeSeconds = 0.28f;
             result.success = true;
+            result.playHeroVoice = true;
+            result.heroVoiceEvent = HeroVoiceEvent::UltimateCoreDestroyed;
             result.playCoreDestroyedSound = true;
             return result;
         }
@@ -369,6 +407,8 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
             const bool pull = !coreAlive
                 && hasLocalCamera
                 && (IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT) || IsMouseButtonDown(MOUSE_BUTTON_RIGHT));
+            result.playHeroVoice = true;
+            result.heroVoiceEvent = pull ? HeroVoiceEvent::Active1CoreDestroyed : HeroVoiceEvent::Active1;
             SetHeroAnimation(player, HeroAnimationState::WindUp, pull ? 0.44f : 0.40f);
             const Vector3 origin {
                 player.GetPosition().x,
@@ -466,6 +506,8 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
         {
             SetHeroAnimation(player, HeroAnimationState::Ability2, 0.46f);
             const bool blueFire = !coreAlive;
+            result.playHeroVoice = true;
+            result.heroVoiceEvent = blueFire ? HeroVoiceEvent::Active2CoreDestroyed : HeroVoiceEvent::Active2;
             // player.Forward() is flat (yaw-only) — a network Radon would always
             // throw the molotov horizontally regardless of the command's real
             // aimPitch. AimDirectionFromCommandInput restores the intended arc.
@@ -681,8 +723,6 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
                     continue;
                 }
                 if (pos.y < kBuildMinY || pos.y > kBuildMaxY
-                    || std::abs(pos.x) > kBuildMapRadius
-                    || std::abs(pos.z) > kBuildMapRadius
                     || !world_.IsAir(pos)
                     || WouldBlockOverlapPlayer(pos, player.GetId())
                     || IsOrbitaCoreRestrictedPosition(world_.GridToWorld(pos), player.GetTeamId()))
@@ -1279,6 +1319,18 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
         {
             result.message = "Свидетель видит контуры врагов, ресурсов и Коров.";
             result.messageSeconds = 2.6f;
+            for (const Player& candidate : players_)
+            {
+                if (candidate.IsAlive()
+                    && candidate.GetTeamId() != player.GetTeamId()
+                    && candidate.GetHeroId() == HeroId::Likho
+                    && candidate.GetHeroState().ultimate.active)
+                {
+                    result.playHeroVoice = true;
+                    result.heroVoiceEvent = HeroVoiceEvent::UltimateLikhoDetected;
+                    break;
+                }
+            }
         }
         return result;
     }
@@ -1470,6 +1522,13 @@ void Game::PresentHeroAbilityResult(const HeroAbilityActionResult& result)
     if (result.playDeniedSound)
     {
         audio_.PlayDenied();
+    }
+    if (result.success)
+    {
+        const HeroVoiceEvent voiceEvent = result.playHeroVoice
+            ? result.heroVoiceEvent
+            : DefaultHeroVoiceEvent(result.slot);
+        PlayHeroVoice(result.hero, voiceEvent, HeroVoiceFallback(voiceEvent));
     }
 }
 

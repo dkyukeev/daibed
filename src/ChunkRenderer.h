@@ -30,8 +30,14 @@ public:
         const World& world,
         const ColorResolver& colorResolver,
         const TextureResolver& textureResolver,
-        const TransparencyResolver& transparencyResolver) const;
+        const TransparencyResolver& transparencyResolver,
+        const TextureResolver& normalMapResolver = {},
+        bool bakeAmbientOcclusion = false) const;
     void Draw(const Camera3D& camera, float drawDistance, Shader shader = {}) const;
+    // Transparent geometry is batched per chunk as well, then sorted at the
+    // chunk level.  This keeps large imported glass structures out of the
+    // legacy per-block DrawCube path while retaining normal alpha blending.
+    void DrawTransparent(const Camera3D& camera, float drawDistance, Shader shader = {}) const;
     void Shutdown();
 
     const ChunkRenderStats& GetStats() const;
@@ -50,6 +56,7 @@ private:
         GridPos coordinate {};
         Vector3 center {};
         std::vector<SubMesh> opaque;
+        std::vector<SubMesh> transparent;
         int triangles = 0;
     };
 
@@ -58,7 +65,9 @@ private:
         const World& world,
         const ColorResolver& colorResolver,
         const TextureResolver& textureResolver,
-        const TransparencyResolver& transparencyResolver) const;
+        const TransparencyResolver& transparencyResolver,
+        const TextureResolver& normalMapResolver,
+        bool bakeAmbientOcclusion) const;
     static void UnloadChunk(ChunkMesh& chunk);
 
     mutable std::unordered_map<GridPos, ChunkMesh, GridPosHash> chunks_;

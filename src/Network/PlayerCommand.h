@@ -88,7 +88,6 @@ struct PlayerCommand
     bool sprint = false;
     bool sprintTapped = false; // sprint key tapped this tick (sprint reset)
     bool sneak = false;
-    bool bridgeMode = false;   // build-assist modifier (place off the edge)
 
     int selectedSlot = 0; // active hotbar slot index
 

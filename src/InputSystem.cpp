@@ -135,11 +135,6 @@ PlayerInput InputSystem::Poll() const
     input.placeHeld = BindingDown(bindings_.place) || padDown(gamepadBindings_.place);
     input.sneak = BindingDown(bindings_.sneak) || padDown(gamepadBindings_.sneak);
     input.scopeHeld = IsMouseButtonDown(MOUSE_BUTTON_RIGHT) || padDown(gamepadBindings_.place);
-#if DAIBED_DEVELOPER_BUILD
-    input.bridgeMode = BindingDown(bindings_.bridgeMode);
-#else
-    input.bridgeMode = false;
-#endif
     input.cameraTogglePressed = BindingPressed(bindings_.cameraToggle) || padPressed(gamepadBindings_.cameraToggle);
     if (BindingPressed(bindings_.sprint))
     {
@@ -149,7 +144,7 @@ PlayerInput InputSystem::Poll() const
             input.sprintTapped = true;
         }
     }
-    if (input.sneak || input.bridgeMode || input.move.z <= 0.05f)
+    if (input.sneak || input.move.z <= 0.05f)
     {
         sprintToggled_ = false;
     }

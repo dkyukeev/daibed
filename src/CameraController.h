@@ -44,4 +44,6 @@ private:
     float fov_ = 62.0f;
     bool crouching_ = false;
     float crouchBlend_ = 0.0f;
+    float firstPersonFocusY_ = 0.0f;
+    Vector3 firstPersonAimOrigin_ {};
 };

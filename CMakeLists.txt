@@ -12,6 +12,10 @@ endif()
 
 option(DAIBED_USE_SYSTEM_RAYLIB "Use an already installed raylib package" ON)
 option(DAIBED_DEVELOPER_BUILD "Expose automatch and experimental setup in the UI" OFF)
+# All --*-smoke self-tests (src/Diag/Smokes.cpp). ON for developer/CI builds;
+# turn OFF for shipping so no test logic is compiled into the binary (the CLI
+# flags then answer with a "diagnostics disabled" stub).
+option(DAIBED_DIAGNOSTICS "Compile the --*-smoke diagnostic self-tests" ON)
 # Real UDP socket transport (Phase 0.1R). This adds NO fetched external
 # dependency — it uses only the OS socket API (Winsock2 / BSD sockets), linking
 # the system library ws2_32 on Windows. Turn OFF to build without any socket
@@ -47,6 +51,7 @@ add_executable(DaiBed
     src/main.cpp
     src/AudioSystem.cpp
     src/GameAutomatch.cpp
+    src/BotTuningTrainer.cpp
     src/BotAI.cpp
     src/CameraController.cpp
     src/ChunkRenderer.cpp
@@ -54,8 +59,13 @@ add_executable(DaiBed
     src/CombatSystem.cpp
     src/Core.cpp
     src/CrashLogger.cpp
+    src/CreativeMap.cpp
+    src/Diag/Smokes.cpp
+    src/Diag/NavigationSmokes.cpp
     src/Game.cpp
     src/GameBotAI.cpp
+    src/GameNavigation.cpp
+    src/GameCreative.cpp
     src/GameNetwork.cpp
     src/GameUI.cpp
     src/GameRules.cpp
@@ -72,6 +82,16 @@ add_executable(DaiBed
     src/InputSystem.cpp
     src/Inventory.cpp
     src/MusicSystem.cpp
+    src/Navigation/BotControlArbiter.cpp
+    src/Navigation/NavigationActionLibrary.cpp
+    src/Navigation/NavigationController.cpp
+    src/Navigation/NavigationGoal.cpp
+    src/Navigation/NavigationProfile.cpp
+    src/Navigation/NavigationWorldView.cpp
+    src/Navigation/PathExecutor.cpp
+    src/Navigation/RouteGraph.cpp
+    src/Navigation/ThreatMap.cpp
+    src/Navigation/VoxelPathfinder.cpp
     src/Player.cpp
     src/ParticleSystem.cpp
     src/Platform/PreciseTimer.cpp
@@ -101,6 +121,7 @@ target_link_libraries(DaiBed PRIVATE raylib)
 target_compile_definitions(DaiBed PRIVATE
     DAIBED_VERSION="${PROJECT_VERSION}"
     DAIBED_DEVELOPER_BUILD=$<BOOL:${DAIBED_DEVELOPER_BUILD}>
+    DAIBED_DIAGNOSTICS=$<BOOL:${DAIBED_DIAGNOSTICS}>
 )
 
 # Real network transport: define DAIBED_HAVE_NETWORK and link the OS socket
@@ -118,14 +139,28 @@ endif()
 
 if(MSVC)
     target_compile_options(DaiBed PRIVATE /W4 /permissive-)
-    if(NOT DAIBED_DEVELOPER_BUILD)
-        target_link_options(DaiBed PRIVATE "$<$<CONFIG:Release>:/SUBSYSTEM:WINDOWS>" "$<$<CONFIG:Release>:/ENTRY:mainCRTStartup>")
-    endif()
+    # A release build is launched as a game, including developer-flavoured
+    # releases.  Keep diagnostics callable through command-line arguments, but
+    # do not create a second console window beside the game window.
+    target_link_options(DaiBed PRIVATE "$<$<CONFIG:Release>:/SUBSYSTEM:WINDOWS>" "$<$<CONFIG:Release>:/ENTRY:mainCRTStartup>")
 else()
     target_compile_options(DaiBed PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 install(TARGETS DaiBed RUNTIME DESTINATION . COMPONENT Runtime)
+
+# A developer normally starts the executable directly from build/<config>.
+# Keep that directory self-contained as well as the installed package: running
+# DaiBed.exe by double-click otherwise uses the build directory as its working
+# directory and misses newly added sounds, shaders and Creative maps.
+add_custom_command(TARGET DaiBed POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/assets" "$<TARGET_FILE_DIR:DaiBed>/assets"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/maps" "$<TARGET_FILE_DIR:DaiBed>/maps"
+    COMMENT "Synchronizing DaiBed runtime assets and maps"
+)
+
 install(
     DIRECTORY assets
     DESTINATION .
@@ -133,6 +168,15 @@ install(
     PATTERN "*.md" EXCLUDE
     PATTERN "*.bbmodel" EXCLUDE
     PATTERN ".gitkeep" EXCLUDE
+)
+
+# Built-in CreativeMapDocument maps are runtime data, just like textures and
+# sounds. Keep the maps/ directory layout in installed packages so
+# --automatch --map works outside the repository root.
+install(
+    DIRECTORY maps
+    DESTINATION .
+    COMPONENT Runtime
 )
 
 set(CPACK_PACKAGE_NAME "DaiBed")

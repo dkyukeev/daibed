@@ -5,6 +5,7 @@
 #include "CameraController.h"
 #include "CombatSystem.h"
 #include "Core.h"
+#include "CreativeMap.h"
 #include "Feedback.h"
 #include "GameRules.h"
 #include "Generator.h"
@@ -17,6 +18,8 @@
 #include "Network/NetTypes.h"
 #include "Network/NetworkSnapshot.h"
 #include "Network/PlayerCommand.h"
+#include "Navigation/NavigationController.h"
+#include "Navigation/RouteGraph.h"
 #include "Platform/ServerProcess.h"
 #include "Player.h"
 #include "Simulation/MatchSimulation.h"
@@ -67,6 +70,12 @@ enum class BotDifficulty
     Hard
 };
 
+enum class BotStrategyProfile
+{
+    Standard,
+    HypixelRush
+};
+
 enum class ArenaLayout
 {
     Classic,
@@ -95,11 +104,25 @@ public:
     void Shutdown();
     bool ShouldClose() const;
     bool RunAutomatchBatch(int runs, int ticksPerFrame, int maxMinutes, unsigned int seed = 0);
+    bool RunBotTuningTrainer(
+        int generations,
+        int populationSize,
+        unsigned int seed,
+        const std::string& outputPath);
+    // --automatch --map <file>: bots play a creative-made map. The loaded
+    // document is pinned as pendingCreativeDoc_ for the whole batch (SetupMatch
+    // runs once per automatch run).
+    bool LoadAutomatchMapDocument(const std::string& path, std::string* errorMessage);
+    // Opens a named .dbmap in the Creative editor.  The loaded path becomes
+    // that editor session's save target, so built-in maps can be iterated on
+    // without first copying them over maps/creative_map.dbmap.
+    bool LoadCreativeMapDocumentForEditor(const std::string& path, std::string* errorMessage = nullptr);
     void SetSelectedBiome(ArenaBiome biome);
     void SetSelectedMode(MatchMode mode);
     void SetSelectedTeamSize(int teamSize);
     void SetArenaLayout(ArenaLayout layout);
     void SetBotDifficulty(BotDifficulty difficulty);
+    void SetBotStrategyProfile(BotStrategyProfile profile);
     void SetBotTuningPath(std::string path);
     void SetAutomatchStatsPath(std::string path);
     void SetProfilingEnabled(bool enabled);
@@ -182,6 +205,19 @@ public:
     // target's rewound (past) position with a rewindTick, and misses the same
     // geometry without one. CLI: --lag-comp-smoke.
     int RunLagCompSmoke();
+    // Creative-mode foundation self-test (windowed): enter the sandbox, assert
+    // the creative flag + block palette + FREE placement (world grows, inventory
+    // unchanged) + no winner. CLI: --creative-smoke.
+    int RunCreativeSmoke();
+    // Saves ui_*.png shots of the menu screens (windowed). CLI: --ui-screenshot.
+    int RunUiScreenshotDiag();
+    // Real-loop frame-time tracer (menu + match); prints slow frames with an
+    // input/update/render split. CLI: --frame-profile.
+    int RunFrameProfileDiag();
+    // Creative-map review: loads a .dbmap via the creative test-play flow,
+    // asserts slab/stair auto-step + ladder climbing, saves map_review_*.png
+    // (windowed). CLI: --map-review [--map <path>].
+    int RunMapReviewDiag(const std::string& mapPath);
     // Phase B: network-controlled ranged attacks use PlayerCommand aim, not the
     // server camera. CLI: --network-ranged-smoke.
     int RunNetworkRangedSmoke();
@@ -196,6 +232,11 @@ public:
     // uses; asserts the per-tick channel is live and a shop purchase crosses the
     // transport (validated/deduped server-side). CLI: --integrated-server-smoke.
     int RunIntegratedServerSmoke();
+    // Action-based navigation: deterministic planner/executor scenarios for
+    // walk, jump, bridge, resource limits, break/detour, repath and threat.
+    int RunNavigationSmoke();
+    // Strategic/team/human-limitation policy scenarios. CLI: --bot-ai-smoke.
+    int RunBotAISmoke();
 
     void HandleInput();
     void Update(float dt);
@@ -207,6 +248,7 @@ public:
     // DaiBed.settings file, so logs must record them for reproducibility.
     const char* MatchModeName() const;
     const char* BotDifficultyName() const;
+    const char* BotStrategyProfileName() const;
     const char* ArenaLayoutName() const;
     const char* ArenaBiomeName() const;
 
@@ -220,9 +262,68 @@ private:
         int weakBlocks = 0;
         bool critical = false;
     };
+    // Adaptive per-team defense plan: the cells bots should fill to seal the
+    // core, derived from the ACTUAL map geometry (min-cut around the core)
+    // instead of the legacy hardcoded dome.  Cached against a hash of the
+    // non-own geometry near the core, so building the plan itself does not
+    // invalidate it.
+    struct TeamDefensePlan
+    {
+        std::vector<GridPos> cells;
+        std::uint64_t regionHash = 0;
+        GridPos core {};
+        float nextRecomputeTime = 0.0f;
+        bool valid = false;
+    };
 
     void SetupMatch();
     void StartTutorialMatch();
+    // Creative mode (custom-map building sandbox; GameCreative.cpp). The world
+    // IS the map document: free infinite block building plus editable specials
+    // (cores/generators/hero spawns/team chests, key T) that SetupMatch
+    // instantiates on test-play. Save/load = maps/*.dbmap. No win/timer while
+    // editing. Next slices: blank canvas, named map slots, modding surface.
+    void StartCreativeSession();
+    void StartCreativeSessionFromDocument(const CreativeMapDocument& doc);
+    void GrantCreativePalette(Player& player);
+    void CaptureCreativeSpecialsFromMatch();
+    CreativeMapDocument BuildCreativeMapDocument() const;
+    void UpdateCustomMapBuildBounds(const CreativeMapDocument& doc);
+    void ApplyPendingCreativeDocToMatch();
+    bool TeamPlayableForSetup(int teamId) const;
+    bool PlaceCreativeSpecialAt(const GridPos& pos, CreativeSpecialKind kind, int teamId);
+    void RemoveCreativeSpecialByIndex(std::size_t index);
+    bool RemoveCreativeSpecialAlongAim(const Player& player);
+    void RefreshCreativeTeamSpawns();
+    void HandleCreativeModeInput(Player& player);
+    void HandleCreativePaletteInput(Player& player);
+    void HandleCreativePaletteInputPolished(Player& player);
+    void RenderCreativeMarkersScene() const;
+    void RenderCreativeOverlay() const;
+    void RenderCreativeOverlayPolished() const;
+    void RenderCreativePaletteOverlay() const;
+    void RenderCreativePaletteOverlayPolished() const;
+    void RenderCreativeSelectionScene() const;
+    void RenderCreativeValidationOverlay() const;
+    void ResetCreativeEditorTools();
+    void ResetCreativePaletteUi();
+    void RestoreCreativeMapDocument(const CreativeMapDocument& doc);
+    void PushCreativeHistory(std::string label, const CreativeMapDocument& before);
+    bool UndoCreativeEdit();
+    bool RedoCreativeEdit();
+    bool HandleCreativeEditorTools(Player& player);
+    bool SetCreativeSelectionCorner(const Player& player, int corner);
+    bool ApplyCreativeAreaFill(Player& player, bool replaceExisting);
+    bool ApplyCreativeAreaClear();
+    bool PickCreativeBlockAlongAim(Player& player);
+    std::vector<std::string> BuildCreativeValidationIssues() const;
+    void StartCreativeMapTest();
+    void RestartCreativeMapTest();
+    void ReturnToCreativeEditor();
+    bool SaveCreativeMapToFile();
+    bool LoadCreativeMapFromFile();
+    void OpenCreativeMapBrowser();
+    bool LoadCreativeMapBrowserSelection();
     void SetupGenerators();
     void AddClassicArenaLayout();
     void AddFrozenRingLayout();
@@ -297,6 +398,8 @@ private:
         bool playBreakBlockSound = false;
         bool playCoreDestroyedSound = false;
         bool playDeniedSound = false;
+        bool playHeroVoice = false;
+        HeroVoiceEvent heroVoiceEvent = HeroVoiceEvent::Count;
     };
     HeroAbilityActionResult ApplyHeroAbilityAction(Player& player, HeroAbilitySlot slot, const PlayerCommand* command = nullptr);
     void PresentHeroAbilityResult(const HeroAbilityActionResult& result);
@@ -346,7 +449,15 @@ private:
     bool BotUseUtility(Player& bot, Team& team, Player* enemy, EnergyCore* enemyCore, float dt);
     bool BotUseHeroAbility(Player& bot, Team& team, Player* enemy, EnergyCore* enemyCore);
     bool BotCastHeroAbility(Player& bot, HeroAbilitySlot slot);
-    void DetonateAt(Vector3 position, int ownerTeamId, int ownerPlayerId, float radius, int damage, bool createFireZone, bool blueFire = false);
+    enum class ExplosionBlockPolicy
+    {
+        Default,
+        PreserveReinforced, // obsidian + energy glass (TNT)
+        PreserveFortified  // reinforced + stone + sticky (Fireball)
+    };
+    void DetonateAt(Vector3 position, int ownerTeamId, int ownerPlayerId, float radius, int damage,
+                    bool createFireZone, bool blueFire = false,
+                    ExplosionBlockPolicy blockPolicy = ExplosionBlockPolicy::Default);
     void HandleInventoryInput(Player& player);
     bool TryDropInventoryStack(Player& player, int slot, int amount);
     bool TryQuickMoveInventorySlot(Player& player, int slot);
@@ -370,18 +481,31 @@ private:
     void RenderSpectatorOverlay() const;
     void RenderCompass(const Player& localPlayer) const;
     void RenderBotDebug() const;
+    void RenderNavigationDebugScene() const;
     void RenderNetworkDebugOverlay() const;
     void RenderAutomatchOverlay() const;
     bool TryBotRepairCoreDefense(Player& bot, Team& team, float dt);
     void UpdateCamera(float dt);
     void UpdateSpectator(float dt);
     void UpdateLocalPlayer(float dt);
+    bool UpdateCreativeFlightToggle(Player& player, PlayerCommand& command, float dt);
+    void SetCreativeFlightActive(Player& player, bool active);
+    void UpdateCreativeFlight(Player& player, const PlayerCommand& command, float dt);
     void ApplyPlayerCommand(Player& player, const PlayerCommand& command, float dt);
     void ApplyPredictedPlayerCommand(Player& player, const PlayerCommand& command, float dt);
     void ApplyBatchedServerCommands(const std::vector<ReceivedCommand>& receivedCommands, float dt);
     bool ApplyPlayerActionCommand(Player& player, const PlayerCommand& command);
     void UpdateBots(float dt);
     void UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameContext& frameContext);
+    bool UpdateActionNavigation(
+        Player& bot,
+        BotMemory& memory,
+        Vector3 target,
+        Player* targetPlayer,
+        EnergyCore* targetCore,
+        float dt,
+        PlayerCommand& command,
+        bool& goalSatisfied);
     void UpdateMatchSimulation(float dt);
     // One fixed simulation step with optional profiling timing around it.
     void StepSimulationProfiled(float dt);
@@ -394,6 +518,18 @@ private:
     void SampleAutomatchBots();
     void FinishAutomatchRun(bool timeout);
     void WriteAutomatchStatsJson() const;
+    void RecordMemorableMoment(
+        std::string category,
+        int primaryTeamId,
+        int secondaryTeamId,
+        std::vector<int> participants,
+        std::string description,
+        float significance,
+        bool botDecisionDriven,
+        int actorHealth = -1,
+        int targetHealth = -1,
+        int carriedResourceValue = 0,
+        std::vector<std::string> precedingActions = {});
     void UpdateGenerators(float dt);
     void UpdatePickups(float dt);
     void UpdateDroppedItems(float dt);
@@ -452,6 +588,8 @@ private:
     void CompleteBreakProgress(Player& player, const BreakProgress& progress);
     void HandlePlaceBlock();
     void HandleDeathsAndRespawns();
+    Vector3 FindTeamRespawnPosition(const Player& player);
+    void RespawnPlayerInTeamArea(Player& player);
     void SendMockNetworkInput();
     PlayerCommand BuildLocalPlayerCommand() const;
     void MarkNetworkControlledPlayer(int playerId);
@@ -525,10 +663,12 @@ private:
     void RenderCoreCollapseTimer() const;
 
     PlacementPreview BuildPlacementPreview(const Player& player) const;
-    bool CanPlaceBlockAt(const GridPos& pos, const Player& player, std::string* reason) const;
+    bool CanPlaceBlockAt(const GridPos& pos, const Player& player, std::string* reason,
+                         std::optional<GridPos> supportBlock = std::nullopt) const;
     bool HasAdjacentAnchorBlock(const GridPos& pos) const;
     BlockActionResult ApplyCompletedBreakProgress(Player& player, const BreakProgress& progress);
-    BlockActionResult ApplyPlaceBlockForPlayer(Player& player, const GridPos& pos);
+    BlockActionResult ApplyPlaceBlockForPlayer(Player& player, const GridPos& pos,
+                                               std::optional<GridPos> supportBlock = std::nullopt);
     void PresentBlockActionResult(const Player& player, const BlockActionResult& result, bool announce);
     bool TryPlaceBlockForPlayer(Player& player, const GridPos& pos, bool announce);
     void RecordBlockDelta(const GridPos& pos, const Block& oldBlock, const Block& newBlock, BlockDeltaReason reason, int ownerPlayerId = -1);
@@ -538,8 +678,21 @@ private:
     void SpawnBrokenBlockDrop(BlockType type, const GridPos& pos, int ownerPlayerId);
     std::optional<BlockType> SelectPlacementBlockForPlayer(const Player& player, const GridPos& pos) const;
     Vector3 ChooseBotWaypoint(const Player& bot, Vector3 finalTarget) const;
+    Vector3 ChooseBotAuthoredWaypoint(Player& bot, Vector3 finalTarget);
+    Vector3 ChooseBotRouteCorridorWaypoint(Player& bot, Vector3 finalTarget);
     Vector3 ChooseBotPathWaypoint(Player& bot, Vector3 finalTarget, float dt, const BotFrameContext& frameContext);
+    // Produces a real PlayerCommand and feeds the shared authoritative place
+    // validator.  Bot builders never mutate the world directly.
+    bool TryBotPlaceCommand(Player& bot, const GridPos& pos, float dt, bool preferCheapBlock);
     bool TryBotBridgeBlock(Player& bot, Vector3 target);
+    // Creative building (blueprint framework): a bot holding a ranged weapon
+    // that recently saw an enemy duck behind cover towers straight up (a
+    // vertical "firing perch" blueprint) to clear the wall and regain a firing
+    // angle. Returns true while actively perching this tick — the caller then
+    // holds position and jumps; the block-under-feet placement happens inside.
+    // Once elevation restores line of sight, it stops and the normal LOS-gated
+    // perception + BotUseUtility resume firing.
+    bool TryBotBuildFiringPerch(Player& bot, BotMemory& memory, Vector3 sensedEnemyPos, float dt);
     bool TryBotBreakCoreDefense(Player& bot, EnergyCore& core, float dt);
     std::optional<GridPos> FindBotBlockingBlock(const Player& bot, Vector3 wish, Vector3 target) const;
     bool TryBotBreakBlockingBlock(Player& bot, Vector3 wish, Vector3 target, float dt);
@@ -549,6 +702,13 @@ private:
         const BotFrameContext& frameContext,
         const TeamCoordinationBus* coordBus);
     Player* FindNearbyEnemyPlayer(const Player& player, float maxDistance);
+    // Bot vision: true when `observer` has an unobstructed line of sight to
+    // `target` (a solid block between their eye/torso samples blocks it). Bots
+    // use this to gate ENGAGEMENT — they no longer react to enemies hidden
+    // behind walls (audit finding #8). Deterministic (grid DDA raycast), so the
+    // automatch tuning harness stays reproducible. Objective navigation (the
+    // long-range hunt, core-threat sensing) is intentionally NOT gated by it.
+    bool BotHasLineOfSight(const Player& observer, const Player& target) const;
     BotMemory& GetBotMemory(Player& bot);
     void ApplyBotHitReaction(int playerId);
     std::optional<RaycastHit> RaycastFromAim(const Player& player, float maxDistance) const;
@@ -621,6 +781,9 @@ private:
     std::optional<GridPos> FindMissingCoreDefenseBlock(const Team& team) const;
     std::optional<GridPos> FindUpgradeableCoreDefenseBlock(const Team& team, const Player& bot) const;
     bool TryBotUpgradeCoreDefense(Player& bot, Team& team, float dt);
+    // Returns the adaptive defense-cell plan for the team's core (computed
+    // and cached lazily; empty when the core is fully sealed by terrain).
+    const std::vector<GridPos>& TeamDefenseCells(const Team& team) const;
 
     bool IsLocalPlayerInShopZone() const;
     bool WouldBlockOverlapPlayer(const GridPos& pos, int underfootPlayerId = -1) const;
@@ -634,7 +797,7 @@ private:
     std::string AutomatchRunCountName() const;
     std::string AutomatchSpeedName() const;
     std::string AutomatchDurationName() const;
-    int GetForgeBonusForTeam(int teamId) const;
+    std::pair<int, int> GetForgeTuningForTeam(int teamId) const;
     bool RepairTeamCore(Player& player, Team& team, std::string& message);
 
     Player* GetLocalPlayer();
@@ -659,6 +822,9 @@ private:
     void AddWorldEffect(Vector3 position, Vector3 direction, Color color, float radius, float seconds, WorldEffectKind kind);
     void AddFloatingText(std::string text, Vector3 position, Color color);
     void AddKillFeed(std::string text, Color color = WHITE, float seconds = 5.0f);
+    bool PlayHeroVoice(HeroId hero, HeroVoiceEvent event, HeroVoiceEvent fallback = HeroVoiceEvent::Count);
+    bool PlayHeroVoiceForPlayer(const Player& player, HeroVoiceEvent event, HeroVoiceEvent fallback = HeroVoiceEvent::Count);
+    bool PlayHeroVoiceForPlayerId(int playerId, HeroVoiceEvent event, HeroVoiceEvent fallback = HeroVoiceEvent::Count);
     struct CombatFloatingTextResult
     {
         std::string text;
@@ -894,12 +1060,46 @@ private:
         float timer = 0.0f;
         float suffocationTimer = 0.0f;
     };
+    struct MemorableMoment
+    {
+        std::uint32_t tick = 0;
+        unsigned int seed = 0;
+        std::string map;
+        std::string category;
+        int primaryTeamId = -1;
+        int secondaryTeamId = -1;
+        std::vector<int> participants;
+        int coreHealth[4] { -1, -1, -1, -1 };
+        int actorHealth = -1;
+        int targetHealth = -1;
+        int carriedResourceValue = 0;
+        std::vector<std::string> precedingActions;
+        std::string description;
+        float significance = 0.0f;
+        bool botDecisionDriven = false;
+    };
     struct AutomatchBotStats
     {
         std::string name;
         int teamId = -1;
+        // Shop explosive telemetry.  Only uses backed by a recorded shop
+        // purchase are counted, so creative/loadout items cannot skew bot data.
+        int fireballsPurchased = 0;
+        int fireballsUsed = 0;
+        int fireballDefenseBlocksDestroyed = 0;
+        int fireballBridgeOpportunities = 0;
+        int fireballDefenseOpportunities = 0;
+        int fireballTacticalUses = 0;
+        int tntPurchased = 0;
+        int tntActivated = 0;
+        int tntDefenseBlocksDestroyed = 0;
+        // Every store item is represented here.  "uses" records a successful
+        // active use; permanent upgrades remain purchase-only by design.
+        std::unordered_map<int, int> shopPurchases;
+        std::unordered_map<int, int> shopUses;
         int roleSamples[4] {};
         int intentSamples[10] {};
+        int strategicGoalSamples[7] {};
         int samples = 0;
         int roleChanges = 0;
         int intentChanges = 0;
@@ -909,6 +1109,32 @@ private:
         int deaths = 0;
         int finalDeaths = 0;
         int coreDamage = 0;
+        int planStarts = 0;
+        int planStageAdvances = 0;
+        int planCompletions = 0;
+        int planCancellations = 0;
+        int planExpiryCancellations = 0;
+        int planEvidenceCancellations = 0;
+        int planRouteFailureCancellations = 0;
+        int planVoidCancellations = 0;
+        float planHoldSeconds = 0.0f;
+        int retreats = 0;
+        int repeatedRouteDeaths = 0;
+        int lastPlanStarts = 0;
+        int lastPlanStageAdvances = 0;
+        int lastPlanCompletions = 0;
+        int lastPlanCancellations = 0;
+        int lastPlanExpiryCancellations = 0;
+        int lastPlanEvidenceCancellations = 0;
+        int lastPlanRouteFailureCancellations = 0;
+        int lastPlanVoidCancellations = 0;
+        int lastIntentForRetreat = -1;
+        std::string archetype;
+        int blocksHeld = 0;
+        int maxBlocksHeld = 0;
+        int resourcesHeld[3] {};
+        int finalBlocksHeld = 0;
+        int finalResourcesHeld[3] {};
         int lastRole = -1;
         int lastIntent = -1;
         bool hasMovementSample = false;
@@ -921,6 +1147,33 @@ private:
         float maxDistanceFromCenter = 0.0f;
         float averageDistanceFromBase = 0.0f;
         float averageDistanceFromCenter = 0.0f;
+        int objectiveSamples = 0;
+        int objectiveProgressSamples = 0;
+        int objectiveNoProgressSamples = 0;
+        int objectiveRegressionSamples = 0;
+        int objectiveReachedSamples = 0;
+        int strategicStallSamples = 0;
+        int objectiveTargetChanges = 0;
+        int currentNoProgressSamples = 0;
+        int maxNoProgressSamples = 0;
+        int lastObjectiveIntent = -1;
+        bool hasObjectiveSample = false;
+        Vector3 lastObjectiveTarget {};
+        float lastObjectiveDistance = 0.0f;
+        float netObjectiveDistanceChange = 0.0f;
+        float closestObjectiveDistance = 0.0f;
+        int midProximitySamples = 0;
+        int midReachSamples = 0;
+        int enemyBaseSamples = 0;
+        int enemyCoreReachSamples = 0;
+        int authoredRouteSamples = 0;
+        int authoredRouteMarkerSamples[4] {};
+        int authoredRouteAdvances = 0;
+        int lastAuthoredRouteAdvances = 0;
+        int maxAuthoredRouteIndex = 0;
+        int authoredRouteMarkerCount = 0;
+        float firstMidReachTime = -1.0f;
+        float firstEnemyBaseTime = -1.0f;
     };
     struct AutomatchTeamStats
     {
@@ -930,8 +1183,26 @@ private:
         int coreDamage = 0;
         int roleSamples[4] {};
         int intentSamples[10] {};
+        int strategicGoalSamples[7] {};
         int samples = 0;
         int resourcesHeld[3] {};
+        int objectiveSamples = 0;
+        int objectiveProgressSamples = 0;
+        int objectiveNoProgressSamples = 0;
+        int objectiveRegressionSamples = 0;
+        int objectiveReachedSamples = 0;
+        int strategicStallSamples = 0;
+        int midProximitySamples = 0;
+        int midReachSamples = 0;
+        int enemyBaseSamples = 0;
+        int enemyCoreReachSamples = 0;
+        int authoredRouteSamples = 0;
+        int authoredRouteMarkerSamples[4] {};
+        int authoredRouteAdvances = 0;
+        int maxAuthoredRouteIndex = 0;
+        int authoredRouteMarkerCount = 0;
+        float firstMidReachTime = -1.0f;
+        float firstEnemyBaseTime = -1.0f;
         int alivePlayers = 0;
         int eliminatedPlayers = 0;
         bool coreAlive = false;
@@ -970,6 +1241,7 @@ private:
         std::string finishReason;
         AutomatchTeamStats teamStats[4] {};
         std::vector<AutomatchTimelineEvent> timeline;
+        std::vector<MemorableMoment> memorableMoments;
     };
     struct AutomatchState
     {
@@ -989,15 +1261,41 @@ private:
         AutomatchTeamStats currentTeamStats[4] {};
         std::array<AutomatchHeroStats, HeroSystem::kHeroCount> heroStats {};
         std::vector<AutomatchTimelineEvent> currentTimeline;
+        std::vector<MemorableMoment> currentMemorableMoments;
+        std::unordered_map<std::string, int> memorableMomentCounts;
+        int matchesWithoutMemorableMoment = 0;
+        int jointAttacks = 0;
+        int coreDefenseResponses = 0;
+        int coreFortifications = 0;
+        int retreats = 0;
+        int purchasesByCategory[5] {};
+        int resourcesLost = 0;
+        int leaderChanges = 0;
+        int comebackAttempts = 0;
+        int comebackSuccesses = 0;
+        int lastLeaderTeamId = -1;
+        float lastCoreDestroyedTime = -1000.0f;
+        int lastCoreDestroyedTeamId = -1;
+        std::unordered_map<int, float> recentKillTimes;
+        std::unordered_map<int, int> recentKillCounts;
+        std::uint32_t lastAbilityTickByTeam[4] {};
+        int lastAbilityActorByTeam[4] { -1, -1, -1, -1 };
         std::vector<AutomatchBotStats> botStats;
         std::vector<AutomatchRunStats> runs;
     };
+    AutomatchBotStats* FindAutomatchBotStats(const Player& player);
+    void RecordAutomatchShopPurchase(const Player& player, int shopChoice);
+    void RecordAutomatchShopUse(const Player& player, int shopChoice);
+    void RecordAutomatchExplosivePurchase(const Player& player, int shopChoice);
+    void RecordAutomatchExplosiveUse(const Player& player, bool fireball);
+    void RecordAutomatchDefenseBlockDestroyed(int ownerPlayerId, ExplosionBlockPolicy blockPolicy);
     PlayerMatchScore& GetPlayerScore(int playerId);
     const PlayerMatchScore* FindPlayerScore(int playerId) const;
     void LoadSettings();
     void SaveSettings() const;
     void LoadBotTuning();
     const BotTuningGenome& BotTuningForTeam(int teamId) const;
+    BotTuningGenome ScaledBotTuningForTeam(int teamId) const;
     const char* ResolutionName() const;
     const char* FpsLimitName() const;
     void ApplyWindowSettings();
@@ -1059,6 +1357,7 @@ private:
     // Monotonic counter for EnergyProjectile::id (stable spawn id, not a vector
     // index). Reset in SetupMatch alongside the other per-match state.
     int nextProjectileId_ = 0;
+    std::uint32_t respawnSequence_ = 0;
     std::vector<HazardZone> hazardZones_;
     // Monotonic counter for HazardZone::id. Reset in SetupMatch.
     int nextHazardZoneId_ = 0;
@@ -1093,8 +1392,12 @@ private:
     std::vector<DamageCredit> damageCredits_;
     std::vector<BotMemory> botMemories_;
     std::unordered_map<int, std::size_t> botMemoryIndexByPlayerId_;
+    std::unordered_map<int, NavigationController> botNavigationControllers_;
+    std::unordered_map<int, BotIntent> botNavigationIntents_;
+    NavigationMetrics navigationMetrics_ {};
     std::array<TeamCoordinationBus, 4> teamCoordBuses_;
     std::array<CoreDefenseMonitor, 4> coreDefenseMonitors_;
+    mutable std::array<TeamDefensePlan, 4> teamDefensePlans_ {};
     std::array<BotTuningGenome, 4> botTuningByTeam_ {
         DefaultBotTuningGenome(),
         DefaultBotTuningGenome(),
@@ -1113,6 +1416,7 @@ private:
     GameScreen controlsReturnScreen_ = GameScreen::MainMenu;
     MatchMode selectedMode_ = MatchMode::FourTeams;
     BotDifficulty botDifficulty_ = BotDifficulty::Normal;
+    BotStrategyProfile botStrategyProfile_ = BotStrategyProfile::Standard;
     ArenaLayout arenaLayout_ = ArenaLayout::Classic;
     ArenaBiome arenaBiome_ = ArenaBiome::Arena;
     HeroId selectedHeroId_ = HeroId::Radon;
@@ -1135,23 +1439,86 @@ private:
     double localServerStartTime_ = 0.0;
     std::string localServerAddress_;
     int heroSelectIndex_ = 0;
+    int heroSelectControlIndex_ = 0;
     float heroPreviewYaw_ = 204.0f;
     bool heroPreviewDragging_ = false;
     int settingsIndex_ = 0;
+    int settingsFirstVisible_ = 0;
     int controlsIndex_ = 0;
     int pauseIndex_ = 0;
     bool waitingForKey_ = false;
     bool exitRequested_ = false;
     bool headless_ = false;
+    bool startupWindowHidden_ = true;
     bool profilingEnabled_ = false;
     bool suppressLocalFeedback_ = false;
     bool coreCollapseTriggered_ = false;
     bool coreCollapseWarned_ = false;
+    // Sudden-death timing scales with the map: the stock arena keeps the
+    // classic 12 minutes, castle-sized custom maps stretch toward 30 so the
+    // longer routes and thicker defenses have room to matter.
+    float coreCollapseSeconds_ = 12.0f * 60.0f;
     bool generatorBoostTriggered_ = false;
     bool showControlHints_ = true;
-    bool showMinimap_ = true;
+    bool showMinimap_ = false;
     bool showBotDebug_ = false;
     bool tutorialMode_ = false;
+    // Creative sandbox active: no win/timer, free infinite block placement.
+    bool creativeMode_ = false;
+    bool creativeFlightActive_ = false;
+    float creativeFlightJumpTapTimer_ = 0.0f;
+    // Editor special-blocks mode (key T): digits pick a special, Y picks the
+    // team, ПКМ places / ЛКМ removes. While active the normal attack/place
+    // command inputs are neutralized (same UI-gate pattern as shopOpen_).
+    bool creativeSpecialMode_ = false;
+    int creativeSpecialKindIndex_ = 0;
+    int creativeSpecialTeam_ = 0; // -1 = neutral (generators only)
+    int creativePaletteTab_ = 0;
+    int creativePaletteCursor_ = 0;
+    int creativePalettePage_ = 0;
+    bool creativePaletteSearchActive_ = false;
+    std::string creativePaletteSearch_;
+    struct CreativeHistoryEntry
+    {
+        std::string label;
+        CreativeMapDocument before;
+        CreativeMapDocument after;
+    };
+    std::vector<CreativeHistoryEntry> creativeUndoStack_;
+    std::vector<CreativeHistoryEntry> creativeRedoStack_;
+    bool creativeRestoringHistory_ = false;
+    std::optional<GridPos> creativeSelectionA_;
+    std::optional<GridPos> creativeSelectionB_;
+    bool creativeValidationVisible_ = false;
+    std::string creativeMapPath_ = "maps/creative_map.dbmap";
+    bool creativeMapBrowserOpen_ = false;
+    int creativeMapBrowserIndex_ = 0;
+    std::vector<std::string> creativeMapBrowserPaths_;
+    // Persisted while a custom map is being edited/tested/automatched. Setup
+    // only borrows pendingCreativeDoc_ briefly, so placement cannot rely on
+    // that pointer after the world has been built.
+    bool hasCustomMapBuildBounds_ = false;
+    int customMapBuildMinY_ = -2;
+    int customMapBuildMaxY_ = 64;
+    // Semantic source of truth for the map's special entities while editing.
+    // The visual world blocks (core/generator/chest) mirror these entries.
+    std::vector<CreativeSpecial> creativeSpecials_;
+    std::vector<CreativeRouteNode> creativeRouteNodes_;
+    std::vector<CreativeRouteEdge> creativeRouteEdges_;
+    RouteGraph routeGraph_;
+    // Editor snapshot taken when a test starts; "Вернуться в редактор" and
+    // "Перезапустить тест" rebuild from it.
+    CreativeMapDocument creativeReturnDoc_;
+    // Non-null only while SetupMatch runs for a custom map: it builds the world
+    // and gameplay entities from this document instead of the arena layout.
+    const CreativeMapDocument* pendingCreativeDoc_ = nullptr;
+    // A custom-map test session is running (pause offers "Вернуться в редактор").
+    bool creativeTestActive_ = false;
+    // Custom map for automatch batches (--map): owned storage the batch pins
+    // pendingCreativeDoc_ to.
+    CreativeMapDocument automatchMapDoc_;
+    bool automatchMapLoaded_ = false;
+    std::string automatchMapPath_ = "generated-arena";
     bool reducedCameraShake_ = false;
     bool reducedFlashes_ = false;
     bool postProcessing_ = true;
@@ -1231,6 +1598,9 @@ private:
     {
         BreakProgress breakProgress;
         float placeCooldown = 0.0f;
+        // Creative hold-to-break pacing (0.3 s between breaks while held;
+        // fresh clicks bypass it).
+        float creativeBreakCooldown = 0.0f;
     };
     std::unordered_map<int, NetworkActionState> networkActionState_;
     // Lag-compensation position history (see LagCompFrame). Recorded once per
@@ -1366,6 +1736,22 @@ private:
     float localDeathOverlayTimer_ = 0.0f;
     double profileSimulationMs_ = 0.0;
     double profileBotsMs_ = 0.0;
+    // Interactive-only per-tick block (skipped by headless automatch — its
+    // profiler can't see these): preview / fast place / mock net / integrated
+    // server. Filled when profilingEnabled_; printed by --frame-profile.
+    double profilePreviewMs_ = 0.0;
+    double profileFastPlaceMs_ = 0.0;
+    double profileMockNetMs_ = 0.0;
+    double profileIntegratedMs_ = 0.0;
+    // Full A* searches still allowed in the current sim tick (reset by
+    // UpdateBots; consumed by ChooseBotPathWaypoint) — caps replan bursts.
+    int pathSearchBudgetThisTick_ = 4;
+    // Why full path searches happen (waypoint-cache miss classification).
+    int profilePathFull_ = 0;
+    int profilePathMissNoCache_ = 0;
+    int profilePathMissMoved_ = 0;
+    int profilePathMissTimer_ = 0;
+    int profilePathMissNear_ = 0;
     double profilePathMs_ = 0.0;
     double profileDecisionMs_ = 0.0;
     double profileMovementMs_ = 0.0;

@@ -113,7 +113,10 @@ struct WorldEffect
 
 struct TimedExplosion
 {
-    GridPos block {};
+    // TNT is a physical entity, not a world block: it can fall from the
+    // placement cell before its fuse expires.
+    Vector3 position {};
+    Vector3 velocity {};
     int ownerTeamId = -1;
     int ownerPlayerId = -1;
     float timer = 2.6f;

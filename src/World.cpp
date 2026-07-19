@@ -1,6 +1,7 @@
 #include "World.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 
@@ -33,6 +34,60 @@ bool Overlaps(float minA, float maxA, float minB, float maxB)
 {
     return minA <= maxB && maxA >= minB;
 }
+
+struct LocalCollisionBox
+{
+    Vector3 min {};
+    Vector3 max {};
+};
+
+int CollisionBoxesFor(const Block& block, std::array<LocalCollisionBox, 2>& boxes)
+{
+    constexpr LocalCollisionBox kFull { Vector3 { -0.5f, -0.5f, -0.5f }, Vector3 { 0.5f, 0.5f, 0.5f } };
+    switch (block.type)
+    {
+    case BlockType::StoneSlabBlock:
+    case BlockType::StoneBrickSlabBlock:
+    case BlockType::BirchSlabBlock:
+    {
+        const bool upper = (block.variant & 0x8) != 0;
+        boxes[0] = upper
+            ? LocalCollisionBox { Vector3 { -0.5f, 0.0f, -0.5f }, Vector3 { 0.5f, 0.5f, 0.5f } }
+            : LocalCollisionBox { Vector3 { -0.5f, -0.5f, -0.5f }, Vector3 { 0.5f, 0.0f, 0.5f } };
+        return 1;
+    }
+    case BlockType::StoneBrickStairsBlock:
+    case BlockType::BirchStairsBlock:
+    {
+        const bool upsideDown = (block.variant & 0x4) != 0;
+        // Legacy Minecraft metadata 0..3 maps to the four horizontal backs.
+        // Two boxes give a genuine half-height step collider without forcing a
+        // full cube into the imported castle's stairs.
+        boxes[0] = upsideDown
+            ? LocalCollisionBox { Vector3 { -0.5f, 0.0f, -0.5f }, Vector3 { 0.5f, 0.5f, 0.5f } }
+            : LocalCollisionBox { Vector3 { -0.5f, -0.5f, -0.5f }, Vector3 { 0.5f, 0.0f, 0.5f } };
+        const float low = upsideDown ? -0.5f : 0.0f;
+        const float high = upsideDown ? 0.0f : 0.5f;
+        switch (block.variant & 0x3)
+        {
+        case 0: boxes[1] = LocalCollisionBox { Vector3 { -0.5f, low, -0.5f }, Vector3 { 0.0f, high, 0.5f } }; break;
+        case 1: boxes[1] = LocalCollisionBox { Vector3 { 0.0f, low, -0.5f }, Vector3 { 0.5f, high, 0.5f } }; break;
+        case 2: boxes[1] = LocalCollisionBox { Vector3 { -0.5f, low, -0.5f }, Vector3 { 0.5f, high, 0.0f } }; break;
+        default: boxes[1] = LocalCollisionBox { Vector3 { -0.5f, low, 0.0f }, Vector3 { 0.5f, high, 0.5f } }; break;
+        }
+        return 2;
+    }
+    case BlockType::IronBarsBlock:
+        // Crossed thin bars retain a small, tangible obstacle while allowing
+        // paths through the gaps instead of behaving like a stone wall.
+        boxes[0] = LocalCollisionBox { Vector3 { -0.08f, -0.5f, -0.5f }, Vector3 { 0.08f, 0.5f, 0.5f } };
+        boxes[1] = LocalCollisionBox { Vector3 { -0.5f, -0.5f, -0.08f }, Vector3 { 0.5f, 0.5f, 0.08f } };
+        return 2;
+    default:
+        boxes[0] = kFull;
+        return 1;
+    }
+}
 }
 
 void World::Clear()
@@ -43,6 +98,8 @@ void World::Clear()
     }
     blocks_.clear();
     ++renderRevision_;
+    navigationDirtyHistory_.clear();
+    navigationHistoryFloorRevision_ = renderRevision_;
 }
 
 bool World::PlaceBlock(const GridPos& pos, const Block& block, bool allowReplace)
@@ -61,7 +118,8 @@ bool World::PlaceBlock(const GridPos& pos, const Block& block, bool allowReplace
     if (existing != blocks_.end()
         && existing->second.type == block.type
         && existing->second.teamId == block.teamId
-        && existing->second.breakable == block.breakable)
+        && existing->second.breakable == block.breakable
+        && existing->second.variant == block.variant)
     {
         return true;
     }
@@ -157,18 +215,24 @@ bool World::CollidesWithAABB(Vector3 center, Vector3 halfExtents) const
                     continue;
                 }
 
-                const float blockMinX = static_cast<float>(x) - 0.5f;
-                const float blockMaxX = static_cast<float>(x) + 0.5f;
-                const float blockMinY = static_cast<float>(y) - 0.5f;
-                const float blockMaxY = static_cast<float>(y) + 0.5f;
-                const float blockMinZ = static_cast<float>(z) - 0.5f;
-                const float blockMaxZ = static_cast<float>(z) + 0.5f;
-
-                if (Overlaps(center.x - halfExtents.x, center.x + halfExtents.x, blockMinX, blockMaxX)
-                    && Overlaps(center.y - halfExtents.y, center.y + halfExtents.y, blockMinY, blockMaxY)
-                    && Overlaps(center.z - halfExtents.z, center.z + halfExtents.z, blockMinZ, blockMaxZ))
+                std::array<LocalCollisionBox, 2> boxes {};
+                const int boxCount = CollisionBoxesFor(*GetBlock(pos), boxes);
+                for (int boxIndex = 0; boxIndex < boxCount; ++boxIndex)
                 {
-                    return true;
+                    const LocalCollisionBox& box = boxes[boxIndex];
+                    const float blockMinX = static_cast<float>(x) + box.min.x;
+                    const float blockMaxX = static_cast<float>(x) + box.max.x;
+                    const float blockMinY = static_cast<float>(y) + box.min.y;
+                    const float blockMaxY = static_cast<float>(y) + box.max.y;
+                    const float blockMinZ = static_cast<float>(z) + box.min.z;
+                    const float blockMaxZ = static_cast<float>(z) + box.max.z;
+
+                    if (Overlaps(center.x - halfExtents.x, center.x + halfExtents.x, blockMinX, blockMaxX)
+                        && Overlaps(center.y - halfExtents.y, center.y + halfExtents.y, blockMinY, blockMaxY)
+                        && Overlaps(center.z - halfExtents.z, center.z + halfExtents.z, blockMinZ, blockMaxZ))
+                    {
+                        return true;
+                    }
                 }
             }
         }
@@ -348,6 +412,38 @@ std::uint64_t World::GetRenderRevision() const
     return renderRevision_;
 }
 
+NavigationChangeQuery World::QueryNavigationChanges(
+    std::uint64_t sinceRevision,
+    GridPos minimum,
+    GridPos maximum,
+    int padding) const
+{
+    if (sinceRevision >= renderRevision_) return NavigationChangeQuery::NoChanges;
+    if (sinceRevision < navigationHistoryFloorRevision_)
+    {
+        return NavigationChangeQuery::HistoryUnavailable;
+    }
+    padding = std::max(0, padding);
+    minimum.x -= padding;
+    minimum.y -= padding;
+    minimum.z -= padding;
+    maximum.x += padding;
+    maximum.y += padding;
+    maximum.z += padding;
+    for (auto it = navigationDirtyHistory_.rbegin(); it != navigationDirtyHistory_.rend(); ++it)
+    {
+        if (it->revision <= sinceRevision) break;
+        const GridPos pos = it->pos;
+        if (pos.x >= minimum.x && pos.x <= maximum.x
+            && pos.y >= minimum.y && pos.y <= maximum.y
+            && pos.z >= minimum.z && pos.z <= maximum.z)
+        {
+            return NavigationChangeQuery::Intersects;
+        }
+    }
+    return NavigationChangeQuery::Disjoint;
+}
+
 std::vector<GridPos> World::TakeDirtyRenderChunks() const
 {
     std::vector<GridPos> result;
@@ -372,19 +468,29 @@ GridPos World::RenderChunkForBlock(const GridPos& pos)
 void World::MarkRenderDirty(const GridPos& pos)
 {
     ++renderRevision_;
-    dirtyRenderChunks_.insert(RenderChunkForBlock(pos));
-    constexpr GridPos kNeighbors[] {
-        GridPos { 1, 0, 0 }, GridPos { -1, 0, 0 },
-        GridPos { 0, 1, 0 }, GridPos { 0, -1, 0 },
-        GridPos { 0, 0, 1 }, GridPos { 0, 0, -1 }
-    };
-    for (const GridPos& offset : kNeighbors)
+    navigationDirtyHistory_.push_back(NavigationDirtyCell { pos, renderRevision_ });
+    if (navigationDirtyHistory_.size() > kNavigationDirtyHistoryCapacity)
     {
-        dirtyRenderChunks_.insert(RenderChunkForBlock(GridPos {
-            pos.x + offset.x,
-            pos.y + offset.y,
-            pos.z + offset.z
-        }));
+        navigationHistoryFloorRevision_ = std::max(
+            navigationHistoryFloorRevision_, navigationDirtyHistory_.front().revision);
+        navigationDirtyHistory_.pop_front();
+    }
+    // Baked ambient occlusion samples the full 3x3x3 neighborhood around a
+    // block, so a change on a chunk boundary can darken faces in diagonally
+    // adjacent chunks, not just the face-adjacent ones.
+    for (int dx = -1; dx <= 1; ++dx)
+    {
+        for (int dy = -1; dy <= 1; ++dy)
+        {
+            for (int dz = -1; dz <= 1; ++dz)
+            {
+                dirtyRenderChunks_.insert(RenderChunkForBlock(GridPos {
+                    pos.x + dx,
+                    pos.y + dy,
+                    pos.z + dz
+                }));
+            }
+        }
     }
 }
 
@@ -406,6 +512,33 @@ bool World::IsCollisionBlock(BlockType type)
         || type == BlockType::SpikeBlock
         || type == BlockType::LavaBlock
         || type == BlockType::IceBlock
+        || type == BlockType::SmoothStoneBlock
+        || type == BlockType::DarkBrickBlock
+        || type == BlockType::LightBrickBlock
+        || type == BlockType::MetalBlock
+        || type == BlockType::GlowBlock
+        || type == BlockType::PlankBlock
+        || type == BlockType::DecorativeTileBlock
+        || type == BlockType::TrimBlock
+        || type == BlockType::CobblestoneBlock
+        || type == BlockType::AndesiteBlock
+        || type == BlockType::PolishedAndesiteBlock
+        || type == BlockType::StoneBrickBlock
+        || type == BlockType::ChiseledStoneBrickBlock
+        || type == BlockType::StoneSlabBlock
+        || type == BlockType::StoneBrickSlabBlock
+        || type == BlockType::StoneBrickStairsBlock
+        || type == BlockType::BirchPlankBlock
+        || type == BlockType::BirchSlabBlock
+        || type == BlockType::BirchStairsBlock
+        || type == BlockType::ColoredGlassBlock
+        || type == BlockType::ColoredClayBlock
+        || type == BlockType::LapisBlock
+        || type == BlockType::DiamondBlock
+        || type == BlockType::EmeraldBlock
+        || type == BlockType::GoldBlock
+        || type == BlockType::IronBarsBlock
+        || type == BlockType::BarrierBlock
         || type == BlockType::ResourceGenerator
         || type == BlockType::TeamChestBlock
         || type == BlockType::EnergyCoreBlock;

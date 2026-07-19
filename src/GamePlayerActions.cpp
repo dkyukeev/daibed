@@ -85,18 +85,33 @@ void Game::UseUtilityInputs(Player& player, const PlayerCommand& command)
             if (!hotbar[i].IsEmpty() && hotbar[i].type == itemType)
             {
                 selectSlot(i);
+                UtilityActionResult result {};
                 if (type == UtilityType::Fireball || type == UtilityType::Molotov)
                 {
-                    const UtilityActionResult result = ApplyProjectileUtility(player, type, AimDirectionFromCommandInput(command));
-                    PushUtilityActionResultSnapshot(player, result);
-                    PresentUtilityActionResult(result);
+                    result = ApplyProjectileUtility(player, type, AimDirectionFromCommandInput(command));
                 }
                 else
                 {
-                    const UtilityActionResult result = ApplyUtility(player, type);
-                    PushUtilityActionResultSnapshot(player, result);
-                    PresentUtilityActionResult(result);
+                    result = ApplyUtility(player, type);
                 }
+                if (result.success)
+                {
+                    const int shopChoice = type == UtilityType::Heal ? 203
+                        : (type == UtilityType::HomeTeleport ? 204
+                        : (type == UtilityType::Dash ? 205
+                        : (type == UtilityType::Fireball ? 105
+                        : (type == UtilityType::Molotov ? 206 : 207))));
+                    if (type == UtilityType::Fireball)
+                    {
+                        RecordAutomatchExplosiveUse(player, true);
+                    }
+                    else
+                    {
+                        RecordAutomatchShopUse(player, shopChoice);
+                    }
+                }
+                PushUtilityActionResultSnapshot(player, result);
+                PresentUtilityActionResult(result);
                 return;
             }
         }
@@ -1213,6 +1228,7 @@ bool Game::TryShopPurchase(Player& player, Team& team, int choice, int repeat, s
         }
         lastMessage = purchaseMessage;
         ++bought;
+        RecordAutomatchShopPurchase(player, choice);
     }
 
     message = bought > 1 ? ("Куплено x" + std::to_string(bought) + ". " + lastMessage) : lastMessage;
@@ -1342,6 +1358,14 @@ void Game::LaunchProjectileDirected(Player& player, UtilityType type, Vector3 di
     }
 
     projectiles_.push_back(projectile);
+    if (type == UtilityType::Arrows)
+    {
+        RecordAutomatchShopUse(player, 104);
+    }
+    else if (type == UtilityType::Fireball)
+    {
+        RecordAutomatchExplosiveUse(player, true);
+    }
     if (announce)
     {
         SetMessage(type == UtilityType::Arrows ? "Энергострела выпущена." : (type == UtilityType::Fireball ? "Фаербол запущен." : "Коктейль Молотова брошен."));
@@ -1349,7 +1373,8 @@ void Game::LaunchProjectileDirected(Player& player, UtilityType type, Vector3 di
     }
 }
 
-void Game::DetonateAt(Vector3 position, int ownerTeamId, int ownerPlayerId, float radius, int damage, bool createFireZone, bool blueFire)
+void Game::DetonateAt(Vector3 position, int ownerTeamId, int ownerPlayerId, float radius, int damage,
+                      bool createFireZone, bool blueFire, ExplosionBlockPolicy blockPolicy)
 {
     const int blockRadius = static_cast<int>(std::ceil(radius));
     const GridPos center = world_.WorldToGrid(position);
@@ -1367,6 +1392,16 @@ void Game::DetonateAt(Vector3 position, int ownerTeamId, int ownerPlayerId, floa
                 const Block* block = world_.GetBlock(pos);
                 if (block != nullptr && block->breakable && IsBreakableByPlayers(block->type))
                 {
+                    const bool reinforced = block->type == BlockType::ObsidianBlock
+                        || block->type == BlockType::EnergyGlassBlock;
+                    const bool fortified = reinforced
+                        || block->type == BlockType::StoneBlock
+                        || block->type == BlockType::StickyBlock;
+                    if ((blockPolicy == ExplosionBlockPolicy::PreserveReinforced && reinforced)
+                        || (blockPolicy == ExplosionBlockPolicy::PreserveFortified && fortified))
+                    {
+                        continue;
+                    }
                     if (createFireZone)
                     {
                         if (block->type == BlockType::ObsidianBlock
@@ -1386,7 +1421,12 @@ void Game::DetonateAt(Vector3 position, int ownerTeamId, int ownerPlayerId, floa
                     }
                     else
                     {
-                        BreakWorldBlock(pos, ownerTeamId, BlockDeltaReason::Explosion, ownerPlayerId);
+                        const bool enemyDefense = block->teamId >= 0 && block->teamId != ownerTeamId;
+                        if (BreakWorldBlock(pos, ownerTeamId, BlockDeltaReason::Explosion, ownerPlayerId)
+                            && enemyDefense)
+                        {
+                            RecordAutomatchDefenseBlockDestroyed(ownerPlayerId, blockPolicy);
+                        }
                     }
                 }
             }
@@ -1401,6 +1441,13 @@ void Game::DetonateAt(Vector3 position, int ownerTeamId, int ownerPlayerId, floa
         }
         const float distance = std::sqrt(DistanceSquared(player.GetPosition(), position));
         if (distance > radius + 0.7f)
+        {
+            continue;
+        }
+        // Spawn protection covers the whole explosion outcome: Damage already
+        // ignores it, and the impulse must not throw an invulnerable player into
+        // the void either.
+        if (player.IsInvulnerable())
         {
             continue;
         }

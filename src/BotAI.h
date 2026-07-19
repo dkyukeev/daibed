@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 enum class BotState
 {
@@ -24,6 +25,18 @@ enum class BotRole
     Rusher,
     Collector,
     Fighter
+};
+
+enum class BotArchetype : std::uint8_t
+{
+    CautiousDefender,
+    AggressiveRusher,
+    FrugalBuilder,
+    IsolationHunter,
+    TeamHelper,
+    ImpulsiveDuelist,
+    Engineer,
+    Opportunist
 };
 
 enum class BotIntent
@@ -70,6 +83,15 @@ struct StrategicPlan
     int targetTeamId = -1;
     bool committed = false;
     std::string reason;
+    // A plan is a small task chain, not a single tick-level choice.  Stages are
+    // intentionally generic so economy/defense/assault plans share the same
+    // bounded state machine: prepare -> travel -> execute -> disengage.
+    int stage = 0;
+    int stageCount = 1;
+    float expectedValue = 0.0f;
+    float allowedRisk = 0.5f;
+    float minimumCommitSeconds = 0.0f;
+    int sequence = 0;
 };
 
 struct BotRoleTuning
@@ -90,6 +112,7 @@ struct BotRoleTuning
 
 struct BotTuningGenome
 {
+    int schemaVersion = 2;
     std::string id = "default";
     int generation = 0;
     float fitness = 0.0f;
@@ -125,6 +148,16 @@ struct BotTuningGenome
     float pressurePhaseSeconds = 42.0f;
     float latePressureSeconds = 120.0f;
     float allInSeconds = 185.0f;
+
+    // Navigation genes are consumed by the same authoritative navigation
+    // profile in normal matches, automatch and the headless genetic trainer.
+    float navigationRunupDistanceBlocks = 0.55f;
+    float navigationTakeoffDelaySeconds = 0.052f;
+    float navigationTakeoffEdgeOffsetBlocks = 0.30f;
+    float navigationTakeoffGapScale = 0.116f;
+    float navigationAirControlScale = 0.76f;
+    float navigationLandingCorrectionGain = 0.84f;
+    float navigationFallRiskPenalty = 0.50f;
 };
 
 BotTuningGenome DefaultBotTuningGenome();
@@ -151,18 +184,131 @@ struct TeamCoordinationEntry
 struct TeamCoordinationBus
 {
     static constexpr int MaxEntries = 8;
+    static constexpr int MaxOpenedRoutes = 16;
 
     std::array<TeamCoordinationEntry, MaxEntries> entries {};
     int count = 0;
+    int pressureTeamId = -1;
+    int reserveDefenderId = -1;
+    int assistActorId = -1;
+    Vector3 sharedAttackRoute {};
+    Vector3 weakDefensePoint {};
+    float pressureTimestamp = -1000.0f;
+    float defenseRequestTimestamp = -1000.0f;
+    int emergencyPrimaryDefenderId = -1;
+    int emergencySecondaryDefenderId = -1;
+    float emergencyDefenderAssignmentUntil = -1000.0f;
+    int bridgeBuilderId = -1;
+    std::uint64_t bridgeRouteSignature = 0;
+    float bridgeReservationUntil = -1000.0f;
+    float bridgeLastProgressTimestamp = -1000.0f;
+    Vector3 bridgeLastProgressPosition {};
+    int bridgeLastProgressBlocks = -1;
+    // A local path can end at a short void gap even when the authored route
+    // graph has no bridge segment there.  Keep one concrete request per team
+    // so a stranded bot can hand the build to an ally with blocks.
+    int bridgeRequestorId = -1;
+    int bridgeRequestBuilderId = -1;
+    BotIntent bridgeRequestIntent = BotIntent::SecureResources;
+    Vector3 bridgeRequestTarget {};
+    int bridgeRequestTargetTeamId = -1;
+    float bridgeRequestTimestamp = -1000.0f;
+    float bridgeRequestReservationUntil = -1000.0f;
+    // One stable cleanup assignment lets the team finish a Core-less opponent
+    // without pulling every attacker away from the remaining live Cores.
+    int cleanupHunterId = -1;
+    int cleanupTargetTeamId = -1;
+    Vector3 cleanupLastKnownPosition {};
+    float cleanupLastSeenTimestamp = -1000.0f;
+    std::array<std::uint64_t, MaxOpenedRoutes> openedRouteSignatures {};
+    std::array<float, MaxOpenedRoutes> routeOpenedTimestamps {};
+    int openedRouteWriteIndex = 0;
 
     void Clear()
     {
         entries = {};
         count = 0;
+        pressureTeamId = -1;
+        reserveDefenderId = -1;
+        assistActorId = -1;
+        sharedAttackRoute = {};
+        weakDefensePoint = {};
+        pressureTimestamp = -1000.0f;
+        defenseRequestTimestamp = -1000.0f;
+        emergencyPrimaryDefenderId = -1;
+        emergencySecondaryDefenderId = -1;
+        emergencyDefenderAssignmentUntil = -1000.0f;
+        bridgeBuilderId = -1;
+        bridgeRouteSignature = 0;
+        bridgeReservationUntil = -1000.0f;
+        bridgeLastProgressTimestamp = -1000.0f;
+        bridgeLastProgressPosition = {};
+        bridgeLastProgressBlocks = -1;
+        bridgeRequestorId = -1;
+        bridgeRequestBuilderId = -1;
+        bridgeRequestIntent = BotIntent::SecureResources;
+        bridgeRequestTarget = {};
+        bridgeRequestTargetTeamId = -1;
+        bridgeRequestTimestamp = -1000.0f;
+        bridgeRequestReservationUntil = -1000.0f;
+        cleanupHunterId = -1;
+        cleanupTargetTeamId = -1;
+        cleanupLastKnownPosition = {};
+        cleanupLastSeenTimestamp = -1000.0f;
+        openedRouteSignatures = {};
+        routeOpenedTimestamps.fill(-1000.0f);
+        openedRouteWriteIndex = 0;
+    }
+
+    bool IsRouteOpened(std::uint64_t signature, float matchTime, float maxAge = 600.0f) const
+    {
+        if (signature == 0) return false;
+        for (int i = 0; i < MaxOpenedRoutes; ++i)
+        {
+            if (openedRouteSignatures[static_cast<std::size_t>(i)] == signature
+                && matchTime - routeOpenedTimestamps[static_cast<std::size_t>(i)] < maxAge)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void MarkRouteOpened(std::uint64_t signature, float matchTime)
+    {
+        if (signature == 0) return;
+        for (int i = 0; i < MaxOpenedRoutes; ++i)
+        {
+            if (openedRouteSignatures[static_cast<std::size_t>(i)] == signature)
+            {
+                routeOpenedTimestamps[static_cast<std::size_t>(i)] = matchTime;
+                return;
+            }
+        }
+        const std::size_t slot = static_cast<std::size_t>(openedRouteWriteIndex);
+        openedRouteSignatures[slot] = signature;
+        routeOpenedTimestamps[slot] = matchTime;
+        openedRouteWriteIndex = (openedRouteWriteIndex + 1) % MaxOpenedRoutes;
     }
 
     void Broadcast(int playerId, CoordinationSignal signal, Vector3 target, float matchTime, int targetTeamId = -1)
     {
+        if (signal == CoordinationSignal::AttackingCore || signal == CoordinationSignal::BuildingBridge)
+        {
+            pressureTeamId = targetTeamId;
+            assistActorId = playerId;
+            sharedAttackRoute = target;
+            pressureTimestamp = matchTime;
+        }
+        else if (signal == CoordinationSignal::CallingForHelp)
+        {
+            defenseRequestTimestamp = matchTime;
+        }
+        else if (signal == CoordinationSignal::DefendingCore
+            && (reserveDefenderId < 0 || playerId < reserveDefenderId))
+        {
+            reserveDefenderId = playerId;
+        }
         for (int i = 0; i < count; ++i)
         {
             if (entries[i].playerId == playerId)
@@ -181,6 +327,7 @@ struct TeamCoordinationBus
     void Prune(float matchTime, float maxAge)
     {
         int write = 0;
+        reserveDefenderId = -1;
         for (int read = 0; read < count; ++read)
         {
             if (entries[read].signal == CoordinationSignal::None
@@ -189,12 +336,36 @@ struct TeamCoordinationBus
                 continue;
             }
             entries[write++] = entries[read];
+            if (entries[read].signal == CoordinationSignal::DefendingCore
+                && (reserveDefenderId < 0 || entries[read].playerId < reserveDefenderId))
+            {
+                reserveDefenderId = entries[read].playerId;
+            }
         }
         for (int i = write; i < count; ++i)
         {
             entries[i] = TeamCoordinationEntry {};
         }
         count = write;
+        if (matchTime - pressureTimestamp > maxAge * 2.0f)
+        {
+            pressureTeamId = -1;
+            assistActorId = -1;
+        }
+        if (matchTime - defenseRequestTimestamp > maxAge * 2.0f)
+        {
+            defenseRequestTimestamp = -1000.0f;
+        }
+        if (matchTime - bridgeRequestTimestamp > 7.0f)
+        {
+            bridgeRequestorId = -1;
+            bridgeRequestBuilderId = -1;
+            bridgeRequestIntent = BotIntent::SecureResources;
+            bridgeRequestTarget = {};
+            bridgeRequestTargetTeamId = -1;
+            bridgeRequestTimestamp = -1000.0f;
+            bridgeRequestReservationUntil = -1000.0f;
+        }
     }
 
     int CountSignal(
@@ -238,17 +409,76 @@ struct BotMemory
     float intentScore = 0.0f;
     std::string intentReason;
     std::string roleReason;
+    BotArchetype archetype = BotArchetype::TeamHelper;
+    std::uint32_t personalitySeed = 0;
+    float aggressionTrait = 0.5f;
+    float cautionTrait = 0.5f;
+    float economyTrait = 0.5f;
+    float teamworkTrait = 0.5f;
+    float creativityTrait = 0.5f;
+    float planPatienceTrait = 0.5f;
     GridPos breakTarget {};
     bool hasBreakTarget = false;
     float breakProgress = 0.0f;
     Vector3 lastSeenEnemyPosition {};
     bool hasLastSeenEnemy = false;
+    // Freshness of lastSeenEnemyPosition (seconds since last actually seen via
+    // LOS); decays each tick, clears hasLastSeenEnemy at 0. Gates the firing
+    // perch so a bot only towers up to peek at an enemy it genuinely saw
+    // recently duck behind cover — no wallhack.
+    float lastSeenEnemyTimer = 0.0f;
+    // Firing-perch (creative building): blocks stacked so far in the current
+    // tower-up, and a per-placement rate limiter.
+    int perchBlocksPlaced = 0;
+    float perchCooldown = 0.0f;
     Vector3 bridgeTarget {};
     bool hasBridgeTarget = false;
     Vector3 navTarget {};
     Vector3 navWaypoint {};
     bool hasNavWaypoint = false;
     float navTimer = 0.0f;
+    // Semantic destination selected by the decision layer, before A* turns it
+    // into short local waypoints. Automatch uses this to distinguish genuine
+    // progress toward an objective from movement around the same obstacle.
+    Vector3 objectiveTarget {};
+    bool hasObjectiveTarget = false;
+    Vector3 authoredRouteObjective {};
+    bool hasAuthoredRouteObjective = false;
+    bool usingAuthoredRoute = false;
+    int authoredRouteIndex = 0;
+    int authoredRouteMarkerCount = 0;
+    int authoredRouteMarkerKind = -1;
+    int authoredRouteAdvances = 0;
+    Vector3 authoredRouteLastAdvancePosition {};
+    bool hasAuthoredRouteLastAdvancePosition = false;
+    // Stable coarse portal sequence selected from the map RouteGraph. Local
+    // action paths may be exhausted/rebuilt without discarding this corridor.
+    std::vector<int> routeCorridorNodes;
+    std::vector<int> routeCorridorTraversal;
+    std::vector<int> routeCorridorBridgeBlocks;
+    int routeCorridorIndex = 0;
+    Vector3 routeCorridorObjective {};
+    bool hasRouteCorridorObjective = false;
+    bool usingRouteCorridor = false;
+    std::uint64_t routeCorridorSignature = 0;
+    float routeCorridorReplanCooldown = 0.0f;
+    int routeCorridorAdvances = 0;
+    Vector3 routeCorridorLastAdvancePosition {};
+    bool hasRouteCorridorLastAdvancePosition = false;
+    bool routeCorridorBridgeSegment = false;
+    int routeCorridorExpectedBridgeBlocks = 0;
+    bool routeCorridorBridgeStarted = false;
+    std::uint64_t routeCorridorActiveBridgeSignature = 0;
+    bool routeCorridorWaitingForBuilder = false;
+    float routeCorridorLastProgressTimestamp = -1000.0f;
+    Vector3 routeCorridorProgressPosition {};
+    int routeCorridorProgressIndex = -1;
+    float routeCorridorProgressDistanceSq = 0.0f;
+    // Hard floor between full path searches. The waypoint cache alone is not
+    // enough: a bot standing NEAR its waypoint (arrived / fighting / mining)
+    // bypassed it and re-ran the full A* every tick — 60 searches per second
+    // per bot, the main interactive frame-rate killer.
+    float pathReplanCooldown = 0.0f;
     int lastAttackedCoreTeamId = -1;
     int carriedResourceValue = 0;
     float retreatTimer = 0.0f;
@@ -263,6 +493,27 @@ struct BotMemory
     float defenseCheckTimer = 0.0f;
     float strategicUpdateTimer = 0.0f;
     StrategicPlan currentPlan {};
+    float abandonedPlanCooldown = 0.0f;
+    int abandonedPlanTargetTeamId = -1;
+    int planStarts = 0;
+    int planStageAdvances = 0;
+    int planCompletions = 0;
+    int planCancellations = 0;
+    int planExpiryCancellations = 0;
+    int planEvidenceCancellations = 0;
+    int planRouteFailureCancellations = 0;
+    int planVoidCancellations = 0;
+    float totalPlanHoldSeconds = 0.0f;
+    std::string lastPlanOutcome;
+    int assaultProgressTargetTeamId = -1;
+    float assaultNoProgressTimer = 0.0f;
+    float assaultLastDistance = 0.0f;
+    int assaultLastCorridorAdvances = 0;
+    int assaultLastCoreHealth = -1;
+    int assaultLastBlocks = -1;
+    int assaultLastResourceValue = -1;
+    bool hasAssaultProgressSample = false;
+    bool cleanupBridgeKitReady = false;
     bool coreDefenseCritical = false;
     int missingDefenseBlocks = 0;
     Vector3 lastPosition {};
@@ -275,6 +526,13 @@ struct BotMemory
     float heroAbilityTimer = 0.0f;
     float repairPlaceCooldown = 0.0f;
     float reactionDelayTimer = 0.0f;
+    // Perception is a belief, not a live pointer.  A sighting becomes less
+    // trustworthy over time and never follows an unseen target through walls.
+    int rememberedEnemyId = -1;
+    Vector3 rememberedEnemyVelocity {};
+    float enemyMemoryConfidence = 0.0f;
+    float perceptionAcquireTimer = 0.0f;
+    int pendingPerceptionEnemyId = -1;
     float resourcePlanTimer = 0.0f;
     Vector3 cachedResourceTarget {};
     int cachedResourceType = 0;
@@ -283,10 +541,27 @@ struct BotMemory
     int tacticalEnemyCoreTeamId = -1;
     bool cachedCanBreakDefense = false;
     bool cachedCoreCanUpgrade = false;
+    // Stable route failure memory.  Repeated deaths near the same point make
+    // the bot conserve blocks and avoid another immediate greedy push.
+    Vector3 lastRouteFailurePosition {};
+    bool hasLastRouteFailure = false;
+    int repeatedRouteFailures = 0;
+    float routeFailureCooldown = 0.0f;
+    float bridgeHelpRequestCooldown = 0.0f;
+    bool waitingForBridgeHelp = false;
+    bool assignedBridgeAssist = false;
+    float pendingVoidEscapeTimer = 0.0f;
+    Vector3 pendingVoidEscapePosition {};
+    int lastDeathCarriedValue = 0;
+    int lastKillerId = -1;
+    int recentCoreAttackerId = -1;
+    Vector3 recentCoreAttackOrigin {};
+    float recentCoreAttackTimer = 0.0f;
 };
 
 const char* ToString(BotState state);
 const char* ToString(BotRole role);
+const char* ToString(BotArchetype archetype);
 const char* ToString(BotIntent intent);
 const char* ToString(CoordinationSignal signal);
 const char* ToString(StrategicGoal goal);

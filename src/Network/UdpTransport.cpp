@@ -2310,6 +2310,9 @@ float ClientTransport::SnapshotAgeSeconds() const
 bool NetworkTransportAvailable() { return true; }
 
 // ============================== Smoke =======================================
+// Lives with the transport internals it exercises, so it is gated in place
+// (the Game-level smokes live in src/Diag/Smokes.cpp).
+#if DAIBED_DIAGNOSTICS
 namespace
 {
 MatchSnapshot MakeServerSnapshot(std::uint32_t tick)
@@ -2486,6 +2489,13 @@ int RunLocalhostNetSmoke(const ServerConfig& config)
     std::cout << (ok ? "LOCALHOST_NET_SMOKE_OK" : "LOCALHOST_NET_SMOKE_FAIL") << std::endl;
     return ok ? 0 : 8;
 }
+#else // DAIBED_DIAGNOSTICS == 0
+int RunLocalhostNetSmoke(const ServerConfig&)
+{
+    std::cout << "diagnostics are disabled in this build (DAIBED_DIAGNOSTICS=OFF)" << std::endl;
+    return 100;
+}
+#endif // DAIBED_DIAGNOSTICS
 
 #else // DAIBED_HAVE_NETWORK
 

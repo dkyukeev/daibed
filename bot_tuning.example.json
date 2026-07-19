@@ -1,4 +1,5 @@
 {
+  "schemaVersion": 2,
   "id": "default",
   "generation": 0,
   "fitness": 0,
@@ -80,5 +81,12 @@
   "earlyEconomySeconds": 40,
   "pressurePhaseSeconds": 42,
   "latePressureSeconds": 120,
-  "allInSeconds": 185
+  "allInSeconds": 185,
+  "navigation.runupDistanceBlocks": 0.55,
+  "navigation.takeoffDelaySeconds": 0.052,
+  "navigation.takeoffEdgeOffsetBlocks": 0.3,
+  "navigation.takeoffGapScale": 0.116,
+  "navigation.airControlScale": 0.76,
+  "navigation.landingCorrectionGain": 0.84,
+  "navigation.fallRiskPenalty": 0.5
 }

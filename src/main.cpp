@@ -97,6 +97,19 @@ std::optional<BotDifficulty> ParseDifficulty(const std::string& value)
     return std::nullopt;
 }
 
+std::optional<BotStrategyProfile> ParseBotStrategy(const std::string& value)
+{
+    if (value == "standard" || value == "default")
+    {
+        return BotStrategyProfile::Standard;
+    }
+    if (value == "hypixel" || value == "hypixel-rush" || value == "rush")
+    {
+        return BotStrategyProfile::HypixelRush;
+    }
+    return std::nullopt;
+}
+
 std::string LowerAscii(std::string value)
 {
     std::transform(
@@ -166,6 +179,7 @@ int main(int argc, char** argv)
     {
         bool cliAutomatch = false;
         bool cliAutomatchWorker = false;
+        bool cliBotTrainer = false;
         bool cliProfile = false;
         bool cliDevKeyboard = false;
         bool cliCrashTest = false;
@@ -181,10 +195,16 @@ int main(int argc, char** argv)
         bool cliNetworkClientUiSmoke = false;
         bool cliNetworkActionsSmoke = false;
         bool cliLagCompSmoke = false;
+        bool cliCreativeSmoke = false;
+        bool cliUiScreenshot = false;
+        bool cliMapReview = false;
+        bool cliFrameProfile = false;
         bool cliNetworkRangedSmoke = false;
         bool cliMovementParitySmoke = false;
         bool cliClientDynamicApplySmoke = false;
         bool cliIntegratedServerSmoke = false;
+        bool cliNavigationSmoke = false;
+        bool cliBotAISmoke = false;
         double cliServerSeconds = 0.0; // 0 == run until interrupted
         bool cliServer = false;
         bool cliHost = false;
@@ -199,6 +219,9 @@ int main(int argc, char** argv)
         int cliRuns = 3;
         int cliSpeed = 16;
         int cliMinutes = 10;
+        int cliTrainerGenerations = 20;
+        int cliTrainerPopulation = 24;
+        std::string cliTrainerOutput = "bot_tuning.trained.json";
         unsigned int cliSeed = 0;
         std::optional<ArenaBiome> cliBiome;
         std::optional<MatchMode> cliMode;
@@ -206,8 +229,11 @@ int main(int argc, char** argv)
         std::optional<ArenaLayout> cliLayout;
         bool cliPublicRequested = false;
         std::optional<BotDifficulty> cliDifficulty;
+        std::optional<BotStrategyProfile> cliBotStrategy;
         std::string cliBotTuningPath;
         std::string cliStatsPath;
+        std::string cliMapPath;
+        std::string cliCreativeMapPath;
         for (int i = 1; i < argc; ++i)
         {
             const std::string arg = argv[i];
@@ -218,6 +244,35 @@ int main(int argc, char** argv)
             else if (arg == "--automatch-worker")
             {
                 cliAutomatchWorker = true;
+            }
+            else if (arg == "--train-bots")
+            {
+                cliBotTrainer = true;
+            }
+            else if (arg == "--generations" && i + 1 < argc)
+            {
+                cliTrainerGenerations = std::stoi(argv[++i]);
+            }
+            else if (arg == "--population" && i + 1 < argc)
+            {
+                cliTrainerPopulation = std::stoi(argv[++i]);
+            }
+            else if (arg == "--trainer-output" && i + 1 < argc)
+            {
+                cliTrainerOutput = argv[++i];
+            }
+            else if (arg == "--map" && i + 1 < argc)
+            {
+                // Custom map for --automatch: bots play a creative-made
+                // maps/*.dbmap document instead of the stock arena.
+                cliMapPath = argv[++i];
+            }
+            else if (arg == "--creative-map" && i + 1 < argc)
+            {
+                // Open any CreativeMapDocument straight in the editor.  The
+                // session saves back to this path, which makes built-in maps
+                // such as Castle Bedwars directly editable.
+                cliCreativeMapPath = argv[++i];
             }
             else if (arg == "--profile")
             {
@@ -279,6 +334,22 @@ int main(int argc, char** argv)
             {
                 cliLagCompSmoke = true;
             }
+            else if (arg == "--creative-smoke")
+            {
+                cliCreativeSmoke = true;
+            }
+            else if (arg == "--ui-screenshot")
+            {
+                cliUiScreenshot = true;
+            }
+            else if (arg == "--map-review")
+            {
+                cliMapReview = true;
+            }
+            else if (arg == "--frame-profile")
+            {
+                cliFrameProfile = true;
+            }
             else if (arg == "--network-ranged-smoke")
             {
                 cliNetworkRangedSmoke = true;
@@ -294,6 +365,14 @@ int main(int argc, char** argv)
             else if (arg == "--integrated-server-smoke")
             {
                 cliIntegratedServerSmoke = true;
+            }
+            else if (arg == "--navigation-smoke")
+            {
+                cliNavigationSmoke = true;
+            }
+            else if (arg == "--bot-ai-smoke")
+            {
+                cliBotAISmoke = true;
             }
             else if (arg == "--server-seconds" && i + 1 < argc)
             {
@@ -446,6 +525,10 @@ int main(int argc, char** argv)
             {
                 cliDifficulty = ParseDifficulty(argv[++i]);
             }
+            else if (arg == "--bot-strategy" && i + 1 < argc)
+            {
+                cliBotStrategy = ParseBotStrategy(LowerAscii(argv[++i]));
+            }
             else if (arg == "--bot-tuning" && i + 1 < argc)
             {
                 cliBotTuningPath = argv[++i];
@@ -487,13 +570,15 @@ int main(int argc, char** argv)
         // The connect path and --client-gui-smoke render with raylib, so they need
         // a real window (NOT headless). The headless server/automatch/smoke modes
         // run without one.
-        const bool headlessRun = cliAutomatch || cliAutomatchWorker
+        const bool headlessRun = cliAutomatch || cliAutomatchWorker || cliBotTrainer
             || cliNetworkSmoke || cliPurchaseSmoke || cliLoopbackSmoke || cliMpLoopbackSmoke
             || cliClientInputSmoke || cliNetworkClientUiSmoke
             || cliNetworkActionsSmoke || cliLagCompSmoke || cliNetworkRangedSmoke
             || cliMovementParitySmoke
             || cliClientDynamicApplySmoke
             || cliIntegratedServerSmoke
+            || cliNavigationSmoke
+            || cliBotAISmoke
             || cliServer || cliHost;
         if (!game.Initialize(headlessRun))
         {
@@ -521,6 +606,10 @@ int main(int argc, char** argv)
         {
             game.SetBotDifficulty(*cliDifficulty);
         }
+        if (cliBotStrategy.has_value())
+        {
+            game.SetBotStrategyProfile(*cliBotStrategy);
+        }
         if (!cliBotTuningPath.empty())
         {
             game.SetBotTuningPath(cliBotTuningPath);
@@ -532,6 +621,17 @@ int main(int argc, char** argv)
         game.SetProfilingEnabled(cliProfile);
         game.SetDevKeyboard(cliDevKeyboard);
         game.SetServerConfig(cliServerConfig);
+
+        if (cliBotTrainer)
+        {
+            if (cliSeed == 0) cliSeed = 0xD41BEDu;
+            CrashLogger::LogEvent("bot tuning trainer started");
+            const bool success = game.RunBotTuningTrainer(
+                cliTrainerGenerations, cliTrainerPopulation, cliSeed, cliTrainerOutput);
+            game.Shutdown();
+            CrashLogger::Shutdown();
+            return success ? 0 : 2;
+        }
 
         if (cliNetworkSmoke)
         {
@@ -575,6 +675,49 @@ int main(int argc, char** argv)
             // replicated match and verifies the client world is in sync.
             CrashLogger::LogEvent("client gui smoke started");
             const int rc = game.RunClientGuiSmoke();
+            game.Shutdown();
+            CrashLogger::Shutdown();
+            return rc;
+        }
+
+        if (cliCreativeSmoke)
+        {
+            // Windowed (creative uses the camera/cursor): enter the creative
+            // sandbox and verify the flag + palette + free placement + no win.
+            CrashLogger::LogEvent("creative smoke started");
+            const int rc = game.RunCreativeSmoke();
+            game.Shutdown();
+            CrashLogger::Shutdown();
+            return rc;
+        }
+
+        if (cliUiScreenshot)
+        {
+            // Windowed: renders the menu screens and saves ui_*.png for review.
+            CrashLogger::LogEvent("ui screenshot diag started");
+            const int rc = game.RunUiScreenshotDiag();
+            game.Shutdown();
+            CrashLogger::Shutdown();
+            return rc;
+        }
+
+        if (cliMapReview)
+        {
+            // Windowed: creative test-play of a map + castle-utility physics
+            // assertions + map_review_*.png shots for visual review.
+            CrashLogger::LogEvent("map review diag started");
+            const int rc = game.RunMapReviewDiag(
+                cliMapPath.empty() ? std::string("maps/castle_bedwars.dbmap") : cliMapPath);
+            game.Shutdown();
+            CrashLogger::Shutdown();
+            return rc;
+        }
+
+        if (cliFrameProfile)
+        {
+            // Windowed: real loop, prints slow frames (hitch attribution).
+            CrashLogger::LogEvent("frame profile diag started");
+            const int rc = game.RunFrameProfileDiag();
             game.Shutdown();
             CrashLogger::Shutdown();
             return rc;
@@ -662,6 +805,24 @@ int main(int argc, char** argv)
             return rc;
         }
 
+        if (cliNavigationSmoke)
+        {
+            CrashLogger::LogEvent("navigation smoke started");
+            const int rc = game.RunNavigationSmoke();
+            game.Shutdown();
+            CrashLogger::Shutdown();
+            return rc;
+        }
+
+        if (cliBotAISmoke)
+        {
+            CrashLogger::LogEvent("bot AI smoke started");
+            const int rc = game.RunBotAISmoke();
+            game.Shutdown();
+            CrashLogger::Shutdown();
+            return rc;
+        }
+
         if (cliHost)
         {
             // A host defaults to private unless the operator explicitly opted in
@@ -725,6 +886,17 @@ int main(int argc, char** argv)
 
         if (cliAutomatchWorker)
         {
+            if (!cliMapPath.empty())
+            {
+                std::string mapError;
+                if (!game.LoadAutomatchMapDocument(cliMapPath, &mapError))
+                {
+                    std::cout << "WORKER_ERROR\t?\tmap load failed: " << mapError << std::endl;
+                    game.Shutdown();
+                    CrashLogger::Shutdown();
+                    return 3;
+                }
+            }
             std::cout << "WORKER_READY" << std::endl;
             std::string line;
             while (std::getline(std::cin, line))
@@ -735,7 +907,7 @@ int main(int argc, char** argv)
                 }
 
                 const std::vector<std::string> fields = SplitWorkerCommand(line);
-                if (fields.size() != 7)
+                if (fields.size() != 7 && fields.size() != 8)
                 {
                     std::cout << "WORKER_ERROR\t?\tinvalid command" << std::endl;
                     continue;
@@ -750,6 +922,16 @@ int main(int argc, char** argv)
                     const unsigned int seed = static_cast<unsigned int>(std::stoul(fields[4]));
                     game.SetBotTuningPath(fields[5]);
                     game.SetAutomatchStatsPath(fields[6]);
+                    if (fields.size() == 8 && !fields[7].empty())
+                    {
+                        std::string mapError;
+                        if (!game.LoadAutomatchMapDocument(fields[7], &mapError))
+                        {
+                            std::cout << "WORKER_ERROR\t" << jobId
+                                      << "\tmap load failed: " << mapError << std::endl;
+                            continue;
+                        }
+                    }
                     const bool success = game.RunAutomatchBatch(runs, speed, minutes, seed);
                     std::cout << "WORKER_DONE\t" << jobId << '\t' << (success ? 1 : 0) << std::endl;
                 }
@@ -770,8 +952,20 @@ int main(int argc, char** argv)
                 cliSeed = static_cast<unsigned int>(
                     std::chrono::high_resolution_clock::now().time_since_epoch().count());
             }
+            if (!cliMapPath.empty())
+            {
+                std::string mapError;
+                if (!game.LoadAutomatchMapDocument(cliMapPath, &mapError))
+                {
+                    std::cout << "automatch map load failed: " << mapError << std::endl;
+                    game.Shutdown();
+                    CrashLogger::Shutdown();
+                    return 3;
+                }
+                std::cout << "automatch map: " << cliMapPath << '\n';
+            }
             // Print the full gameplay-relevant config: mode/team size/bot count/
-            // difficulty/layout/biome come from the mutable DaiBed.settings file
+            // difficulty/strategy/layout/biome come from the mutable DaiBed.settings file
             // unless pinned by CLI flags, so two runs with identical flags can
             // still simulate different matches. A baseline is only comparable
             // when this whole line matches (pin at least --difficulty).
@@ -781,6 +975,7 @@ int main(int argc, char** argv)
                       << " seed=" << cliSeed
                       << " mode=" << game.MatchModeName()
                       << " difficulty=" << game.BotDifficultyName()
+                      << " botStrategy=" << game.BotStrategyProfileName()
                       << " layout=" << game.ArenaLayoutName()
                       << " biome=" << game.ArenaBiomeName() << '\n';
             CrashLogger::LogEvent("automatch started");
@@ -807,6 +1002,19 @@ int main(int argc, char** argv)
             game.Shutdown();
             CrashLogger::Shutdown();
             return 0;
+        }
+
+        if (!cliCreativeMapPath.empty())
+        {
+            std::string mapError;
+            if (!game.LoadCreativeMapDocumentForEditor(cliCreativeMapPath, &mapError))
+            {
+                std::cout << "creative map load failed: " << mapError << std::endl;
+                game.Shutdown();
+                CrashLogger::Shutdown();
+                return 3;
+            }
+            std::cout << "creative map: " << cliCreativeMapPath << '\n';
         }
 
         while (!WindowShouldClose() && !game.ShouldClose())

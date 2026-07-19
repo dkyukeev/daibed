@@ -16,40 +16,71 @@ float DistanceSquared(Vector3 a, Vector3 b)
 
 const std::vector<ShopItem>& Items()
 {
-    static const std::vector<ShopItem> items {
-        ShopItem { 1, "Блоки", "Деревянные блоки", "32 дешевых строительных блока", ResourceType::Iron, 5, ResourceType::Iron, 0, false, 0 },
-        ShopItem { 2, "Блоки", "Легкие блоки", "24 быстрых блока для моста", ResourceType::Iron, 8, ResourceType::Iron, 0, false, 0 },
-        ShopItem { 3, "Блоки", "Каменные блоки", "12 защитных блоков, ломаются медленнее", ResourceType::Iron, 18, ResourceType::Gold, 1, true, 0 },
-        ShopItem { 4, "Блоки", "Обсидиан", "4 сверхпрочных блока для Кора", ResourceType::Gold, 8, ResourceType::Crystal, 3, true, 0 },
-        ShopItem { 5, "Блоки", "Энергостекло", "8 ярких ценных блоков", ResourceType::Gold, 4, ResourceType::Crystal, 1, true, 0 },
+    static const std::vector<ShopItem> catalog = []
+    {
+        std::vector<ShopItem> items {
+        ShopItem { 1, "Блоки", "Шерсть", "16 дешевых блоков для быстрых мостов", ResourceType::Iron, 4, ResourceType::Iron, 0, false, 0 },
+        ShopItem { 2, "Блоки", "Доски", "16 прочных деревянных блока; топор ломает их быстрее", ResourceType::Gold, 4, ResourceType::Iron, 0, false, 0 },
+        ShopItem { 3, "Блоки", "Каменные блоки", "16 защитных блоков, ломаются медленнее", ResourceType::Iron, 24, ResourceType::Iron, 0, false, 0 },
+        ShopItem { 4, "Блоки", "Обсидиан", "4 сверхпрочных блока для Кора", ResourceType::Crystal, 4, ResourceType::Iron, 0, false, 0 },
+        ShopItem { 5, "Блоки", "Энергостекло", "4 прозрачных защитных блока", ResourceType::Iron, 11, ResourceType::Iron, 0, false, 0 },
         ShopItem { 6, "Блоки", "Пружинные блоки", "4 прыжковые платформы", ResourceType::Gold, 3, ResourceType::Crystal, 1, true, 0 },
         ShopItem { 7, "Блоки", "Липкие блоки", "8 защитных блоков с замедлением", ResourceType::Iron, 14, ResourceType::Gold, 1, true, 0 },
-        ShopItem { 8, "Блоки", "Блок TNT", "1 взрывной блок с таймером", ResourceType::Gold, 5, ResourceType::Crystal, 1, true, 0 },
-        ShopItem { 101, "Бой", "Уровень клинка", "урон, дальность и отбрасывание", ResourceType::Gold, 6, ResourceType::Iron, 0, false, 3 },
-        ShopItem { 102, "Бой", "Уровень кирки", "быстрее ломает блоки и Кор", ResourceType::Iron, 8, ResourceType::Crystal, 1, true, 3 },
-        ShopItem { 103, "Бой", "Уровень брони", "уменьшает урон в ближнем бою", ResourceType::Gold, 5, ResourceType::Crystal, 2, true, 3 },
-        ShopItem { 104, "Бой", "Энергострелы", "6 тактических выстрелов", ResourceType::Iron, 12, ResourceType::Gold, 1, true, 0 },
-        ShopItem { 105, "Бой", "Фаербол", "снаряд для разрушения мостов", ResourceType::Gold, 4, ResourceType::Crystal, 1, true, 0 },
+        ShopItem { 8, "Блоки", "Блок TNT", "1 взрывной блок с таймером", ResourceType::Gold, 8, ResourceType::Iron, 0, false, 0 },
+        ShopItem { 101, "Бой", "Уровень клинка", "урон, дальность и отбрасывание", ResourceType::Iron, 10, ResourceType::Iron, 0, false, 3 },
+        ShopItem { 102, "Бой", "Уровень кирки", "быстрее ломает блоки и Кор", ResourceType::Iron, 10, ResourceType::Iron, 0, false, 3 },
+        ShopItem { 103, "Бой", "Уровень брони", "уменьшает урон в ближнем бою", ResourceType::Iron, 40, ResourceType::Iron, 0, false, 3 },
+        ShopItem { 104, "Бой", "Энергострелы", "8 тактических выстрелов", ResourceType::Gold, 2, ResourceType::Iron, 0, false, 0 },
+        ShopItem { 105, "Бой", "Фаербол", "снаряд для разрушения мостов", ResourceType::Iron, 40, ResourceType::Iron, 0, false, 0 },
         ShopItem { 106, "Бой", "Боевой топор", "широкий тяжелый удар в ближнем бою", ResourceType::Gold, 5, ResourceType::Iron, 0, false, 0 },
         ShopItem { 107, "Бой", "Копье", "длинная дистанция в ближнем бою", ResourceType::Gold, 4, ResourceType::Crystal, 1, true, 0 },
-        ShopItem { 108, "Бой", "Лук", "натяжение ЛКМ, расходует стрелы", ResourceType::Gold, 4, ResourceType::Iron, 12, true, 0 },
+        ShopItem { 108, "Бой", "Лук", "натяжение ЛКМ, расходует стрелы", ResourceType::Gold, 12, ResourceType::Iron, 0, false, 0 },
         ShopItem { 109, "Бой", "Улучшение лука", "I: Сила I · II: Сила I/Отдача I · III: Сила II/Отдача II", ResourceType::Gold, 5, ResourceType::Crystal, 1, true, 3 },
         ShopItem { 401, "Бластер", "Бластер", "заряжаемый дальнобойный бластер", ResourceType::Gold, 8, ResourceType::Crystal, 2, true, 0 },
         ShopItem { 402, "Бластер", "Ускоренная зарядка", "ветка скорострельности, уровни I-III", ResourceType::Gold, 5, ResourceType::Crystal, 1, true, 3 },
         ShopItem { 403, "Бластер", "Усиленный выстрел", "ветка урона, уровни I-III", ResourceType::Gold, 6, ResourceType::Crystal, 1, true, 3 },
-        ShopItem { 201, "Утилиты", "Рывок мобильности", "18 с скорости и усиленного прыжка", ResourceType::Gold, 3, ResourceType::Crystal, 1, true, 0 },
+        ShopItem { 201, "Утилиты", "Рывок мобильности", "18 с скорости и усиленного прыжка", ResourceType::Crystal, 1, ResourceType::Iron, 0, false, 0 },
         ShopItem { 202, "Утилиты", "Импульс щита", "12 с защиты от входящего урона", ResourceType::Crystal, 3, ResourceType::Iron, 0, false, 0 },
         ShopItem { 203, "Утилиты", "Аптечка", "мгновенный заряд лечения", ResourceType::Gold, 2, ResourceType::Iron, 0, false, 0 },
         ShopItem { 204, "Утилиты", "Телепорт домой", "возврат на вашу точку спавна", ResourceType::Crystal, 2, ResourceType::Gold, 2, true, 0 },
-        ShopItem { 205, "Утилиты", "Жемчуг рывка", "быстрый рывок вперед", ResourceType::Crystal, 2, ResourceType::Gold, 1, true, 0 },
+        ShopItem { 205, "Утилиты", "Жемчуг рывка", "быстрый рывок вперед", ResourceType::Crystal, 4, ResourceType::Iron, 0, false, 0 },
         ShopItem { 206, "Утилиты", "Коктейль Молотова", "временная зона огня", ResourceType::Gold, 5, ResourceType::Crystal, 1, true, 0 },
         ShopItem { 207, "Утилиты", "Сигнальная ловушка", "сигнал на базе и разряд по врагу", ResourceType::Iron, 12, ResourceType::Gold, 1, true, 0 },
-        ShopItem { 301, "Команда", "Командная кузня", "командные генераторы дают больше", ResourceType::Crystal, 4, ResourceType::Gold, 2, true, 4 },
+        ShopItem { 301, "Команда", "Командная кузня", "I–IV: генерация +8/16/24/32%; IV иногда создаёт кристалл", ResourceType::Crystal, 4, ResourceType::Gold, 2, true, 4 },
         ShopItem { 302, "Команда", "Аура лечения", "сильнее лечит в зоне магазина", ResourceType::Crystal, 3, ResourceType::Gold, 3, true, 3 },
         ShopItem { 303, "Команда", "Ремонт Кора", "восстановить 30 здоровья Кора", ResourceType::Crystal, 2, ResourceType::Gold, 3, true, 0 },
         ShopItem { 304, "Команда", "Трекер врага", "показывает компас к ближайшему врагу", ResourceType::Crystal, 3, ResourceType::Gold, 3, true, 1 }
-    };
-    return items;
+        };
+        for (ShopItem& item : items)
+        {
+            switch (item.choice)
+            {
+            case 1: item.aiTags = ShopTagBridge; item.grantCount = 16; item.usageMode = ShopUsageMode::Placeable; break;
+            case 2: item.aiTags = ShopTagBridge | ShopTagDefense; item.grantCount = 16; item.usageMode = ShopUsageMode::Placeable; break;
+            case 3: case 4: case 5: case 7: item.aiTags = ShopTagDefense; item.grantCount = item.choice == 3 ? 16 : (item.choice == 4 || item.choice == 5 ? 4 : 8); item.usageMode = ShopUsageMode::Placeable; break;
+            case 6: item.aiTags = ShopTagBridge | ShopTagMobility; item.grantCount = 4; item.usageMode = ShopUsageMode::Placeable; break;
+            case 8: item.aiTags = ShopTagBreach; item.usageMode = ShopUsageMode::Placeable; break;
+            case 101: item.aiTags = ShopTagMelee | ShopTagUpgrade; item.usageMode = ShopUsageMode::Upgrade; break;
+            case 102: item.aiTags = ShopTagBreach | ShopTagUpgrade; item.usageMode = ShopUsageMode::Upgrade; break;
+            case 103: item.aiTags = ShopTagSustain | ShopTagUpgrade; item.usageMode = ShopUsageMode::Upgrade; break;
+            case 104: item.aiTags = ShopTagRanged; item.grantCount = 8; break;
+            case 105: case 206: item.aiTags = ShopTagBreach | ShopTagRanged; break;
+            case 106: case 107: item.aiTags = ShopTagMelee; item.usageMode = ShopUsageMode::Equipment; break;
+            case 108: item.aiTags = ShopTagRanged; item.usageMode = ShopUsageMode::Equipment; break;
+            case 109: case 402: case 403: item.aiTags = ShopTagRanged | ShopTagUpgrade; item.usageMode = ShopUsageMode::Upgrade; break;
+            case 401: item.aiTags = ShopTagRanged; item.usageMode = ShopUsageMode::Equipment; break;
+            case 201: case 202: item.aiTags = item.choice == 201 ? ShopTagMobility : ShopTagSustain; item.usageMode = ShopUsageMode::TimedEffect; break;
+            case 203: item.aiTags = ShopTagSustain; break;
+            case 204: case 205: item.aiTags = ShopTagMobility; break;
+            case 207: item.aiTags = ShopTagDefense; break;
+            case 301: case 302: case 304: item.aiTags = ShopTagTeam | ShopTagUpgrade; item.usageMode = ShopUsageMode::TeamEffect; break;
+            case 303: item.aiTags = ShopTagTeam | ShopTagSustain; item.usageMode = ShopUsageMode::TeamEffect; break;
+            default: break;
+            }
+        }
+        return items;
+    }();
+    return catalog;
 }
 
 const char* CategoryName(int categoryIndex)
@@ -106,27 +137,28 @@ bool Shop::IsPlayerInShop(const Player& player, const Team& team) const
 bool Shop::Purchase(Player& player, Team& team, int choice, std::string& message) const
 {
     Inventory& inventory = player.GetInventory();
-    const ShopItem* item = FindItem(choice);
-    if (item == nullptr)
+    const ShopItem* catalogItem = FindItem(choice);
+    if (catalogItem == nullptr)
     {
         return false;
     }
+    const ShopItem item = GetItemForInventory(inventory, *catalogItem);
 
-    const auto spendCost = [&inventory, item]() -> bool
+    const auto spendCost = [&inventory, &item]() -> bool
     {
-        if (inventory.GetResource(item->primaryType) < item->primaryCost)
+        if (inventory.GetResource(item.primaryType) < item.primaryCost)
         {
             return false;
         }
-        if (item->hasSecondaryCost && inventory.GetResource(item->secondaryType) < item->secondaryCost)
+        if (item.hasSecondaryCost && inventory.GetResource(item.secondaryType) < item.secondaryCost)
         {
             return false;
         }
 
-        inventory.SpendResource(item->primaryType, item->primaryCost);
-        if (item->hasSecondaryCost)
+        inventory.SpendResource(item.primaryType, item.primaryCost);
+        if (item.hasSecondaryCost)
         {
-            inventory.SpendResource(item->secondaryType, item->secondaryCost);
+            inventory.SpendResource(item.secondaryType, item.secondaryCost);
         }
         return true;
     };
@@ -136,37 +168,37 @@ bool Shop::Purchase(Player& player, Team& team, int choice, std::string& message
     case 1:
         if (!spendCost())
         {
-            message = "Нужно " + CostText(*item) + " для деревянных блоков.";
+            message = "Нужно " + CostText(item) + " для шерсти.";
             return false;
         }
-        inventory.AddBlock(BlockType::WoodBlock, 32);
-        message = "Куплено 32 деревянных блока.";
+        inventory.AddBlock(BlockType::WoolBlock, 16);
+        message = "Куплено 16 блоков шерсти.";
         return true;
 
     case 2:
         if (!spendCost())
         {
-            message = "Нужно " + CostText(*item) + " для легких блоков.";
+            message = "Нужно " + CostText(item) + " для досок.";
             return false;
         }
-        inventory.AddBlock(BlockType::WoolBlock, 24);
-        message = "Куплено 24 легких блока.";
+        inventory.AddBlock(BlockType::WoodBlock, 16);
+        message = "Куплено 16 блоков досок.";
         return true;
 
     case 3:
         if (!spendCost())
         {
-            message = "Нужно " + CostText(*item) + " для каменных блоков.";
+            message = "Нужно " + CostText(item) + " для каменных блоков.";
             return false;
         }
-        inventory.AddBlock(BlockType::StoneBlock, 12);
-        message = "Куплено 12 каменных блоков.";
+        inventory.AddBlock(BlockType::StoneBlock, 16);
+        message = "Куплено 16 каменных блоков.";
         return true;
 
     case 4:
         if (!spendCost())
         {
-            message = "Нужно " + CostText(*item) + " для обсидиана.";
+            message = "Нужно " + CostText(item) + " для обсидиана.";
             return false;
         }
         inventory.AddBlock(BlockType::ObsidianBlock, 4);
@@ -176,17 +208,17 @@ bool Shop::Purchase(Player& player, Team& team, int choice, std::string& message
     case 5:
         if (!spendCost())
         {
-            message = "Нужно " + CostText(*item) + " для энергостекла.";
+            message = "Нужно " + CostText(item) + " для энергостекла.";
             return false;
         }
-        inventory.AddBlock(BlockType::EnergyGlassBlock, 8);
-        message = "Куплено 8 блоков энергостекла.";
+        inventory.AddBlock(BlockType::EnergyGlassBlock, 4);
+        message = "Куплено 4 блока энергостекла.";
         return true;
 
     case 6:
         if (!spendCost())
         {
-            message = "Нужно " + CostText(*item) + " для пружинных блоков.";
+            message = "Нужно " + CostText(item) + " для пружинных блоков.";
             return false;
         }
         inventory.AddBlock(BlockType::SpringBlock, 4);
@@ -196,7 +228,7 @@ bool Shop::Purchase(Player& player, Team& team, int choice, std::string& message
     case 7:
         if (!spendCost())
         {
-            message = "Нужно " + CostText(*item) + " для липких блоков.";
+            message = "Нужно " + CostText(item) + " для липких блоков.";
             return false;
         }
         inventory.AddBlock(BlockType::StickyBlock, 8);
@@ -206,7 +238,7 @@ bool Shop::Purchase(Player& player, Team& team, int choice, std::string& message
     case 8:
         if (!spendCost())
         {
-            message = "Нужно " + CostText(*item) + " для TNT.";
+            message = "Нужно " + CostText(item) + " для TNT.";
             return false;
         }
         inventory.AddBlock(BlockType::ExplosiveBlock, 1);
@@ -214,14 +246,14 @@ bool Shop::Purchase(Player& player, Team& team, int choice, std::string& message
         return true;
 
     case 101:
-        if (inventory.GetSwordLevel() >= item->maxLevel)
+        if (inventory.GetSwordLevel() >= item.maxLevel)
         {
             message = "Клинок уже максимального уровня.";
             return false;
         }
         if (!spendCost())
         {
-            message = "Нужно " + CostText(*item) + " для улучшения клинка.";
+            message = "Нужно " + CostText(item) + " для улучшения клинка.";
             return false;
         }
         inventory.UpgradeSword();
@@ -229,14 +261,14 @@ bool Shop::Purchase(Player& player, Team& team, int choice, std::string& message
         return true;
 
     case 102:
-        if (inventory.GetToolLevel() >= item->maxLevel)
+        if (inventory.GetToolLevel() >= item.maxLevel)
         {
             message = "Кирка уже максимального уровня.";
             return false;
         }
         if (!spendCost())
         {
-            message = "Нужно " + CostText(*item) + " для кирки.";
+            message = "Нужно " + CostText(item) + " для кирки.";
             return false;
         }
         inventory.UpgradeTool();
@@ -248,14 +280,14 @@ bool Shop::Purchase(Player& player, Team& team, int choice, std::string& message
         return true;
 
     case 103:
-        if (inventory.GetArmorLevel() >= item->maxLevel)
+        if (inventory.GetArmorLevel() >= item.maxLevel)
         {
             message = "Броня уже максимального уровня.";
             return false;
         }
         if (!spendCost())
         {
-            message = "Нужно " + CostText(*item) + " для брони.";
+            message = "Нужно " + CostText(item) + " для брони.";
             return false;
         }
         inventory.UpgradeArmor();
@@ -265,17 +297,17 @@ bool Shop::Purchase(Player& player, Team& team, int choice, std::string& message
     case 104:
         if (!spendCost())
         {
-            message = "Нужно " + CostText(*item) + " для стрел.";
+            message = "Нужно " + CostText(item) + " для стрел.";
             return false;
         }
-        inventory.AddUtility(UtilityType::Arrows, 6);
-        message = "Куплено 6 энергетических стрел.";
+        inventory.AddUtility(UtilityType::Arrows, 8);
+        message = "Куплено 8 энергетических стрел.";
         return true;
 
     case 105:
         if (!spendCost())
         {
-            message = "Нужно " + CostText(*item) + " для фаербола.";
+            message = "Нужно " + CostText(item) + " для фаербола.";
             return false;
         }
         inventory.AddUtility(UtilityType::Fireball, 1);
@@ -290,7 +322,7 @@ bool Shop::Purchase(Player& player, Team& team, int choice, std::string& message
         }
         if (!spendCost())
         {
-            message = "Нужно " + CostText(*item) + " для боевого топора.";
+            message = "Нужно " + CostText(item) + " для боевого топора.";
             return false;
         }
         inventory.AddItem(ItemType::Axe, 1);
@@ -305,7 +337,7 @@ bool Shop::Purchase(Player& player, Team& team, int choice, std::string& message
         }
         if (!spendCost())
         {
-            message = "Нужно " + CostText(*item) + " для копья.";
+            message = "Нужно " + CostText(item) + " для копья.";
             return false;
         }
         inventory.AddItem(ItemType::Spear, 1);
@@ -333,7 +365,7 @@ bool Shop::Purchase(Player& player, Team& team, int choice, std::string& message
             message = "Сначала купите лук.";
             return false;
         }
-        if (inventory.GetBowUpgradeLevel() >= item->maxLevel)
+        if (inventory.GetBowUpgradeLevel() >= item.maxLevel)
         {
             message = "Лук улучшен до максимума.";
             return false;
@@ -416,7 +448,7 @@ bool Shop::Purchase(Player& player, Team& team, int choice, std::string& message
     case 201:
         if (!spendCost())
         {
-            message = "Нужно " + CostText(*item) + " для рывка мобильности.";
+            message = "Нужно " + CostText(item) + " для рывка мобильности.";
             return false;
         }
         player.ActivateSpeedBoost(18.0f);
@@ -427,7 +459,7 @@ bool Shop::Purchase(Player& player, Team& team, int choice, std::string& message
     case 202:
         if (!spendCost())
         {
-            message = "Нужно " + CostText(*item) + " для щита.";
+            message = "Нужно " + CostText(item) + " для щита.";
             return false;
         }
         player.ActivateShield(12.0f);
@@ -437,7 +469,7 @@ bool Shop::Purchase(Player& player, Team& team, int choice, std::string& message
     case 203:
         if (!spendCost())
         {
-            message = "Нужно " + CostText(*item) + " для аптечки.";
+            message = "Нужно " + CostText(item) + " для аптечки.";
             return false;
         }
         inventory.AddUtility(UtilityType::Heal, 1);
@@ -447,7 +479,7 @@ bool Shop::Purchase(Player& player, Team& team, int choice, std::string& message
     case 204:
         if (!spendCost())
         {
-            message = "Нужно " + CostText(*item) + " для телепорта.";
+            message = "Нужно " + CostText(item) + " для телепорта.";
             return false;
         }
         inventory.AddUtility(UtilityType::HomeTeleport, 1);
@@ -457,7 +489,7 @@ bool Shop::Purchase(Player& player, Team& team, int choice, std::string& message
     case 205:
         if (!spendCost())
         {
-            message = "Нужно " + CostText(*item) + " для жемчуга рывка.";
+            message = "Нужно " + CostText(item) + " для жемчуга рывка.";
             return false;
         }
         inventory.AddUtility(UtilityType::Dash, 1);
@@ -467,7 +499,7 @@ bool Shop::Purchase(Player& player, Team& team, int choice, std::string& message
     case 206:
         if (!spendCost())
         {
-            message = "Нужно " + CostText(*item) + " для коктейля Молотова.";
+            message = "Нужно " + CostText(item) + " для коктейля Молотова.";
             return false;
         }
         inventory.AddUtility(UtilityType::Molotov, 1);
@@ -477,7 +509,7 @@ bool Shop::Purchase(Player& player, Team& team, int choice, std::string& message
     case 207:
         if (!spendCost())
         {
-            message = "Нужно " + CostText(*item) + " для сигнальной ловушки.";
+            message = "Нужно " + CostText(item) + " для сигнальной ловушки.";
             return false;
         }
         inventory.AddUtility(UtilityType::AlarmTrap, 1);
@@ -485,30 +517,32 @@ bool Shop::Purchase(Player& player, Team& team, int choice, std::string& message
         return true;
 
     case 301:
-        if (team.forgeLevel >= item->maxLevel)
+        if (team.forgeLevel >= item.maxLevel)
         {
             message = "Командная кузня уже максимального уровня.";
             return false;
         }
         if (!spendCost())
         {
-            message = "Нужно " + CostText(*item) + " для улучшения кузни.";
+            message = "Нужно " + CostText(item) + " для улучшения кузни.";
             return false;
         }
         ++team.forgeLevel;
         inventory.UpgradeTeam();
-        message = "Командная кузня улучшена.";
+        message = team.forgeLevel >= 4
+            ? "Кузня IV: генерация +32%, иногда появляется кристалл."
+            : "Кузня улучшена: скорость генерации +" + std::to_string(team.forgeLevel * 8) + "%.";
         return true;
 
     case 302:
-        if (team.healAuraLevel >= item->maxLevel)
+        if (team.healAuraLevel >= item.maxLevel)
         {
             message = "Аура лечения уже максимального уровня.";
             return false;
         }
         if (!spendCost())
         {
-            message = "Нужно " + CostText(*item) + " для ауры лечения.";
+            message = "Нужно " + CostText(item) + " для ауры лечения.";
             return false;
         }
         ++team.healAuraLevel;
@@ -523,7 +557,7 @@ bool Shop::Purchase(Player& player, Team& team, int choice, std::string& message
         }
         if (!spendCost())
         {
-            message = "Нужно " + CostText(*item) + " для трекера врага.";
+            message = "Нужно " + CostText(item) + " для трекера врага.";
             return false;
         }
         team.enemyTrackerUnlocked = true;
@@ -539,16 +573,62 @@ bool Shop::Purchase(Player& player, Team& team, int choice, std::string& message
 
 bool Shop::CanAfford(const Inventory& inventory, const ShopItem& item) const
 {
-    if (inventory.GetResource(item.primaryType) < item.primaryCost)
+    const ShopItem pricedItem = GetItemForInventory(inventory, item);
+    if (inventory.GetResource(pricedItem.primaryType) < pricedItem.primaryCost)
     {
         return false;
     }
-    if (item.hasSecondaryCost && inventory.GetResource(item.secondaryType) < item.secondaryCost)
+    if (pricedItem.hasSecondaryCost && inventory.GetResource(pricedItem.secondaryType) < pricedItem.secondaryCost)
     {
         return false;
     }
 
     return true;
+}
+
+ShopItem Shop::GetItemForInventory(const Inventory& inventory, const ShopItem& item) const
+{
+    ShopItem pricedItem = item;
+    const auto setSingleCost = [&pricedItem](ResourceType type, int cost)
+    {
+        pricedItem.primaryType = type;
+        pricedItem.primaryCost = cost;
+        pricedItem.hasSecondaryCost = false;
+        pricedItem.secondaryType = ResourceType::Iron;
+        pricedItem.secondaryCost = 0;
+    };
+
+    switch (pricedItem.choice)
+    {
+    case 101:
+        switch (inventory.GetSwordLevel())
+        {
+        case 0: pricedItem.name = "Каменный меч"; setSingleCost(ResourceType::Iron, 10); break;
+        case 1: pricedItem.name = "Железный меч"; setSingleCost(ResourceType::Gold, 7); break;
+        default: pricedItem.name = "Алмазный меч"; setSingleCost(ResourceType::Crystal, 3); break;
+        }
+        break;
+    case 102:
+        switch (inventory.GetToolLevel())
+        {
+        case 0: pricedItem.name = "Деревянная кирка"; setSingleCost(ResourceType::Iron, 10); break;
+        case 1: pricedItem.name = "Железная кирка"; setSingleCost(ResourceType::Iron, 10); break;
+        default: pricedItem.name = "Золотая кирка"; setSingleCost(ResourceType::Gold, 3); break;
+        }
+        break;
+    case 103:
+        switch (inventory.GetArmorLevel())
+        {
+        case 0: pricedItem.name = "Кольчужная броня"; setSingleCost(ResourceType::Iron, 40); break;
+        case 1: pricedItem.name = "Железная броня"; setSingleCost(ResourceType::Gold, 12); break;
+        default: pricedItem.name = "Алмазная броня"; setSingleCost(ResourceType::Crystal, 6); break;
+        }
+        break;
+    default:
+        break;
+    }
+
+    return pricedItem;
 }
 
 std::vector<ShopItem> Shop::GetItems() const
@@ -566,6 +646,16 @@ std::vector<ShopItem> Shop::GetItemsForCategory(int categoryIndex) const
         {
             filtered.push_back(item);
         }
+    }
+    return filtered;
+}
+
+std::vector<ShopItem> Shop::GetItemsForCategory(int categoryIndex, const Inventory& inventory) const
+{
+    std::vector<ShopItem> filtered = GetItemsForCategory(categoryIndex);
+    for (ShopItem& item : filtered)
+    {
+        item = GetItemForInventory(inventory, item);
     }
     return filtered;
 }

@@ -2,6 +2,7 @@
 
 #include "Resource.h"
 
+#include <cstdint>
 #include <vector>
 
 // Raylib-free: spatial state is Vec3 (see Resource.h / SimMath.h). Callers that
@@ -12,7 +13,7 @@ public:
     Generator() = default;
     Generator(ResourceType type, Vec3 position, float interval, int amount, int teamId = -1);
 
-    void Update(float dt, std::vector<ResourcePickup>& pickups, int bonusAmount);
+    void Update(float dt, std::vector<ResourcePickup>& pickups, int forgeLevel, int bonusAmount);
 
     ResourceType GetType() const;
     Vec3 GetPosition() const;
@@ -25,5 +26,6 @@ private:
     float timer_ = 0.0f;
     int amount_ = 1;
     int teamId_ = -1;
+    std::uint32_t successfulSpawns_ = 0;
 };
 

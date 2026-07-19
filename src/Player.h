@@ -85,6 +85,12 @@ public:
 
     void AddYaw(float delta);
     void SetYaw(float yaw);
+    // Auto-step is a shared movement rule. Full blocks require an explicit
+    // jump command for every control kind; the small allowance is only for
+    // slabs and stairs.
+    static constexpr float kAutoStepHeight = 0.55f;
+    static constexpr float kHumanAutoStepHeight = kAutoStepHeight;
+
     void Move(
         Vector3 wishDirection,
         bool jump,
@@ -93,7 +99,7 @@ public:
         bool sprint = false,
         bool sneak = false,
         float terrainSpeedMultiplier = 1.0f,
-        bool allowAutoStep = false,
+        float autoStepHeight = 0.0f,
         float gravityMultiplier = 1.0f,
         float jumpMultiplier = 1.0f,
         float groundControlMultiplier = 1.0f,
@@ -122,6 +128,7 @@ public:
     bool IsHeroAbilityReady(HeroAbilitySlot slot) const;
     void StartHeroAbilityCooldown(HeroAbilitySlot slot, float cooldownSeconds, float durationSeconds = 0.0f);
     void ClearHeroActiveEffects();
+    void RespawnAt(Vector3 position);
     void RespawnAtHome();
     void Kill(bool finalDeath);
     void KillWithRespawn(float seconds);
@@ -149,7 +156,7 @@ public:
 
 private:
     bool HasGroundSupportAt(Vector3 position, const World& world) const;
-    void TryMoveAxis(Vector3 delta, const World& world, bool preventEdgeFall, bool allowAutoStep);
+    void TryMoveAxis(Vector3 delta, const World& world, bool preventEdgeFall, float autoStepHeight);
     // Derive the locomotion pose (Idle/Walk/Run/Jump/Fall/Death) from the current
     // velocity/ground/alive state, but only when no event pose is playing
     // (animationTimer <= 0 and not UltPrimed/Overloaded). Shared by UpdateTimers

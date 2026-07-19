@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <optional>
 #include <string>
 
@@ -11,7 +12,12 @@ namespace
 {
 constexpr int kBuildMinY = -2;
 constexpr int kBuildMaxY = 64;
-constexpr int kBuildMapRadius = 72;
+constexpr int kCreativeBuildMinY = -8;
+constexpr int kCreativeBuildMaxY = 96;
+constexpr float kBuildReach = 4.5f;
+constexpr float kCreativeBuildReach = 12.0f;
+constexpr float kBuildDistanceSq = 38.0f;
+constexpr float kCreativeBuildDistanceSq = 14.5f * 14.5f;
 
 float DistanceSquared(Vector3 a, Vector3 b)
 {
@@ -25,6 +31,104 @@ std::string FormatTenths(float value)
 {
     const int tenths = static_cast<int>(value * 10.0f + 0.5f);
     return std::to_string(tenths / 10) + "." + std::to_string(tenths % 10);
+}
+
+// Support-driven orientation for torches and ladders.  When placement came
+// from a raycast, supportBlock is the block whose face was clicked: it is the
+// only reliable source of the intended wall.  Player position remains a
+// deterministic fallback for bridge/bot placement, which has no clicked face.
+int OrientationVariantFor(BlockType type, const World& world, const GridPos& pos, Vector3 playerPosition,
+                          std::optional<GridPos> supportBlock)
+{
+    if (type != BlockType::LadderBlock && type != BlockType::TorchBlock)
+    {
+        return -2;
+    }
+    if (type == BlockType::TorchBlock && world.IsSolid(GridPos { pos.x, pos.y - 1, pos.z }))
+    {
+        // Solid ground below: a standing torch (legacy Minecraft data 5).
+        return 5;
+    }
+
+    struct WallOption
+    {
+        GridPos offset;
+        int ladderVariant; // renderer plane side (2/3 = -Z/+Z, 4/5 = -X/+X)
+        int torchVariant;  // legacy Minecraft wall-torch data (leans away from wall)
+    };
+    constexpr WallOption kWalls[] {
+        { GridPos { 0, 0, -1 }, 2, 3 },
+        { GridPos { 0, 0, 1 }, 3, 4 },
+        { GridPos { -1, 0, 0 }, 4, 1 },
+        { GridPos { 1, 0, 0 }, 5, 2 },
+    };
+
+    const auto variantForWall = [&pos, &kWalls](const GridPos& wall)
+    {
+        for (const WallOption& option : kWalls)
+        {
+            if (wall.x == pos.x + option.offset.x && wall.y == pos.y + option.offset.y
+                && wall.z == pos.z + option.offset.z)
+            {
+                return option;
+            }
+        }
+        return WallOption { GridPos {}, -1, -1 };
+    };
+
+    if (supportBlock.has_value())
+    {
+        const Block* support = world.GetBlock(*supportBlock);
+        const WallOption clickedWall = variantForWall(*supportBlock);
+        if (clickedWall.ladderVariant >= 0)
+        {
+            return support != nullptr && world.IsSolid(*supportBlock)
+                ? (type == BlockType::LadderBlock ? clickedWall.ladderVariant : clickedWall.torchVariant)
+                : -1;
+        }
+
+        // Stacking a ladder by clicking the top/bottom face of the previous
+        // section must preserve that section's wall orientation.  This keeps a
+        // vertical run attached to one wall even though its clicked face is not
+        // itself horizontal.
+        if (type == BlockType::LadderBlock && support != nullptr && support->type == BlockType::LadderBlock
+            && supportBlock->x == pos.x && supportBlock->z == pos.z
+            && std::abs(supportBlock->y - pos.y) == 1)
+        {
+            const int inheritedVariant = support->variant & 0x07;
+            const GridPos inheritedWall = inheritedVariant == 2 ? GridPos { pos.x, pos.y, pos.z - 1 }
+                : inheritedVariant == 3 ? GridPos { pos.x, pos.y, pos.z + 1 }
+                : inheritedVariant == 4 ? GridPos { pos.x - 1, pos.y, pos.z }
+                : GridPos { pos.x + 1, pos.y, pos.z };
+            return world.IsSolid(inheritedWall) ? inheritedVariant : -1;
+        }
+    }
+
+    const float pushX = static_cast<float>(pos.x) - playerPosition.x;
+    const float pushZ = static_cast<float>(pos.z) - playerPosition.z;
+    int bestVariant = -1;
+    float bestAlignment = -1.0e9f;
+    for (const WallOption& wall : kWalls)
+    {
+        if (!world.IsSolid(GridPos { pos.x + wall.offset.x, pos.y, pos.z + wall.offset.z }))
+        {
+            continue;
+        }
+        const float alignment = pushX * static_cast<float>(wall.offset.x) + pushZ * static_cast<float>(wall.offset.z);
+        if (alignment > bestAlignment)
+        {
+            bestAlignment = alignment;
+            bestVariant = type == BlockType::LadderBlock ? wall.ladderVariant : wall.torchVariant;
+        }
+    }
+    return bestVariant;
+}
+
+const char* SupportDeniedMessage(BlockType type)
+{
+    return type == BlockType::LadderBlock
+        ? "Лестнице нужна стена рядом."
+        : "Факелу нужен пол или стена.";
 }
 }
 
@@ -192,7 +296,7 @@ void Game::UpdateFastPlacement(float dt)
     {
         HandlePlaceBlock();
     }
-    fastPlaceTimer_ = command.bridgeMode ? 0.16f : 0.22f;
+    fastPlaceTimer_ = 0.22f;
 }
 
 void Game::UpdateAttackOrBreak(float dt)
@@ -213,6 +317,11 @@ void Game::UpdateAttackOrBreak(float dt)
 
 float Game::ComputeBreakRequiredSeconds(Player& player, const RaycastHit& hit, bool isCore)
 {
+    if (creativeMode_)
+    {
+        return isCore ? 0.02f : 0.001f;
+    }
+
     // THE break-time rule: base block toughness vs. tool level, plus the Likho
     // mining modifiers (solo speed bonus + active2 persistent cuts). Shared by
     // the authoritative server path (ApplyNetworkPlayerActions) and the client
@@ -220,7 +329,8 @@ float Game::ComputeBreakRequiredSeconds(Player& player, const RaycastHit& hit, b
     // fills at exactly the authoritative rate. Registering/refreshing a cut is
     // part of the rule: on the server it is the authoritative record; on a
     // network client it mirrors the same record for the client's own mining.
-    float requiredSeconds = BreakSeconds(hit.blockData.type, EffectiveToolLevel(player));
+    const bool usingAxe = GetSelectedWeaponType(player) == WeaponType::Axe;
+    float requiredSeconds = BreakSeconds(hit.blockData.type, EffectiveToolLevel(player), usingAxe);
     if (isCore || player.GetHeroId() != HeroId::Likho)
     {
         return requiredSeconds;
@@ -288,6 +398,37 @@ Game::BlockActionResult Game::ApplyCompletedBreakProgress(Player& player, const 
     result.blockType = progress.targetType;
 
     const GridPos target = progress.target;
+    const bool recordCreativeHistory = creativeMode_ && !creativeRestoringHistory_;
+    const CreativeMapDocument creativeBefore = recordCreativeHistory ? BuildCreativeMapDocument() : CreativeMapDocument {};
+    if (creativeMode_)
+    {
+        auto specialIt = std::find_if(
+            creativeSpecials_.begin(),
+            creativeSpecials_.end(),
+            [&target](const CreativeSpecial& special)
+            {
+                return special.pos == target
+                    && special.kind != CreativeSpecialKind::HeroSpawn
+                    && special.kind != CreativeSpecialKind::Shop;
+            });
+        if (specialIt != creativeSpecials_.end())
+        {
+            const std::string name = DisplayName(specialIt->kind);
+            RemoveCreativeSpecialByIndex(static_cast<std::size_t>(std::distance(creativeSpecials_.begin(), specialIt)));
+            result.success = true;
+            result.position = world_.GridToWorld(target);
+            result.color = Color { 255, 235, 142, 255 };
+            result.message = "Убрано: " + name + ".";
+            result.hasWorldEffect = true;
+            result.playBreakSound = true;
+            result.incrementLocalBroken = IsLocallyPredicted(ControlKindForPlayer(player));
+            if (recordCreativeHistory)
+            {
+                PushCreativeHistory("удаление спецблока " + name, creativeBefore);
+            }
+            return result;
+        }
+    }
     if (progress.isCore)
     {
         EnergyCore* core = FindCoreAt(target);
@@ -327,7 +468,13 @@ Game::BlockActionResult Game::ApplyCompletedBreakProgress(Player& player, const 
     const std::optional<Block> brokenBlock = blockBeforeBreak != nullptr
         ? std::optional<Block>(*blockBeforeBreak)
         : std::nullopt;
-    if (BreakWorldBlock(target, player.GetTeamId(), BlockDeltaReason::PlayerBreak, player.GetId()))
+    // The creative editor edits raw map data: imported/authored blocks carry
+    // breakable=0 as match protection, which must not lock the map's own
+    // author out of removing them.
+    const bool removed = creativeMode_
+        ? RemoveWorldBlock(target, BlockDeltaReason::PlayerBreak, player.GetId())
+        : BreakWorldBlock(target, player.GetTeamId(), BlockDeltaReason::PlayerBreak, player.GetId());
+    if (removed)
     {
         const Vector3 center = world_.GridToWorld(target);
         result.success = true;
@@ -337,12 +484,19 @@ Game::BlockActionResult Game::ApplyCompletedBreakProgress(Player& player, const 
         result.hasWorldEffect = true;
         result.playBreakSound = true;
         result.incrementLocalBroken = IsLocallyPredicted(ControlKindForPlayer(player));
-        SpawnBrokenBlockDrop(progress.targetType, target, player.GetId());
-        if (brokenBlock.has_value())
+        if (!creativeMode_)
         {
-            ApplyBromBlockBreakPassive(player, *brokenBlock, center);
+            SpawnBrokenBlockDrop(progress.targetType, target, player.GetId());
+            if (brokenBlock.has_value())
+            {
+                ApplyBromBlockBreakPassive(player, *brokenBlock, center);
+            }
+            player.GetInventory().DamageTool(1);
         }
-        player.GetInventory().DamageTool(1);
+        else if (recordCreativeHistory)
+        {
+            PushCreativeHistory(std::string("ломание ") + DisplayName(progress.targetType), creativeBefore);
+        }
     }
     else
     {
@@ -426,8 +580,6 @@ PlacementPreview Game::BuildPlacementPreview(const Player& player) const
     {
         return preview;
     }
-    const PlayerCommand command = BuildLocalPlayerCommand();
-
     const std::optional<BlockType> selectedBlock = GetSelectedBlockType(player);
     if (!selectedBlock.has_value())
     {
@@ -435,47 +587,33 @@ PlacementPreview Game::BuildPlacementPreview(const Player& player) const
     }
 
     const Vector3 aimDirection = cameraController_.GetAimDirection();
-    const Vector3 flatForward = cameraController_.GetFlatForward();
     GridPos placePos {};
     preview.selectedType = *selectedBlock;
 
-    if (command.bridgeMode)
+    const std::optional<RaycastHit> hit = RaycastFromAim(player, creativeMode_ ? kCreativeBuildReach : kBuildReach);
+    if (hit.has_value())
     {
-        const float forwardDistance = aimDirection.y < -0.45f ? 0.55f : 0.92f;
-        placePos = world_.WorldToGrid(Vector3 {
-            player.GetPosition().x + flatForward.x * forwardDistance,
-            player.GetPosition().y - 1.08f,
-            player.GetPosition().z + flatForward.z * forwardDistance
-        });
+        placePos = hit->adjacent;
+        preview.targetBlock = hit->block;
+        preview.faceNormal = hit->normal;
+        preview.hasTarget = true;
     }
     else
     {
-        const std::optional<RaycastHit> hit = RaycastFromAim(player, 4.5f);
-        if (hit.has_value())
-        {
-            placePos = hit->adjacent;
-            preview.targetBlock = hit->block;
-            preview.faceNormal = hit->normal;
-            preview.hasTarget = true;
-        }
-        else
-        {
-            preview.reason = "Наведитесь на грань блока";
-            return preview;
-        }
+        preview.reason = "Наведитесь на грань блока";
+        return preview;
     }
 
     std::string reason;
     preview.position = placePos;
     preview.visible = true;
-    preview.valid = CanPlaceBlockAt(placePos, player, &reason);
+    preview.valid = CanPlaceBlockAt(placePos, player, &reason,
+        preview.hasTarget ? std::optional<GridPos>(preview.targetBlock) : std::nullopt);
     if (preview.valid)
     {
         if (preview.reason.empty())
         {
-            preview.reason = command.bridgeMode
-                ? std::string("Мост: ") + DisplayName(*selectedBlock)
-                : std::string("Поставить: ") + DisplayName(*selectedBlock);
+            preview.reason = std::string("Поставить: ") + DisplayName(*selectedBlock);
         }
     }
     else
@@ -485,7 +623,8 @@ PlacementPreview Game::BuildPlacementPreview(const Player& player) const
     return preview;
 }
 
-bool Game::CanPlaceBlockAt(const GridPos& pos, const Player& player, std::string* reason) const
+bool Game::CanPlaceBlockAt(const GridPos& pos, const Player& player, std::string* reason,
+                           std::optional<GridPos> supportBlock) const
 {
     const auto fail = [reason](const std::string& text)
     {
@@ -503,17 +642,30 @@ bool Game::CanPlaceBlockAt(const GridPos& pos, const Player& player, std::string
     {
         return fail("Сначала выберите блок");
     }
-    if (player.GetInventory().GetBlockCount(requestedType) <= 0)
+    if (!creativeMode_ && IsCreativeOnlyBlock(requestedType))
+    {
+        return fail("Этот блок доступен только в Creative");
+    }
+    if (!creativeMode_ && player.GetInventory().GetBlockCount(requestedType) <= 0)
     {
         return fail(std::string("Нет доступных блоков: ") + DisplayName(requestedType));
     }
-    if (pos.y < kBuildMinY || pos.y > kBuildMaxY)
+    int minY = creativeMode_ ? kCreativeBuildMinY : kBuildMinY;
+    int maxY = creativeMode_ ? kCreativeBuildMaxY : kBuildMaxY;
+    // A custom document may be taller than the stock arena. Its vertical bounds
+    // are cached because pendingCreativeDoc_ is cleared after world setup.
+    if (hasCustomMapBuildBounds_)
+    {
+        minY = std::min(minY, customMapBuildMinY_);
+        maxY = std::max(maxY, customMapBuildMaxY_);
+    }
+    if (pos.y < minY || pos.y > maxY)
     {
         return fail("Высота строительства заблокирована");
     }
-    if (std::abs(pos.x) > kBuildMapRadius || std::abs(pos.z) > kBuildMapRadius)
+    if (OrientationVariantFor(requestedType, world_, pos, player.GetPosition(), supportBlock) == -1)
     {
-        return fail("За пределами зоны строительства");
+        return fail(SupportDeniedMessage(requestedType));
     }
     if (!world_.IsAir(pos))
     {
@@ -525,7 +677,7 @@ bool Game::CanPlaceBlockAt(const GridPos& pos, const Player& player, std::string
     }
 
     const Vector3 blockCenter = world_.GridToWorld(pos);
-    if (DistanceSquared(player.GetPosition(), blockCenter) > 38.0f)
+    if (DistanceSquared(player.GetPosition(), blockCenter) > (creativeMode_ ? kCreativeBuildDistanceSq : kBuildDistanceSq))
     {
         return fail("Слишком далеко");
     }
@@ -568,11 +720,16 @@ bool Game::HasAdjacentAnchorBlock(const GridPos& pos) const
 
 std::optional<BlockType> Game::SelectPlacementBlockForPlayer(const Player& player, const GridPos& pos) const
 {
-    // Human-controlled players place their selected block; only bots fall back
-    // to the priority auto-pick (they have no selected slot).
-    if (IsHumanControlled(ControlKindForPlayer(player)))
+    // Command-driven actors, including bots, place the block in their selected
+    // hotbar slot. The auto-pick remains only as a compatibility fallback for
+    // legacy bot builders that have not yet been migrated to PlayerCommand.
+    if (const std::optional<BlockType> selected = GetSelectedBlockType(player))
     {
-        return GetSelectedBlockType(player);
+        return selected;
+    }
+    if (!IsBotControlled(ControlKindForPlayer(player)))
+    {
+        return std::nullopt;
     }
 
     const Inventory& inventory = player.GetInventory();
@@ -609,14 +766,15 @@ std::optional<BlockType> Game::SelectPlacementBlockForPlayer(const Player& playe
     return std::nullopt;
 }
 
-Game::BlockActionResult Game::ApplyPlaceBlockForPlayer(Player& player, const GridPos& pos)
+Game::BlockActionResult Game::ApplyPlaceBlockForPlayer(Player& player, const GridPos& pos,
+                                                        std::optional<GridPos> supportBlock)
 {
     BlockActionResult result {};
     result.handled = true;
     result.kind = BlockActionKind::Place;
     result.position = world_.GridToWorld(pos);
     std::string reason;
-    if (!CanPlaceBlockAt(pos, player, &reason))
+    if (!CanPlaceBlockAt(pos, player, &reason, supportBlock))
     {
         result.message = reason;
         result.playDeniedSound = true;
@@ -632,14 +790,35 @@ Game::BlockActionResult Game::ApplyPlaceBlockForPlayer(Player& player, const Gri
         result.playDeniedSound = true;
         return result;
     }
-    if (player.GetInventory().GetBlockCount(blockType) <= 0)
+    // Creative building is free and infinite: no stock requirement.
+    if (!creativeMode_ && player.GetInventory().GetBlockCount(blockType) <= 0)
     {
         result.message = std::string("Нет доступных блоков: ") + DisplayName(blockType) + ".";
         result.playDeniedSound = true;
         return result;
     }
 
-    if (!PlaceWorldBlock(pos, Block { blockType, player.GetTeamId(), true }, false, BlockDeltaReason::PlayerPlace, player.GetId()))
+    const bool recordCreativeHistory = creativeMode_ && !creativeRestoringHistory_;
+    const CreativeMapDocument creativeBefore = recordCreativeHistory ? BuildCreativeMapDocument() : CreativeMapDocument {};
+    // Fresh Creative coloured materials start cyan (Minecraft dye 9), the
+    // dominant castle accent. Imported maps retain their exact dye in variant.
+    int variant = (blockType == BlockType::ColoredGlassBlock || blockType == BlockType::ColoredClayBlock) ? 9 : 0;
+    const int orientation = OrientationVariantFor(blockType, world_, pos, player.GetPosition(), supportBlock);
+    if (orientation == -1)
+    {
+        result.message = SupportDeniedMessage(blockType);
+        result.playDeniedSound = true;
+        return result;
+    }
+    if (orientation >= 0)
+    {
+        variant = orientation;
+    }
+    // TNT is an entity with gravity.  It still uses the normal placement
+    // validation (air cell and supporting face), but never becomes a static
+    // world block that could suspend it in mid-air.
+    if (blockType != BlockType::ExplosiveBlock
+        && !PlaceWorldBlock(pos, Block { blockType, player.GetTeamId(), true, variant }, false, BlockDeltaReason::PlayerPlace, player.GetId()))
     {
         result.message = "Место уже занято.";
         result.playDeniedSound = true;
@@ -647,7 +826,12 @@ Game::BlockActionResult Game::ApplyPlaceBlockForPlayer(Player& player, const Gri
     }
 
     const PlayerControlKind controlKind = ControlKindForPlayer(player);
-    if (IsHumanControlled(controlKind))
+    const std::optional<BlockType> selectedSlotBlock = GetSelectedBlockType(player);
+    if (creativeMode_)
+    {
+        // Free building: nothing is spent.
+    }
+    else if (selectedSlotBlock.has_value() && *selectedSlotBlock == blockType)
     {
         const int slot = IsLocallyPredicted(controlKind) ? selectedHotbarSlot_ : player.GetSelectedSlot();
         player.GetInventory().SpendSlotItem(slot);
@@ -670,12 +854,35 @@ Game::BlockActionResult Game::ApplyPlaceBlockForPlayer(Player& player, const Gri
     result.message = std::string(DisplayName(blockType)) + " поставлен.";
     result.hasWorldEffect = true;
     result.playPlaceSound = true;
+    const int shopChoice = blockType == BlockType::WoolBlock ? 1
+        : (blockType == BlockType::WoodBlock ? 2
+        : (blockType == BlockType::StoneBlock ? 3
+        : (blockType == BlockType::ObsidianBlock ? 4
+        : (blockType == BlockType::EnergyGlassBlock ? 5
+        : (blockType == BlockType::SpringBlock ? 6
+        : (blockType == BlockType::StickyBlock ? 7 : (blockType == BlockType::ExplosiveBlock ? 8 : 0)))))));
+    if (shopChoice != 0)
+    {
+        RecordAutomatchShopUse(player, shopChoice);
+    }
     if (blockType == BlockType::ExplosiveBlock)
     {
-        timedExplosions_.push_back(TimedExplosion { pos, player.GetTeamId(), player.GetId(), 2.6f, 2.7f, NextExplosiveId() });
+        TimedExplosion explosive;
+        explosive.position = center;
+        explosive.ownerTeamId = player.GetTeamId();
+        explosive.ownerPlayerId = player.GetId();
+        explosive.timer = 2.6f;
+        explosive.radius = 2.7f;
+        explosive.id = NextExplosiveId();
+        timedExplosions_.push_back(explosive);
         result.tntActivated = true;
+        RecordAutomatchExplosiveUse(player, false);
     }
     result.incrementLocalPlaced = IsLocallyPredicted(controlKind);
+    if (recordCreativeHistory)
+    {
+        PushCreativeHistory(std::string("постановка ") + DisplayName(blockType), creativeBefore);
+    }
 
     return result;
 }
@@ -717,7 +924,7 @@ void Game::PresentBlockActionResult(const Player& player, const BlockActionResul
     if (result.incrementLocalPlaced)
     {
         ++stats_.blocksPlaced;
-        SetMessage((BuildLocalPlayerCommand().bridgeMode ? "Мост: " : "") + result.message);
+        SetMessage(result.message);
     }
     else if (result.incrementLocalBroken)
     {

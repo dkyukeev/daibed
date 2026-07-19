@@ -52,7 +52,8 @@ const char* ToString(MessageType type);
 
 // Protocol versioning. Bump on ANY wire-format change; decoders reject a
 // mismatch (VersionMismatch) instead of silently misparsing.
-constexpr std::uint16_t kProtocolVersion = 23;
+// v24: BlockDelta carries old/new block variant (orientation/shape/dye).
+constexpr std::uint16_t kProtocolVersion = 25;
 // Leading magic so random/foreign bytes are rejected cleanly as BadMagic.
 constexpr std::uint32_t kProtocolMagic = 0x3142'4400u; // "DB1\0"
 // Header size on the wire: magic(4) + version(2) + type(1) + sequence(4) +

@@ -69,6 +69,43 @@ const char* ItemDisplayName(ItemType type)
         return "Липкий блок";
     case ItemType::ExplosiveBlock:
         return "TNT";
+    case ItemType::SmoothStoneBlock:
+        return "Гладкий камень";
+    case ItemType::DarkBrickBlock:
+        return "Темный кирпич";
+    case ItemType::LightBrickBlock:
+        return "Светлый кирпич";
+    case ItemType::MetalBlock:
+        return "Металлический блок";
+    case ItemType::GlowBlock:
+        return "Светящийся блок";
+    case ItemType::PlankBlock:
+        return "Резные доски";
+    case ItemType::DecorativeTileBlock:
+        return "Декоративная плитка";
+    case ItemType::TrimBlock:
+        return "Акцентный блок";
+    case ItemType::CobblestoneBlock: return "Cobblestone";
+    case ItemType::AndesiteBlock: return "Andesite";
+    case ItemType::PolishedAndesiteBlock: return "Polished Andesite";
+    case ItemType::StoneBrickBlock: return "Stone Brick";
+    case ItemType::ChiseledStoneBrickBlock: return "Chiseled Stone";
+    case ItemType::StoneSlabBlock: return "Stone Slab";
+    case ItemType::StoneBrickSlabBlock: return "Stone Brick Slab";
+    case ItemType::StoneBrickStairsBlock: return "Stone Brick Stairs";
+    case ItemType::BirchPlankBlock: return "Birch Planks";
+    case ItemType::BirchSlabBlock: return "Birch Slab";
+    case ItemType::BirchStairsBlock: return "Birch Stairs";
+    case ItemType::ColoredGlassBlock: return "Colored Glass";
+    case ItemType::ColoredClayBlock: return "Colored Clay";
+    case ItemType::LapisBlock: return "Lapis Block";
+    case ItemType::DiamondBlock: return "Diamond Block";
+    case ItemType::EmeraldBlock: return "Emerald Block";
+    case ItemType::GoldBlock: return "Gold Block";
+    case ItemType::IronBarsBlock: return "Iron Bars";
+    case ItemType::LadderBlock: return "Ladder";
+    case ItemType::TorchBlock: return "Torch";
+    case ItemType::BarrierBlock: return "Barrier";
     case ItemType::Sword:
         return "Меч";
     case ItemType::Axe:
@@ -130,6 +167,43 @@ const char* ItemShortName(ItemType type)
         return "Липк.";
     case ItemType::ExplosiveBlock:
         return "TNT";
+    case ItemType::SmoothStoneBlock:
+        return "Гл.кам";
+    case ItemType::DarkBrickBlock:
+        return "Т.кирп";
+    case ItemType::LightBrickBlock:
+        return "Св.кирп";
+    case ItemType::MetalBlock:
+        return "Металл";
+    case ItemType::GlowBlock:
+        return "Лампа";
+    case ItemType::PlankBlock:
+        return "Доски";
+    case ItemType::DecorativeTileBlock:
+        return "Плитка";
+    case ItemType::TrimBlock:
+        return "Акцент";
+    case ItemType::CobblestoneBlock: return "Cobble";
+    case ItemType::AndesiteBlock: return "Andesite";
+    case ItemType::PolishedAndesiteBlock: return "P.And.";
+    case ItemType::StoneBrickBlock: return "Brick";
+    case ItemType::ChiseledStoneBrickBlock: return "Chisel";
+    case ItemType::StoneSlabBlock: return "Slab";
+    case ItemType::StoneBrickSlabBlock: return "B.Slab";
+    case ItemType::StoneBrickStairsBlock: return "Stairs";
+    case ItemType::BirchPlankBlock: return "Birch";
+    case ItemType::BirchSlabBlock: return "B.Slab";
+    case ItemType::BirchStairsBlock: return "B.Stair";
+    case ItemType::ColoredGlassBlock: return "Glass";
+    case ItemType::ColoredClayBlock: return "Clay";
+    case ItemType::LapisBlock: return "Lapis";
+    case ItemType::DiamondBlock: return "Diamond";
+    case ItemType::EmeraldBlock: return "Emerald";
+    case ItemType::GoldBlock: return "Gold";
+    case ItemType::IronBarsBlock: return "Bars";
+    case ItemType::LadderBlock: return "Ladder";
+    case ItemType::TorchBlock: return "Torch";
+    case ItemType::BarrierBlock: return "Barrier";
     case ItemType::Sword:
         return "Меч";
     case ItemType::Axe:
@@ -242,6 +316,43 @@ std::optional<BlockType> ItemToBlock(ItemType type)
         return BlockType::StickyBlock;
     case ItemType::ExplosiveBlock:
         return BlockType::ExplosiveBlock;
+    case ItemType::SmoothStoneBlock:
+        return BlockType::SmoothStoneBlock;
+    case ItemType::DarkBrickBlock:
+        return BlockType::DarkBrickBlock;
+    case ItemType::LightBrickBlock:
+        return BlockType::LightBrickBlock;
+    case ItemType::MetalBlock:
+        return BlockType::MetalBlock;
+    case ItemType::GlowBlock:
+        return BlockType::GlowBlock;
+    case ItemType::PlankBlock:
+        return BlockType::PlankBlock;
+    case ItemType::DecorativeTileBlock:
+        return BlockType::DecorativeTileBlock;
+    case ItemType::TrimBlock:
+        return BlockType::TrimBlock;
+    case ItemType::CobblestoneBlock: return BlockType::CobblestoneBlock;
+    case ItemType::AndesiteBlock: return BlockType::AndesiteBlock;
+    case ItemType::PolishedAndesiteBlock: return BlockType::PolishedAndesiteBlock;
+    case ItemType::StoneBrickBlock: return BlockType::StoneBrickBlock;
+    case ItemType::ChiseledStoneBrickBlock: return BlockType::ChiseledStoneBrickBlock;
+    case ItemType::StoneSlabBlock: return BlockType::StoneSlabBlock;
+    case ItemType::StoneBrickSlabBlock: return BlockType::StoneBrickSlabBlock;
+    case ItemType::StoneBrickStairsBlock: return BlockType::StoneBrickStairsBlock;
+    case ItemType::BirchPlankBlock: return BlockType::BirchPlankBlock;
+    case ItemType::BirchSlabBlock: return BlockType::BirchSlabBlock;
+    case ItemType::BirchStairsBlock: return BlockType::BirchStairsBlock;
+    case ItemType::ColoredGlassBlock: return BlockType::ColoredGlassBlock;
+    case ItemType::ColoredClayBlock: return BlockType::ColoredClayBlock;
+    case ItemType::LapisBlock: return BlockType::LapisBlock;
+    case ItemType::DiamondBlock: return BlockType::DiamondBlock;
+    case ItemType::EmeraldBlock: return BlockType::EmeraldBlock;
+    case ItemType::GoldBlock: return BlockType::GoldBlock;
+    case ItemType::IronBarsBlock: return BlockType::IronBarsBlock;
+    case ItemType::LadderBlock: return BlockType::LadderBlock;
+    case ItemType::TorchBlock: return BlockType::TorchBlock;
+    case ItemType::BarrierBlock: return BlockType::BarrierBlock;
     default:
         break;
     }
@@ -329,6 +440,43 @@ ItemType ItemFromBlock(BlockType type)
         return ItemType::StickyBlock;
     case BlockType::ExplosiveBlock:
         return ItemType::ExplosiveBlock;
+    case BlockType::SmoothStoneBlock:
+        return ItemType::SmoothStoneBlock;
+    case BlockType::DarkBrickBlock:
+        return ItemType::DarkBrickBlock;
+    case BlockType::LightBrickBlock:
+        return ItemType::LightBrickBlock;
+    case BlockType::MetalBlock:
+        return ItemType::MetalBlock;
+    case BlockType::GlowBlock:
+        return ItemType::GlowBlock;
+    case BlockType::PlankBlock:
+        return ItemType::PlankBlock;
+    case BlockType::DecorativeTileBlock:
+        return ItemType::DecorativeTileBlock;
+    case BlockType::TrimBlock:
+        return ItemType::TrimBlock;
+    case BlockType::CobblestoneBlock: return ItemType::CobblestoneBlock;
+    case BlockType::AndesiteBlock: return ItemType::AndesiteBlock;
+    case BlockType::PolishedAndesiteBlock: return ItemType::PolishedAndesiteBlock;
+    case BlockType::StoneBrickBlock: return ItemType::StoneBrickBlock;
+    case BlockType::ChiseledStoneBrickBlock: return ItemType::ChiseledStoneBrickBlock;
+    case BlockType::StoneSlabBlock: return ItemType::StoneSlabBlock;
+    case BlockType::StoneBrickSlabBlock: return ItemType::StoneBrickSlabBlock;
+    case BlockType::StoneBrickStairsBlock: return ItemType::StoneBrickStairsBlock;
+    case BlockType::BirchPlankBlock: return ItemType::BirchPlankBlock;
+    case BlockType::BirchSlabBlock: return ItemType::BirchSlabBlock;
+    case BlockType::BirchStairsBlock: return ItemType::BirchStairsBlock;
+    case BlockType::ColoredGlassBlock: return ItemType::ColoredGlassBlock;
+    case BlockType::ColoredClayBlock: return ItemType::ColoredClayBlock;
+    case BlockType::LapisBlock: return ItemType::LapisBlock;
+    case BlockType::DiamondBlock: return ItemType::DiamondBlock;
+    case BlockType::EmeraldBlock: return ItemType::EmeraldBlock;
+    case BlockType::GoldBlock: return ItemType::GoldBlock;
+    case BlockType::IronBarsBlock: return ItemType::IronBarsBlock;
+    case BlockType::LadderBlock: return ItemType::LadderBlock;
+    case BlockType::TorchBlock: return ItemType::TorchBlock;
+    case BlockType::BarrierBlock: return ItemType::BarrierBlock;
     default:
         break;
     }

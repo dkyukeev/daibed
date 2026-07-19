@@ -288,16 +288,17 @@ struct ProjectileSnapshot
     SnapshotVisibility visibility = SnapshotVisibility::Public;
 };
 
-// Timed explosive (TNT-style block), ticking down to detonation.
+// Timed explosive (falling TNT), ticking down to detonation.
 struct ExplosiveSnapshot
 {
     int id = -1;
-    Vec3 position {}; // block center.
+    Vec3 position {};
     int ownerPlayerId = -1;
     int ownerTeamId = -1;
     float remainingTimer = 0.0f;
     float radius = 0.0f;
     SnapshotVisibility visibility = SnapshotVisibility::Public;
+    Vec3 velocity {};
 };
 
 // Ground hazard area (fire / molotov pool) dealing damage over time.

@@ -1,5 +1,6 @@
 build/
 build-release/
+build-*/
 build-public/
 _CPack_Packages/
 DaiBed-*-windows-x64.zip
@@ -25,11 +26,15 @@ DaiBed.settings
 
 # Runtime/generated diagnostics
 automatch_stats.json
+automatch_*.json
+playtest_*.json
+cleanup_probe.json
 bot_tuning.json
 crash_*.log
 
 # Genetic tuning output
 tuning_runs/
+training_runs/
 *.stats.json
 *.failed.json
 *.stdout.log
@@ -50,3 +55,26 @@ skills-lock.json
 test-src/
 
 # Project documentation and example configs are intentionally not ignored.
+roster voice lines.txt
+voice_cuts_review.csv
+AI_Breakthrow.txt
+tools/generate_oskolki_imperii.py
+bot_tuning.example.json
+bot_tuning.example.json
+bot_tuning.example.json
+docs/BOT_PARKOUR.md
+docs/CASTLE_BEDWARS.md
+docs/CODEX_PROMPT.md
+docs/CORRIDOR_SEGMENT_REPAIR.md
+docs/DIRTY_NAVIGATION_FALL_PARKOUR.md
+docs/FAST_NAVIGATION_KERNEL.md
+docs/FEEL_AUDIT.md
+docs/GAME_QUALITY_AUDIT.md
+docs/GAMEPLAY_PRIORITY_BACKLOG.md
+docs/GAMEPLAY_TEST_MATRIX.md
+docs/HERO_ABILITIES_AUDIT.md
+docs/MOMENTUM_TRANSITIONS_EDGE_BRAKING.md
+docs/NAVIGATION_ACTION_LIBRARY.md
+docs/NETWORK_PREP_PLAN.md
+docs/RELEASE_0.1.0.md
+docs/STUCK_BRIDGE_ACTION_RECOVERY.md

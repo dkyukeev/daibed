@@ -112,6 +112,7 @@ void ExtractRoleTuning(const std::string& text, const std::string& prefix, BotRo
 
 void ExtractGenomeFields(const std::string& text, const std::string& prefix, BotTuningGenome& genome)
 {
+    ExtractJsonInt(text, prefix + "schemaVersion", genome.schemaVersion);
     ExtractJsonString(text, prefix + "id", genome.id);
     ExtractJsonInt(text, prefix + "generation", genome.generation);
     ExtractJsonNumber(text, prefix + "fitness", genome.fitness);
@@ -152,6 +153,13 @@ void ExtractGenomeFields(const std::string& text, const std::string& prefix, Bot
     ExtractJsonNumber(text, prefix + "pressurePhaseSeconds", genome.pressurePhaseSeconds);
     ExtractJsonNumber(text, prefix + "latePressureSeconds", genome.latePressureSeconds);
     ExtractJsonNumber(text, prefix + "allInSeconds", genome.allInSeconds);
+    ExtractJsonNumber(text, prefix + "navigation.runupDistanceBlocks", genome.navigationRunupDistanceBlocks);
+    ExtractJsonNumber(text, prefix + "navigation.takeoffDelaySeconds", genome.navigationTakeoffDelaySeconds);
+    ExtractJsonNumber(text, prefix + "navigation.takeoffEdgeOffsetBlocks", genome.navigationTakeoffEdgeOffsetBlocks);
+    ExtractJsonNumber(text, prefix + "navigation.takeoffGapScale", genome.navigationTakeoffGapScale);
+    ExtractJsonNumber(text, prefix + "navigation.airControlScale", genome.navigationAirControlScale);
+    ExtractJsonNumber(text, prefix + "navigation.landingCorrectionGain", genome.navigationLandingCorrectionGain);
+    ExtractJsonNumber(text, prefix + "navigation.fallRiskPenalty", genome.navigationFallRiskPenalty);
 }
 
 void WriteRoleTuningJson(std::ofstream& file, const char* prefix, const BotRoleTuning& role, bool comma)
@@ -186,6 +194,7 @@ float Clamped(float value, float minValue, float maxValue)
 BotTuningGenome DefaultBotTuningGenome()
 {
     BotTuningGenome genome {};
+    genome.schemaVersion = 2;
     genome.id = "default";
     genome.generation = 0;
     genome.roles[static_cast<int>(BotRole::Defender)] = BotRoleTuning { 24.0f, 34.0f, 20.0f, 26.0f, 30.0f, 7.4f, 7.0f, 0.75f, 1.20f, 0.85f, 0.90f, 0.80f };
@@ -197,6 +206,7 @@ BotTuningGenome DefaultBotTuningGenome()
 
 void ClampBotTuningGenome(BotTuningGenome& genome)
 {
+    genome.schemaVersion = std::max(2, genome.schemaVersion);
     genome.generation = std::max(0, genome.generation);
     for (BotRoleTuning& role : genome.roles)
     {
@@ -245,6 +255,13 @@ void ClampBotTuningGenome(BotTuningGenome& genome)
     genome.pressurePhaseSeconds = Clamped(genome.pressurePhaseSeconds, 18.0f, 95.0f);
     genome.latePressureSeconds = Clamped(genome.latePressureSeconds, 70.0f, 190.0f);
     genome.allInSeconds = Clamped(genome.allInSeconds, 110.0f, 290.0f);
+    genome.navigationRunupDistanceBlocks = Clamped(genome.navigationRunupDistanceBlocks, 0.55f, 2.75f);
+    genome.navigationTakeoffDelaySeconds = Clamped(genome.navigationTakeoffDelaySeconds, 0.04f, 0.34f);
+    genome.navigationTakeoffEdgeOffsetBlocks = Clamped(genome.navigationTakeoffEdgeOffsetBlocks, 0.02f, 0.45f);
+    genome.navigationTakeoffGapScale = Clamped(genome.navigationTakeoffGapScale, 0.0f, 0.35f);
+    genome.navigationAirControlScale = Clamped(genome.navigationAirControlScale, 0.25f, 1.0f);
+    genome.navigationLandingCorrectionGain = Clamped(genome.navigationLandingCorrectionGain, 0.15f, 1.0f);
+    genome.navigationFallRiskPenalty = Clamped(genome.navigationFallRiskPenalty, 0.25f, 4.0f);
 }
 
 unsigned int BotTuningGenomeHash(const BotTuningGenome& genome)
@@ -269,6 +286,13 @@ unsigned int BotTuningGenomeHash(const BotTuningGenome& genome)
     hash = HashFloat(hash, genome.allyAssistWeight);
     hash = HashFloat(hash, genome.strategicAttackUrgencyScale);
     hash = HashFloat(hash, genome.allInSeconds);
+    hash = HashFloat(hash, genome.navigationRunupDistanceBlocks);
+    hash = HashFloat(hash, genome.navigationTakeoffDelaySeconds);
+    hash = HashFloat(hash, genome.navigationTakeoffEdgeOffsetBlocks);
+    hash = HashFloat(hash, genome.navigationTakeoffGapScale);
+    hash = HashFloat(hash, genome.navigationAirControlScale);
+    hash = HashFloat(hash, genome.navigationLandingCorrectionGain);
+    hash = HashFloat(hash, genome.navigationFallRiskPenalty);
     return hash;
 }
 
@@ -326,6 +350,7 @@ bool WriteBotTuningGenomeJsonFile(
     }
 
     file << "{\n";
+    file << "  \"schemaVersion\": " << genome.schemaVersion << ",\n";
     file << "  \"id\": \"" << genome.id << "\",\n";
     file << "  \"generation\": " << genome.generation << ",\n";
     file << "  \"fitness\": " << genome.fitness << ",\n";
@@ -363,7 +388,14 @@ bool WriteBotTuningGenomeJsonFile(
     file << "  \"earlyEconomySeconds\": " << genome.earlyEconomySeconds << ",\n";
     file << "  \"pressurePhaseSeconds\": " << genome.pressurePhaseSeconds << ",\n";
     file << "  \"latePressureSeconds\": " << genome.latePressureSeconds << ",\n";
-    file << "  \"allInSeconds\": " << genome.allInSeconds << "\n";
+    file << "  \"allInSeconds\": " << genome.allInSeconds << ",\n";
+    file << "  \"navigation.runupDistanceBlocks\": " << genome.navigationRunupDistanceBlocks << ",\n";
+    file << "  \"navigation.takeoffDelaySeconds\": " << genome.navigationTakeoffDelaySeconds << ",\n";
+    file << "  \"navigation.takeoffEdgeOffsetBlocks\": " << genome.navigationTakeoffEdgeOffsetBlocks << ",\n";
+    file << "  \"navigation.takeoffGapScale\": " << genome.navigationTakeoffGapScale << ",\n";
+    file << "  \"navigation.airControlScale\": " << genome.navigationAirControlScale << ",\n";
+    file << "  \"navigation.landingCorrectionGain\": " << genome.navigationLandingCorrectionGain << ",\n";
+    file << "  \"navigation.fallRiskPenalty\": " << genome.navigationFallRiskPenalty << "\n";
     file << "}\n";
     return true;
 }
@@ -406,6 +438,22 @@ const char* ToString(BotRole role)
     }
 
     return "Неизвестно";
+}
+
+const char* ToString(BotArchetype archetype)
+{
+    switch (archetype)
+    {
+    case BotArchetype::CautiousDefender: return "cautious defender";
+    case BotArchetype::AggressiveRusher: return "aggressive rusher";
+    case BotArchetype::FrugalBuilder: return "frugal builder";
+    case BotArchetype::IsolationHunter: return "isolation hunter";
+    case BotArchetype::TeamHelper: return "team helper";
+    case BotArchetype::ImpulsiveDuelist: return "impulsive duelist";
+    case BotArchetype::Engineer: return "engineer";
+    case BotArchetype::Opportunist: return "opportunist";
+    }
+    return "unknown";
 }
 
 const char* ToString(BotIntent intent)

@@ -4,10 +4,12 @@
 #include "HeroSystem.h"
 #include "UiText.h"
 #include "VecConvert.h"
+#include "raymath.h"
 #include "rlgl.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -129,6 +131,428 @@ Image MakeTntImage()
     ImageDrawRectangle(&image, 5, 14, 4, 4, Color { 40, 34, 32, 255 });
     ImageDrawRectangle(&image, 14, 14, 4, 4, Color { 40, 34, 32, 255 });
     ImageDrawRectangle(&image, 23, 14, 4, 4, Color { 40, 34, 32, 255 });
+    return image;
+}
+
+Image MakeSmoothStoneImage()
+{
+    Image image = MakeTextureImage(Color { 176, 182, 190, 255 }, Color { 216, 220, 226, 255 }, 16);
+    const Color seam { 118, 124, 136, 255 };
+    const Color highlight { 222, 226, 232, 255 };
+    ImageDrawRectangle(&image, 0, 15, kTextureSize, 2, seam);
+    ImageDrawRectangle(&image, 15, 0, 2, 16, seam);
+    ImageDrawRectangle(&image, 23, 16, 2, 16, seam);
+    ImageDrawRectangle(&image, 0, 0, kTextureSize, 1, highlight);
+    ImageDrawRectangle(&image, 0, 0, 1, kTextureSize, highlight);
+    ImageDrawRectangle(&image, 0, kTextureSize - 1, kTextureSize, 1, Color { 104, 110, 122, 255 });
+    ImageDrawRectangle(&image, kTextureSize - 1, 0, 1, kTextureSize, Color { 104, 110, 122, 255 });
+    for (int y = 3; y < kTextureSize; y += 11)
+    {
+        for (int x = 2; x < kTextureSize; x += 9)
+        {
+            if ((x + y) % 3 == 0)
+            {
+                ImageDrawPixel(&image, x, y, Color { 146, 152, 164, 255 });
+            }
+        }
+    }
+    return image;
+}
+
+Image MakeBrickImage(Color mortar, Color brickA, Color brickB, int variant)
+{
+    Image image = GenImageColor(kTextureSize, kTextureSize, mortar);
+    constexpr int brickW = 15;
+    constexpr int brickH = 8;
+    for (int y = 0; y < kTextureSize; y += brickH)
+    {
+        const int offset = ((y / brickH) % 2) * (brickW / 2);
+        for (int x = -offset; x < kTextureSize; x += brickW)
+        {
+            Color base = ((x + y + variant) % 2 == 0) ? brickA : brickB;
+            const int left = std::max(0, x + 1);
+            const int top = y + 1;
+            const int right = std::min(kTextureSize, x + brickW - 1);
+            const int bottom = std::min(kTextureSize, y + brickH - 1);
+            for (int py = top; py < bottom; ++py)
+            {
+                for (int px = left; px < right; ++px)
+                {
+                    Color pixel = ColorForNoise(base, px + variant * 7, py + variant * 11, 10);
+                    if (py == top)
+                    {
+                        pixel = MixColor(pixel, WHITE, 0.12f);
+                    }
+                    if (py == bottom - 1)
+                    {
+                        pixel = MixColor(pixel, BLACK, 0.14f);
+                    }
+                    ImageDrawPixel(&image, px, py, pixel);
+                }
+            }
+        }
+    }
+    return image;
+}
+
+Image MakeMetalBlockImage()
+{
+    Image image = GenImageColor(kTextureSize, kTextureSize, Color { 94, 104, 114, 255 });
+    for (int y = 0; y < kTextureSize; ++y)
+    {
+        const Color band = (y / 4) % 2 == 0 ? Color { 116, 128, 138, 255 } : Color { 82, 92, 104, 255 };
+        for (int x = 0; x < kTextureSize; ++x)
+        {
+            Color pixel = ColorForNoise(band, x * 2, y + 19, 7);
+            if ((x + y * 3) % 13 == 0)
+            {
+                pixel = MixColor(pixel, WHITE, 0.22f);
+            }
+            ImageDrawPixel(&image, x, y, pixel);
+        }
+    }
+    for (int y = 7; y < kTextureSize; y += 8)
+    {
+        ImageDrawRectangle(&image, 0, y, kTextureSize, 2, Color { 48, 56, 66, 255 });
+    }
+    const int rivets[][2] { { 5, 5 }, { 26, 5 }, { 5, 26 }, { 26, 26 }, { 16, 16 } };
+    for (const auto& rivet : rivets)
+    {
+        ImageDrawRectangle(&image, rivet[0] - 2, rivet[1] - 2, 4, 4, Color { 44, 50, 58, 255 });
+        ImageDrawRectangle(&image, rivet[0] - 1, rivet[1] - 1, 2, 2, Color { 176, 186, 196, 255 });
+    }
+    ImageDrawRectangle(&image, 0, 0, kTextureSize, 1, Color { 196, 206, 214, 255 });
+    ImageDrawRectangle(&image, 0, 0, 1, kTextureSize, Color { 196, 206, 214, 255 });
+    ImageDrawRectangle(&image, 0, kTextureSize - 1, kTextureSize, 1, Color { 38, 44, 52, 255 });
+    ImageDrawRectangle(&image, kTextureSize - 1, 0, 1, kTextureSize, Color { 38, 44, 52, 255 });
+    return image;
+}
+
+Image MakeGlowBlockImage()
+{
+    Image image = GenImageColor(kTextureSize, kTextureSize, Color { 78, 58, 24, 255 });
+    const Vector2 center { 15.5f, 15.5f };
+    for (int y = 0; y < kTextureSize; ++y)
+    {
+        for (int x = 0; x < kTextureSize; ++x)
+        {
+            const float dx = static_cast<float>(x) - center.x;
+            const float dy = static_cast<float>(y) - center.y;
+            const float distance = std::sqrt(dx * dx + dy * dy);
+            const float t = std::clamp(1.0f - distance / 18.0f, 0.0f, 1.0f);
+            Color pixel = MixColor(Color { 168, 104, 28, 255 }, Color { 255, 246, 150, 255 }, t);
+            if ((x / 4 + y / 4) % 2 == 0)
+            {
+                pixel = MixColor(pixel, Color { 255, 214, 78, 255 }, 0.18f);
+            }
+            ImageDrawPixel(&image, x, y, pixel);
+        }
+    }
+    ImageDrawRectangle(&image, 0, 0, kTextureSize, 3, Color { 72, 50, 22, 255 });
+    ImageDrawRectangle(&image, 0, kTextureSize - 3, kTextureSize, 3, Color { 72, 50, 22, 255 });
+    ImageDrawRectangle(&image, 0, 0, 3, kTextureSize, Color { 72, 50, 22, 255 });
+    ImageDrawRectangle(&image, kTextureSize - 3, 0, 3, kTextureSize, Color { 72, 50, 22, 255 });
+    ImageDrawRectangle(&image, 14, 4, 4, 24, Color { 255, 250, 176, 255 });
+    ImageDrawRectangle(&image, 4, 14, 24, 4, Color { 255, 250, 176, 255 });
+    ImageDrawRectangle(&image, 12, 12, 8, 8, Color { 255, 255, 220, 255 });
+    return image;
+}
+
+Image MakePlankVariantImage()
+{
+    Image image = GenImageColor(kTextureSize, kTextureSize, Color { 154, 94, 48, 255 });
+    for (int y = 0; y < kTextureSize; ++y)
+    {
+        const Color plank = (y / 8) % 2 == 0 ? Color { 178, 112, 58, 255 } : Color { 132, 78, 42, 255 };
+        for (int x = 0; x < kTextureSize; ++x)
+        {
+            Color pixel = ColorForNoise(plank, x + 23, y * 3, 12);
+            if ((x * 5 + y) % 17 == 0)
+            {
+                pixel = MixColor(pixel, Color { 82, 48, 28, 255 }, 0.34f);
+            }
+            ImageDrawPixel(&image, x, y, pixel);
+        }
+    }
+    for (int y = 7; y < kTextureSize; y += 8)
+    {
+        ImageDrawRectangle(&image, 0, y, kTextureSize, 2, Color { 76, 44, 26, 255 });
+    }
+    for (int y = 0; y < kTextureSize; y += 8)
+    {
+        const int seamX = (y / 8) % 2 == 0 ? 16 : 8;
+        ImageDrawRectangle(&image, seamX, y + 1, 2, 6, Color { 86, 50, 30, 255 });
+        ImageDrawRectangle(&image, 4, y + 3, 2, 2, Color { 58, 36, 24, 255 });
+        ImageDrawRectangle(&image, 26, y + 3, 2, 2, Color { 58, 36, 24, 255 });
+    }
+    return image;
+}
+
+Image MakeDecorativeTileImage()
+{
+    Image image = GenImageColor(kTextureSize, kTextureSize, Color { 30, 86, 94, 255 });
+    constexpr int tile = 8;
+    for (int y = 0; y < kTextureSize; ++y)
+    {
+        for (int x = 0; x < kTextureSize; ++x)
+        {
+            if (x % tile == 0 || y % tile == 0)
+            {
+                ImageDrawPixel(&image, x, y, Color { 216, 222, 210, 255 });
+                continue;
+            }
+            const bool alt = ((x / tile) + (y / tile)) % 2 == 0;
+            Color base = alt ? Color { 50, 164, 178, 255 } : Color { 42, 120, 156, 255 };
+            const int cx = (x / tile) * tile + tile / 2;
+            const int cy = (y / tile) * tile + tile / 2;
+            if (std::abs(x - cx) + std::abs(y - cy) <= 3)
+            {
+                base = MixColor(base, Color { 234, 220, 128, 255 }, 0.48f);
+            }
+            ImageDrawPixel(&image, x, y, ColorForNoise(base, x, y, 5));
+        }
+    }
+    return image;
+}
+
+Image MakeTrimBlockImage()
+{
+    Image image = MakeTextureImage(Color { 58, 54, 60, 255 }, Color { 98, 88, 72, 255 }, 17);
+    const Color trim { 218, 160, 72, 255 };
+    const Color trimLight { 250, 210, 116, 255 };
+    const Color shadow { 36, 32, 38, 255 };
+    ImageDrawRectangle(&image, 0, 0, kTextureSize, 4, trim);
+    ImageDrawRectangle(&image, 0, kTextureSize - 4, kTextureSize, 4, trim);
+    ImageDrawRectangle(&image, 0, 0, 4, kTextureSize, trim);
+    ImageDrawRectangle(&image, kTextureSize - 4, 0, 4, kTextureSize, trim);
+    ImageDrawRectangle(&image, 5, 5, 22, 22, shadow);
+    ImageDrawRectangle(&image, 7, 7, 18, 18, Color { 72, 66, 72, 255 });
+    for (int i = 0; i < kTextureSize; ++i)
+    {
+        ImageDrawPixel(&image, i, i, trimLight);
+        ImageDrawPixel(&image, kTextureSize - 1 - i, i, trimLight);
+    }
+    ImageDrawRectangle(&image, 13, 13, 6, 6, trimLight);
+    return image;
+}
+
+Image MakeCobblestoneImage()
+{
+    const Color mortar { 66, 70, 76, 255 };
+    Image image = GenImageColor(kTextureSize, kTextureSize, mortar);
+    constexpr int rows[] { 0, 7, 16, 24 };
+    constexpr int widths[] { 11, 13, 10, 14 };
+    for (int row = 0; row < 4; ++row)
+    {
+        const int y = rows[row] + 1;
+        const int h = (row == 1 || row == 3) ? 7 : 8;
+        const int offset = (row % 2 == 0) ? -4 : 2;
+        for (int x = offset; x < kTextureSize; x += widths[row])
+        {
+            const int right = std::min(kTextureSize, x + widths[row] - 1);
+            const int left = std::max(0, x + 1);
+            if (right <= left || y >= kTextureSize)
+            {
+                continue;
+            }
+            const Color stone = ColorForNoise(
+                (row + x / std::max(1, widths[row])) % 2 == 0 ? Color { 128, 133, 138, 255 } : Color { 108, 114, 122, 255 },
+                x, y, 8);
+            ImageDrawRectangle(&image, left, y, right - left, std::min(h, kTextureSize - y), stone);
+            ImageDrawRectangle(&image, left, y, right - left, 1, MixColor(stone, WHITE, 0.16f));
+            ImageDrawRectangle(&image, left, y + h - 1, right - left, 1, MixColor(stone, BLACK, 0.22f));
+        }
+    }
+    return image;
+}
+
+Image MakeAndesiteImage(bool polished)
+{
+    const Color base = polished ? Color { 126, 132, 140, 255 } : Color { 112, 118, 126, 255 };
+    const Color accent = polished ? Color { 168, 174, 182, 255 } : Color { 158, 162, 168, 255 };
+    Image image = MakeTextureImage(base, accent, polished ? 34 : 33);
+    if (polished)
+    {
+        ImageDrawRectangle(&image, 0, 15, kTextureSize, 2, Color { 76, 82, 90, 255 });
+        ImageDrawRectangle(&image, 15, 0, 2, kTextureSize, Color { 76, 82, 90, 255 });
+        ImageDrawRectangle(&image, 0, 0, kTextureSize, 1, Color { 188, 192, 198, 255 });
+        ImageDrawRectangle(&image, 0, 0, 1, kTextureSize, Color { 188, 192, 198, 255 });
+    }
+    else
+    {
+        for (int y = 3; y < kTextureSize; y += 7)
+        {
+            for (int x = (y % 3) + 2; x < kTextureSize; x += 9)
+            {
+                ImageDrawRectangle(&image, x, y, 2, 2, Color { 76, 82, 91, 255 });
+            }
+        }
+    }
+    return image;
+}
+
+Image MakeChiseledStoneImage()
+{
+    Image image = MakeTextureImage(Color { 132, 137, 142, 255 }, Color { 172, 176, 180, 255 }, 35);
+    const Color groove { 68, 72, 78, 255 };
+    ImageDrawRectangle(&image, 2, 2, 28, 28, Color { 150, 155, 160, 255 });
+    ImageDrawRectangle(&image, 4, 4, 24, 24, groove);
+    ImageDrawRectangle(&image, 6, 6, 20, 20, Color { 126, 132, 138, 255 });
+    ImageDrawRectangle(&image, 12, 7, 8, 18, Color { 156, 161, 166, 255 });
+    ImageDrawRectangle(&image, 7, 12, 18, 8, Color { 156, 161, 166, 255 });
+    ImageDrawRectangle(&image, 14, 9, 4, 14, Color { 96, 101, 108, 255 });
+    ImageDrawRectangle(&image, 9, 14, 14, 4, Color { 96, 101, 108, 255 });
+    return image;
+}
+
+Image MakeBirchPlankImage()
+{
+    Image image = GenImageColor(kTextureSize, kTextureSize, Color { 210, 188, 132, 255 });
+    for (int y = 0; y < kTextureSize; ++y)
+    {
+        const Color plank = (y / 8) % 2 == 0 ? Color { 222, 202, 148, 255 } : Color { 194, 168, 112, 255 };
+        for (int x = 0; x < kTextureSize; ++x)
+        {
+            Color pixel = ColorForNoise(plank, x + 41, y * 2, 8);
+            if ((x * 3 + y * 5) % 29 == 0)
+            {
+                pixel = MixColor(pixel, Color { 104, 82, 52, 255 }, 0.42f);
+            }
+            ImageDrawPixel(&image, x, y, pixel);
+        }
+    }
+    for (int y = 7; y < kTextureSize; y += 8)
+    {
+        ImageDrawRectangle(&image, 0, y, kTextureSize, 2, Color { 104, 82, 52, 255 });
+    }
+    return image;
+}
+
+Image MakeColoredGlassImage()
+{
+    Image image = GenImageColor(kTextureSize, kTextureSize, Color { 224, 244, 255, 154 });
+    for (int i = -8; i < kTextureSize; i += 10)
+    {
+        for (int t = 0; t < kTextureSize; ++t)
+        {
+            const int x = i + t;
+            if (x >= 0 && x < kTextureSize)
+            {
+                ImageDrawPixel(&image, x, t, Color { 255, 255, 255, 218 });
+            }
+        }
+    }
+    ImageDrawRectangle(&image, 0, 0, kTextureSize, 2, Color { 244, 254, 255, 218 });
+    ImageDrawRectangle(&image, 0, 0, 2, kTextureSize, Color { 244, 254, 255, 218 });
+    ImageDrawRectangle(&image, 0, kTextureSize - 2, kTextureSize, 2, Color { 86, 124, 154, 166 });
+    ImageDrawRectangle(&image, kTextureSize - 2, 0, 2, kTextureSize, Color { 86, 124, 154, 166 });
+    return image;
+}
+
+Image MakeClayImage()
+{
+    Image image = GenImageColor(kTextureSize, kTextureSize, Color { 178, 154, 126, 255 });
+    for (int y = 0; y < kTextureSize; ++y)
+    {
+        for (int x = 0; x < kTextureSize; ++x)
+        {
+            const int band = (x / 7 + y / 9) % 3;
+            const Color base = band == 0 ? Color { 196, 170, 138, 255 }
+                : (band == 1 ? Color { 158, 132, 108, 255 } : Color { 184, 150, 120, 255 });
+            ImageDrawPixel(&image, x, y, ColorForNoise(base, x + 7, y + 19, 5));
+        }
+    }
+    for (int y = 5; y < kTextureSize; y += 10)
+    {
+        ImageDrawRectangle(&image, 0, y, kTextureSize, 1, Color { 120, 100, 84, 255 });
+    }
+    return image;
+}
+
+Image MakeGemBlockImage(Color base, Color highlight, Color shadow, int variant)
+{
+    Image image = GenImageColor(kTextureSize, kTextureSize, shadow);
+    for (int y = 1; y < kTextureSize; y += 10)
+    {
+        const int offset = ((y / 10) % 2) * 5;
+        for (int x = 1 - offset; x < kTextureSize; x += 10)
+        {
+            // Offset rows intentionally begin outside the left edge.  Raylib's
+            // image drawing helpers do not promise to clip negative pixels, so
+            // clamp the primitive ourselves instead of corrupting image memory.
+            const int left = std::max(0, x + 1);
+            const int right = std::min(kTextureSize, x + 9);
+            const int top = std::max(0, y + 1);
+            const int bottom = std::min(kTextureSize, y + 9);
+            if (left < right && top < bottom)
+            {
+                const int width = right - left;
+                const int height = bottom - top;
+                ImageDrawRectangle(&image, left, top, width, height, ColorForNoise(base, x + variant, y + variant * 2, 8));
+                ImageDrawRectangle(&image, left, top, width, 1, highlight);
+                ImageDrawRectangle(&image, left, bottom - 1, width, 1, shadow);
+            }
+            const int shineX = x + 3;
+            const int shineY = y + 3;
+            if (shineX >= 0 && shineX < kTextureSize && shineY >= 0 && shineY < kTextureSize)
+            {
+                ImageDrawPixel(&image, shineX, shineY, MixColor(highlight, WHITE, 0.28f));
+            }
+        }
+    }
+    return image;
+}
+
+Image MakeLapisImage()
+{
+    Image image = MakeGemBlockImage(Color { 28, 74, 178, 255 }, Color { 88, 146, 244, 255 }, Color { 12, 32, 92, 255 }, 40);
+    for (int y = 4; y < kTextureSize; y += 9)
+    {
+        for (int x = (y % 5) + 2; x < kTextureSize; x += 11)
+        {
+            ImageDrawRectangle(&image, x, y, 2, 2, Color { 246, 196, 74, 255 });
+        }
+    }
+    return image;
+}
+
+Image MakeGoldBlockImage()
+{
+    Image image = MakeGemBlockImage(Color { 226, 168, 42, 255 }, Color { 255, 232, 118, 255 }, Color { 126, 78, 18, 255 }, 44);
+    for (int y = 7; y < kTextureSize; y += 10)
+    {
+        ImageDrawRectangle(&image, 0, y, kTextureSize, 1, Color { 112, 68, 16, 255 });
+    }
+    return image;
+}
+
+Image MakeIronBarsImage()
+{
+    Image image = MakeMetalBlockImage();
+    ImageDrawRectangle(&image, 0, 14, kTextureSize, 4, Color { 48, 56, 66, 255 });
+    ImageDrawRectangle(&image, 14, 0, 4, kTextureSize, Color { 48, 56, 66, 255 });
+    return image;
+}
+
+Image MakeLadderImage()
+{
+    Image image = MakeTextureImage(Color { 126, 82, 44, 255 }, Color { 186, 130, 70, 255 }, 49);
+    ImageDrawRectangle(&image, 3, 0, 4, kTextureSize, Color { 76, 46, 28, 255 });
+    ImageDrawRectangle(&image, 25, 0, 4, kTextureSize, Color { 76, 46, 28, 255 });
+    for (int y = 4; y < kTextureSize; y += 9)
+    {
+        ImageDrawRectangle(&image, 4, y, 24, 3, Color { 174, 112, 58, 255 });
+    }
+    return image;
+}
+
+Image MakeTorchBlockImage()
+{
+    Image image = GenImageColor(kTextureSize, kTextureSize, Color { 116, 70, 36, 255 });
+    ImageDrawRectangle(&image, 12, 0, 8, kTextureSize, Color { 132, 80, 40, 255 });
+    ImageDrawRectangle(&image, 13, 0, 3, kTextureSize, Color { 180, 112, 52, 255 });
+    ImageDrawRectangle(&image, 8, 2, 16, 12, Color { 255, 164, 48, 255 });
+    ImageDrawRectangle(&image, 11, 0, 10, 8, Color { 255, 232, 122, 255 });
     return image;
 }
 
@@ -301,6 +725,27 @@ Texture2D LoadProceduralTexture(Image image)
     return texture;
 }
 
+// World-block sampling: crisp pixel-art up close (nearest magnification) but
+// mipmapped + anisotropic in the distance, which kills the texture shimmer
+// on far islands without blurring nearby walls.
+void ApplyWorldTextureSampling(Texture2D& texture)
+{
+    if (texture.id == 0)
+    {
+        return;
+    }
+    GenTextureMipmaps(&texture);
+    if (texture.mipmaps <= 1)
+    {
+        // NPOT or context limitation: stay on plain point sampling rather
+        // than pointing MIN_FILTER at mip levels that do not exist.
+        return;
+    }
+    rlTextureParameters(texture.id, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_NEAREST_MIP_LINEAR);
+    rlTextureParameters(texture.id, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_NEAREST);
+    rlTextureParameters(texture.id, RL_TEXTURE_FILTER_ANISOTROPIC, 8);
+}
+
 std::string FindAssetFile(const std::string& relativePath)
 {
     const std::string candidates[] {
@@ -329,6 +774,102 @@ Texture2D LoadCustomizableTexture(const char* assetName, Image fallback)
         return texture;
     }
     return LoadProceduralTexture(fallback);
+}
+
+// Bakes a tangent-space normal map from the albedo treated as a height
+// field (dark mortar and grain lines read as recessed).  Alpha packs the
+// material gloss mask so shiny blocks need no extra texture.  Edges wrap
+// because block textures tile across faces.
+Image MakeNormalMapImage(const Image& albedo, float bumpStrength, unsigned char materialAlpha)
+{
+    const int width = albedo.width;
+    const int height = albedo.height;
+    Image normalImage = GenImageColor(width, height, Color { 128, 128, 255, materialAlpha });
+    if (width <= 0 || height <= 0)
+    {
+        return normalImage;
+    }
+
+    Color* pixels = LoadImageColors(albedo);
+    if (pixels == nullptr)
+    {
+        return normalImage;
+    }
+    std::vector<float> heights(static_cast<std::size_t>(width) * height);
+    for (int i = 0; i < width * height; ++i)
+    {
+        const Color& pixel = pixels[i];
+        heights[i] = (0.2126f * pixel.r + 0.7152f * pixel.g + 0.0722f * pixel.b) / 255.0f;
+    }
+    UnloadImageColors(pixels);
+
+    const auto heightAt = [&heights, width, height](int x, int y)
+    {
+        const int wrappedX = (x % width + width) % width;
+        const int wrappedY = (y % height + height) % height;
+        return heights[static_cast<std::size_t>(wrappedY) * width + wrappedX];
+    };
+
+    for (int y = 0; y < height; ++y)
+    {
+        for (int x = 0; x < width; ++x)
+        {
+            // Sobel gradients; image +y runs along the bitangent, so the
+            // packed normal matches the face basis built in lighting.fs.
+            const float gradientX =
+                (heightAt(x + 1, y - 1) + 2.0f * heightAt(x + 1, y) + heightAt(x + 1, y + 1))
+                - (heightAt(x - 1, y - 1) + 2.0f * heightAt(x - 1, y) + heightAt(x - 1, y + 1));
+            const float gradientY =
+                (heightAt(x - 1, y + 1) + 2.0f * heightAt(x, y + 1) + heightAt(x + 1, y + 1))
+                - (heightAt(x - 1, y - 1) + 2.0f * heightAt(x, y - 1) + heightAt(x + 1, y - 1));
+            const float nx = -gradientX * bumpStrength;
+            const float ny = -gradientY * bumpStrength;
+            const float inverseLength = 1.0f / std::sqrt(nx * nx + ny * ny + 1.0f);
+            const auto pack = [](float component)
+            {
+                return static_cast<unsigned char>(std::clamp(component * 0.5f + 0.5f, 0.0f, 1.0f) * 255.0f + 0.5f);
+            };
+            ImageDrawPixel(&normalImage, x, y, Color {
+                pack(nx * inverseLength),
+                pack(ny * inverseLength),
+                pack(inverseLength),
+                materialAlpha
+            });
+        }
+    }
+    return normalImage;
+}
+
+// Same override contract as LoadCustomizableTexture, but also derives the
+// normal map from whichever albedo actually ends up on screen, so a PNG in
+// assets/items/ keeps its relief consistent automatically.
+Texture2D LoadCustomizableTextureWithNormal(
+    const char* assetName,
+    Image fallback,
+    float bumpStrength,
+    unsigned char materialAlpha,
+    Texture2D& normalTexture)
+{
+    const std::string path = FindAssetFile(std::string("assets/items/") + assetName + ".png");
+    Image albedo = fallback;
+    if (!path.empty())
+    {
+        Image loaded = LoadImage(path.c_str());
+        if (loaded.data != nullptr)
+        {
+            UnloadImage(fallback);
+            albedo = loaded;
+        }
+    }
+
+    Image normalImage = MakeNormalMapImage(albedo, bumpStrength, materialAlpha);
+    normalTexture = LoadTextureFromImage(normalImage);
+    UnloadImage(normalImage);
+    if (normalTexture.id != 0)
+    {
+        SetTextureFilter(normalTexture, TEXTURE_FILTER_POINT);
+    }
+    return LoadProceduralTexture(albedo);
 }
 
 void DrawDepthTestedBillboard(Camera3D camera, Texture2D texture, Vector3 position, float size, Color tint)
@@ -478,15 +1019,41 @@ void DrawFogWall(float minX, float maxX, float minZ, float maxZ, float minY, flo
     rlEnd();
 }
 
-void DrawDistantFog(Color skyColor)
+void DrawDistantFog(Color skyColor, Vector3 boundsMin, Vector3 boundsMax, bool boundsValid)
 {
-    const Color fog = MixColor(skyColor, WHITE, 0.16f);
-    DrawFogWall(-70.0f, 70.0f, -70.0f, 70.0f, -36.0f, 34.0f, fog, 34);
-    DrawFogWall(-82.0f, 82.0f, -82.0f, 82.0f, -42.0f, 38.0f, fog, 52);
-    DrawFogWall(-96.0f, 96.0f, -96.0f, 96.0f, -48.0f, 42.0f, fog, 74);
+    // The fog shell hugs the actual map: on the stock arena these come out
+    // close to the legacy hard-coded walls, while a large imported map (the
+    // castle spans over +-100) pushes them outward instead of being sliced
+    // by translucent quads through its middle.
+    if (!boundsValid)
+    {
+        boundsMin = Vector3 { -50.0f, -4.0f, -50.0f };
+        boundsMax = Vector3 { 50.0f, 30.0f, 50.0f };
+    }
 
-    DrawPlane(Vector3 { 0.0f, -12.0f, 0.0f }, Vector2 { 156.0f, 156.0f }, Fade(fog, 0.08f));
-    DrawPlane(Vector3 { 0.0f, -20.0f, 0.0f }, Vector2 { 210.0f, 210.0f }, Fade(fog, 0.10f));
+    const Color fog = MixColor(skyColor, WHITE, 0.16f);
+    const unsigned char alphas[] { 34, 52, 74 };
+    for (int tier = 0; tier < 3; ++tier)
+    {
+        const float margin = 20.0f + 13.0f * static_cast<float>(tier);
+        DrawFogWall(
+            boundsMin.x - margin,
+            boundsMax.x + margin,
+            boundsMin.z - margin,
+            boundsMax.z + margin,
+            boundsMin.y - 36.0f - 6.0f * static_cast<float>(tier),
+            boundsMax.y + 5.0f + 4.0f * static_cast<float>(tier),
+            fog,
+            alphas[tier]);
+    }
+
+    const float centerX = (boundsMin.x + boundsMax.x) * 0.5f;
+    const float centerZ = (boundsMin.z + boundsMax.z) * 0.5f;
+    const float spanX = boundsMax.x - boundsMin.x;
+    const float spanZ = boundsMax.z - boundsMin.z;
+    const float planeSpan = std::max(spanX, spanZ);
+    DrawPlane(Vector3 { centerX, boundsMin.y - 14.0f, centerZ }, Vector2 { planeSpan + 60.0f, planeSpan + 60.0f }, Fade(fog, 0.08f));
+    DrawPlane(Vector3 { centerX, boundsMin.y - 22.0f, centerZ }, Vector2 { planeSpan + 115.0f, planeSpan + 115.0f }, Fade(fog, 0.10f));
 }
 
 void DrawSkyVoid(Color skyColor, float cameraY)
@@ -587,9 +1154,9 @@ ItemType ShopIconItem(int choice)
     switch (choice)
     {
     case 1:
-        return ItemType::WoodBlock;
-    case 2:
         return ItemType::LightBlock;
+    case 2:
+        return ItemType::WoodBlock;
     case 3:
         return ItemType::StoneBlock;
     case 4:
@@ -1060,12 +1627,30 @@ Color ItemUiColor(ItemType type)
     return Color { 220, 224, 235, 255 };
 }
 
+Color MinecraftDyeColor(int variant)
+{
+    // Minecraft 1.12 dye IDs: white, orange, magenta, light-blue, yellow,
+    // lime, pink, gray, light-gray, cyan, purple, blue, brown, green, red,
+    // black.  Import keeps this in Block::variant rather than team ownership.
+    static constexpr Color kDyes[] {
+        Color { 222, 222, 218, 255 }, Color { 224, 124, 42, 255 },
+        Color { 198, 90, 210, 255 }, Color { 102, 172, 222, 255 },
+        Color { 232, 208, 62, 255 }, Color { 114, 202, 58, 255 },
+        Color { 236, 142, 172, 255 }, Color { 72, 76, 82, 255 },
+        Color { 156, 164, 170, 255 }, Color { 46, 152, 166, 255 },
+        Color { 122, 72, 172, 255 }, Color { 54, 86, 194, 255 },
+        Color { 108, 72, 44, 255 }, Color { 68, 126, 62, 255 },
+        Color { 202, 54, 48, 255 }, Color { 34, 38, 44, 255 }
+    };
+    return kDyes[std::clamp(variant, 0, 15)];
+}
+
 bool IsTransparentBlock(BlockType type, Color color)
 {
     return color.a < 255
         || type == BlockType::EnergyGlassBlock
-        || type == BlockType::IceBlock
-        || type == BlockType::LeafBlock;
+        || type == BlockType::ColoredGlassBlock
+        || type == BlockType::IceBlock;
 }
 
 ItemStack VisibleHeldItemForPlayer(const Player& player, const ItemStack& localHeldItem)
@@ -1267,21 +1852,73 @@ bool Renderer::Initialize()
         return true;
     }
 
-    grassTexture_ = LoadCustomizableTexture("grass_block", MakeGrassImage());
-    dirtTexture_ = LoadCustomizableTexture("dirt_block", MakeTextureImage(Color { 112, 78, 52, 255 }, Color { 86, 58, 38, 255 }, 5));
-    leafTexture_ = LoadCustomizableTexture("leaf_block", MakeTextureImage(Color { 64, 132, 62, 245 }, Color { 112, 178, 86, 255 }, 6));
-    woodTexture_ = LoadCustomizableTexture("wood_block", MakeWoodImage());
-    teamChestTexture_ = LoadCustomizableTexture("team_chest_block", MakeTeamChestImage());
-    woolTexture_ = LoadCustomizableTexture("wool_block", MakeWoolImage());
-    stoneTexture_ = LoadCustomizableTexture("stone_block", MakeTextureImage(Color { 132, 138, 148, 255 }, Color { 88, 94, 108, 255 }, 7));
-    obsidianTexture_ = LoadCustomizableTexture("obsidian_block", MakeTextureImage(Color { 38, 28, 54, 255 }, Color { 90, 52, 132, 255 }, 8));
+    // Key opaque materials also bake a normal map + gloss mask (see
+    // MakeNormalMapImage); the bump scale and mask are per-material knobs.
+    const auto loadBlockWithNormal = [this](
+        BlockType type, const char* assetName, Image fallback, float bump, unsigned char material)
+    {
+        Texture2D normalTexture {};
+        Texture2D albedo = LoadCustomizableTextureWithNormal(assetName, fallback, bump, material, normalTexture);
+        ApplyWorldTextureSampling(albedo);
+        ApplyWorldTextureSampling(normalTexture);
+        blockNormalTextures_[static_cast<std::size_t>(type)] = normalTexture;
+        return albedo;
+    };
+    grassTexture_ = loadBlockWithNormal(BlockType::GrassBlock, "grass_block", MakeGrassImage(), 1.6f, 10);
+    dirtTexture_ = loadBlockWithNormal(BlockType::DirtBlock, "dirt_block", MakeTextureImage(Color { 112, 78, 52, 255 }, Color { 86, 58, 38, 255 }, 5), 1.8f, 8);
+    leafTexture_ = LoadCustomizableTexture("leaf_block", MakeTextureImage(Color { 64, 132, 62, 255 }, Color { 112, 178, 86, 255 }, 6));
+    woodTexture_ = loadBlockWithNormal(BlockType::WoodBlock, "wood_block", MakeWoodImage(), 2.4f, 26);
+    teamChestTexture_ = loadBlockWithNormal(BlockType::TeamChestBlock, "team_chest_block", MakeTeamChestImage(), 2.0f, 60);
+    woolTexture_ = loadBlockWithNormal(BlockType::WoolBlock, "wool_block", MakeWoolImage(), 1.2f, 8);
+    stoneTexture_ = loadBlockWithNormal(BlockType::StoneBlock, "stone_block", MakeTextureImage(Color { 132, 138, 148, 255 }, Color { 88, 94, 108, 255 }, 7), 2.2f, 55);
+    smoothStoneTexture_ = loadBlockWithNormal(BlockType::SmoothStoneBlock, "smooth_stone_block", MakeSmoothStoneImage(), 1.6f, 120);
+    darkBrickTexture_ = loadBlockWithNormal(BlockType::DarkBrickBlock, "dark_brick_block", MakeBrickImage(Color { 42, 38, 46, 255 }, Color { 84, 72, 88, 255 }, Color { 62, 54, 70, 255 }, 18), 2.6f, 42);
+    lightBrickTexture_ = loadBlockWithNormal(BlockType::LightBrickBlock, "light_brick_block", MakeBrickImage(Color { 166, 150, 122, 255 }, Color { 224, 204, 166, 255 }, Color { 194, 170, 132, 255 }, 19), 2.6f, 46);
+    metalBlockTexture_ = loadBlockWithNormal(BlockType::MetalBlock, "metal_block", MakeMetalBlockImage(), 2.0f, 230);
+    glowBlockTexture_ = loadBlockWithNormal(BlockType::GlowBlock, "glow_block", MakeGlowBlockImage(), 1.6f, 220);
+    plankVariantTexture_ = loadBlockWithNormal(BlockType::PlankBlock, "plank_block", MakePlankVariantImage(), 2.4f, 32);
+    decorativeTileTexture_ = loadBlockWithNormal(BlockType::DecorativeTileBlock, "decorative_tile_block", MakeDecorativeTileImage(), 2.2f, 130);
+    trimBlockTexture_ = loadBlockWithNormal(BlockType::TrimBlock, "trim_block", MakeTrimBlockImage(), 2.0f, 90);
+    cobblestoneTexture_ = loadBlockWithNormal(BlockType::CobblestoneBlock, "cobblestone_block", MakeCobblestoneImage(), 3.1f, 36);
+    andesiteTexture_ = loadBlockWithNormal(BlockType::AndesiteBlock, "andesite_block", MakeAndesiteImage(false), 1.9f, 54);
+    polishedAndesiteTexture_ = loadBlockWithNormal(BlockType::PolishedAndesiteBlock, "polished_andesite_block", MakeAndesiteImage(true), 1.35f, 142);
+    stoneBrickTexture_ = loadBlockWithNormal(BlockType::StoneBrickBlock, "stone_brick_block", MakeBrickImage(Color { 76, 82, 90, 255 }, Color { 142, 148, 154, 255 }, Color { 116, 123, 132, 255 }, 37), 2.8f, 46);
+    chiseledStoneBrickTexture_ = loadBlockWithNormal(BlockType::ChiseledStoneBrickBlock, "chiseled_stone_brick_block", MakeChiseledStoneImage(), 3.3f, 74);
+    birchPlankTexture_ = loadBlockWithNormal(BlockType::BirchPlankBlock, "birch_plank_block", MakeBirchPlankImage(), 2.6f, 34);
+    coloredGlassTexture_ = LoadCustomizableTexture("colored_glass_block", MakeColoredGlassImage());
+    coloredClayTexture_ = loadBlockWithNormal(BlockType::ColoredClayBlock, "colored_clay_block", MakeClayImage(), 1.8f, 22);
+    lapisTexture_ = loadBlockWithNormal(BlockType::LapisBlock, "lapis_block", MakeLapisImage(), 2.3f, 194);
+    diamondTexture_ = loadBlockWithNormal(BlockType::DiamondBlock, "diamond_block", MakeGemBlockImage(Color { 74, 202, 214, 255 }, Color { 176, 255, 252, 255 }, Color { 24, 108, 122, 255 }, 41), 2.0f, 232);
+    emeraldTexture_ = loadBlockWithNormal(BlockType::EmeraldBlock, "emerald_block", MakeGemBlockImage(Color { 38, 168, 92, 255 }, Color { 142, 255, 170, 255 }, Color { 14, 78, 42, 255 }, 42), 2.0f, 218);
+    goldTexture_ = loadBlockWithNormal(BlockType::GoldBlock, "gold_block", MakeGoldBlockImage(), 2.4f, 240);
+    ironBarsTexture_ = loadBlockWithNormal(BlockType::IronBarsBlock, "iron_bars_block", MakeIronBarsImage(), 2.7f, 186);
+    ladderTexture_ = loadBlockWithNormal(BlockType::LadderBlock, "ladder_block", MakeLadderImage(), 2.6f, 30);
+    torchTexture_ = loadBlockWithNormal(BlockType::TorchBlock, "torch_block", MakeTorchBlockImage(), 1.5f, 218);
+    obsidianTexture_ = loadBlockWithNormal(BlockType::ObsidianBlock, "obsidian_block", MakeTextureImage(Color { 38, 28, 54, 255 }, Color { 90, 52, 132, 255 }, 8), 1.8f, 160);
     glassTexture_ = LoadCustomizableTexture("energy_glass_block", MakeTextureImage(Color { 112, 232, 255, 150 }, Color { 220, 252, 255, 210 }, 9));
-    springTexture_ = LoadCustomizableTexture("spring_block", MakeTextureImage(Color { 92, 196, 124, 255 }, Color { 255, 235, 142, 255 }, 10));
-    stickyTexture_ = LoadCustomizableTexture("sticky_block", MakeTextureImage(Color { 92, 184, 118, 255 }, Color { 40, 112, 72, 255 }, 11));
-    tntTexture_ = LoadCustomizableTexture("explosive_block", MakeTntImage());
-    spikeTexture_ = LoadCustomizableTexture("spike_block", MakeTextureImage(Color { 148, 148, 158, 255 }, Color { 236, 236, 244, 255 }, 12));
-    lavaTexture_ = LoadCustomizableTexture("lava_block", MakeTextureImage(Color { 230, 70, 28, 255 }, Color { 255, 210, 66, 255 }, 13));
+    springTexture_ = loadBlockWithNormal(BlockType::SpringBlock, "spring_block", MakeTextureImage(Color { 92, 196, 124, 255 }, Color { 255, 235, 142, 255 }, 10), 1.6f, 60);
+    stickyTexture_ = loadBlockWithNormal(BlockType::StickyBlock, "sticky_block", MakeTextureImage(Color { 92, 184, 118, 255 }, Color { 40, 112, 72, 255 }, 11), 1.6f, 80);
+    tntTexture_ = loadBlockWithNormal(BlockType::ExplosiveBlock, "explosive_block", MakeTntImage(), 1.8f, 24);
+    spikeTexture_ = loadBlockWithNormal(BlockType::SpikeBlock, "spike_block", MakeTextureImage(Color { 148, 148, 158, 255 }, Color { 236, 236, 244, 255 }, 12), 1.8f, 140);
+    lavaTexture_ = loadBlockWithNormal(BlockType::LavaBlock, "lava_block", MakeTextureImage(Color { 230, 70, 28, 255 }, Color { 255, 210, 66, 255 }, 13), 2.2f, 210);
     iceTexture_ = LoadCustomizableTexture("ice_block", MakeTextureImage(Color { 150, 225, 255, 190 }, Color { 230, 250, 255, 230 }, 14));
+    // Blocks without a normal map still want the distance-mip sampling.
+    ApplyWorldTextureSampling(leafTexture_);
+    ApplyWorldTextureSampling(coloredGlassTexture_);
+    ApplyWorldTextureSampling(glassTexture_);
+    ApplyWorldTextureSampling(iceTexture_);
+
+    // Neutral flat normal so chunk materials always have a valid map bound:
+    // an unbound "texture2" sampler would read whatever unit 2 last held.
+    {
+        Image flatNormal = GenImageColor(4, 4, Color { 128, 128, 255, 30 });
+        flatNormalTexture_ = LoadTextureFromImage(flatNormal);
+        UnloadImage(flatNormal);
+        if (flatNormalTexture_.id != 0)
+        {
+            SetTextureFilter(flatNormalTexture_, TEXTURE_FILTER_POINT);
+        }
+    }
     swordIcon_ = LoadCustomizableTexture("sword", MakeSwordIcon());
     axeIcon_ = LoadCustomizableTexture("axe", MakeAxeIcon());
     spearIcon_ = LoadCustomizableTexture("spear", MakeSpearIcon());
@@ -1324,6 +1961,29 @@ void Renderer::Shutdown()
     UnloadTexture(teamChestTexture_);
     UnloadTexture(woolTexture_);
     UnloadTexture(stoneTexture_);
+    UnloadTexture(smoothStoneTexture_);
+    UnloadTexture(darkBrickTexture_);
+    UnloadTexture(lightBrickTexture_);
+    UnloadTexture(metalBlockTexture_);
+    UnloadTexture(glowBlockTexture_);
+    UnloadTexture(plankVariantTexture_);
+    UnloadTexture(decorativeTileTexture_);
+    UnloadTexture(trimBlockTexture_);
+    UnloadTexture(cobblestoneTexture_);
+    UnloadTexture(andesiteTexture_);
+    UnloadTexture(polishedAndesiteTexture_);
+    UnloadTexture(stoneBrickTexture_);
+    UnloadTexture(chiseledStoneBrickTexture_);
+    UnloadTexture(birchPlankTexture_);
+    UnloadTexture(coloredGlassTexture_);
+    UnloadTexture(coloredClayTexture_);
+    UnloadTexture(lapisTexture_);
+    UnloadTexture(diamondTexture_);
+    UnloadTexture(emeraldTexture_);
+    UnloadTexture(goldTexture_);
+    UnloadTexture(ironBarsTexture_);
+    UnloadTexture(ladderTexture_);
+    UnloadTexture(torchTexture_);
     UnloadTexture(obsidianTexture_);
     UnloadTexture(glassTexture_);
     UnloadTexture(springTexture_);
@@ -1346,6 +2006,20 @@ void Renderer::Shutdown()
     UnloadTexture(ironIcon_);
     UnloadTexture(goldIcon_);
     UnloadTexture(crystalIcon_);
+    for (Texture2D& normalTexture : blockNormalTextures_)
+    {
+        if (normalTexture.id != 0)
+        {
+            UnloadTexture(normalTexture);
+            normalTexture = {};
+        }
+    }
+    if (flatNormalTexture_.id != 0)
+    {
+        UnloadTexture(flatNormalTexture_);
+        flatNormalTexture_ = {};
+    }
+    UnloadShadowTarget();
     heroVisuals_.Shutdown();
     if (heroPreviewTarget_.id != 0)
     {
@@ -1365,12 +2039,220 @@ void Renderer::SetShadowQuality(int quality)
     shadowQuality_ = std::clamp(quality, 0, 2);
 }
 
+void Renderer::SyncChunks(const World& world, const std::vector<Team>& teams) const
+{
+    chunkRenderer_.Sync(
+        world,
+        [this, &teams](const Block& block) { return GetBlockColor(block, teams); },
+        [this](BlockType type) { return GetBlockTexture(type); },
+        [](const Block& block, Color color) { return IsTransparentBlock(block.type, color); },
+        [this](BlockType type) { return GetBlockNormalTexture(type); },
+        // Without the lighting shader the vertex alpha reaches the default
+        // pipeline as real transparency, so AO may only be baked when the
+        // scene shader is live.
+        sceneShader_.IsReady());
+}
+
+void Renderer::UpdateMapPointLights(const World& world) const
+{
+    const std::uint64_t revision = world.GetRenderRevision();
+    if (mapPointLightsRevision_ == revision)
+    {
+        return;
+    }
+
+    mapPointLights_.clear();
+    // The same full-block scan also caches the world bounding box; the fog
+    // walls and void planes size themselves from it instead of assuming the
+    // stock arena footprint.
+    worldBoundsValid_ = false;
+    for (const auto& [pos, block] : world.GetBlocks())
+    {
+        const Vector3 blockCenter = world.GridToWorld(pos);
+        if (!worldBoundsValid_)
+        {
+            worldBoundsMin_ = blockCenter;
+            worldBoundsMax_ = blockCenter;
+            worldBoundsValid_ = true;
+        }
+        else
+        {
+            worldBoundsMin_.x = std::min(worldBoundsMin_.x, blockCenter.x);
+            worldBoundsMin_.y = std::min(worldBoundsMin_.y, blockCenter.y);
+            worldBoundsMin_.z = std::min(worldBoundsMin_.z, blockCenter.z);
+            worldBoundsMax_.x = std::max(worldBoundsMax_.x, blockCenter.x);
+            worldBoundsMax_.y = std::max(worldBoundsMax_.y, blockCenter.y);
+            worldBoundsMax_.z = std::max(worldBoundsMax_.z, blockCenter.z);
+        }
+        if (block.type != BlockType::TorchBlock)
+        {
+            continue;
+        }
+        // Wall torches (legacy Minecraft data 1..4) hang off the wall plane;
+        // the light source sits at the flame tip, not the cell center.
+        float flameX = 0.0f;
+        float flameZ = 0.0f;
+        float flameY = 0.27f;
+        switch (block.variant & 0x07)
+        {
+        case 1: flameX = -0.14f; flameY = 0.34f; break;
+        case 2: flameX = 0.14f; flameY = 0.34f; break;
+        case 3: flameZ = -0.14f; flameY = 0.34f; break;
+        case 4: flameZ = 0.14f; flameY = 0.34f; break;
+        default: break;
+        }
+        const Vector3 center = world.GridToWorld(pos);
+        mapPointLights_.push_back(ScenePointLight {
+            Vector3 { center.x + flameX, center.y + flameY, center.z + flameZ },
+            Color { 255, 188, 92, 255 },
+            7.5f,
+            1.18f
+        });
+    }
+    mapPointLightsRevision_ = revision;
+}
+
+void Renderer::SetNearestMapPointLights(const Camera3D& camera) const
+{
+    std::vector<ScenePointLight> nearest = mapPointLights_;
+    std::sort(nearest.begin(), nearest.end(), [&camera](const ScenePointLight& a, const ScenePointLight& b)
+    {
+        return DistanceSquared(a.position, camera.position) < DistanceSquared(b.position, camera.position);
+    });
+    constexpr std::size_t kMaxSceneLights = 12;
+    if (nearest.size() > kMaxSceneLights)
+    {
+        nearest.resize(kMaxSceneLights);
+    }
+    sceneShader_.SetPointLights(nearest);
+}
+
+bool Renderer::EnsureShadowTarget(int resolution)
+{
+    if (shadowTarget_.id != 0 && shadowResolution_ == resolution)
+    {
+        return true;
+    }
+    UnloadShadowTarget();
+    if (shadowTargetFailed_)
+    {
+        // The driver rejected a depth-only framebuffer once; keep the blob
+        // fallback instead of hammering FBO creation every frame.
+        return false;
+    }
+
+    // Depth-only render target, mirroring raylib's shadowmap example: no
+    // color attachment, the depth texture is what the lighting shader reads.
+    RenderTexture2D target {};
+    target.id = rlLoadFramebuffer(resolution, resolution);
+    if (target.id == 0)
+    {
+        TraceLog(LOG_WARNING, "SHADOW: framebuffer creation failed; sun shadows disabled");
+        shadowTargetFailed_ = true;
+        return false;
+    }
+    // BeginTextureMode reads the viewport size from target.texture.
+    target.texture.width = resolution;
+    target.texture.height = resolution;
+    rlEnableFramebuffer(target.id);
+    target.depth.id = rlLoadTextureDepth(resolution, resolution, false);
+    target.depth.width = resolution;
+    target.depth.height = resolution;
+    target.depth.format = 19;
+    target.depth.mipmaps = 1;
+    rlFramebufferAttach(target.id, target.depth.id, RL_ATTACHMENT_DEPTH, RL_ATTACHMENT_TEXTURE2D, 0);
+    const bool complete = rlFramebufferComplete(target.id);
+    rlDisableFramebuffer();
+    if (!complete || target.depth.id == 0)
+    {
+        TraceLog(LOG_WARNING, "SHADOW: depth framebuffer incomplete; sun shadows disabled");
+        rlUnloadFramebuffer(target.id);
+        shadowTargetFailed_ = true;
+        return false;
+    }
+    // PCF reads outside the ortho window must clamp, not wrap to the other
+    // side of the map.
+    rlTextureParameters(target.depth.id, RL_TEXTURE_WRAP_S, RL_TEXTURE_WRAP_CLAMP);
+    rlTextureParameters(target.depth.id, RL_TEXTURE_WRAP_T, RL_TEXTURE_WRAP_CLAMP);
+    shadowTarget_ = target;
+    shadowResolution_ = resolution;
+    return true;
+}
+
+void Renderer::UnloadShadowTarget()
+{
+    if (shadowTarget_.id != 0)
+    {
+        // rlUnloadFramebuffer also deletes the attached depth texture.
+        rlUnloadFramebuffer(shadowTarget_.id);
+        shadowTarget_ = {};
+    }
+    shadowResolution_ = 0;
+    sunShadowsValid_ = false;
+}
+
+void Renderer::PrepareSunShadows(const World& world, const std::vector<Team>& teams, const Camera3D& camera)
+{
+    sunShadowsValid_ = false;
+    if (shadowQuality_ <= 0 || !texturesReady_ || !sceneShader_.IsReady())
+    {
+        return;
+    }
+    const int resolution = shadowQuality_ >= 2 ? 2048 : 1024;
+    if (!EnsureShadowTarget(resolution))
+    {
+        return;
+    }
+
+    SyncChunks(world, teams);
+    UpdateMapPointLights(world);
+
+    // Ortho volume follows the camera, biased toward the view direction so
+    // most of the texel budget lands where the player is looking.
+    const float radius = shadowQuality_ >= 2 ? 64.0f : 48.0f;
+    const Vector3 forward = Vector3Normalize(Vector3Subtract(camera.target, camera.position));
+    Vector3 focus = Vector3Add(camera.position, Vector3Scale(forward, radius * 0.35f));
+
+    // Snap the window to whole shadow texels in light space; otherwise every
+    // camera move makes block shadow edges shimmer.
+    const float worldPerTexel = (radius * 2.0f) / static_cast<float>(resolution);
+    const Vector3 up { 0.0f, 1.0f, 0.0f };
+    const Matrix lightRotation = MatrixLookAt(Vector3 { 0.0f, 0.0f, 0.0f }, kSceneSunDirection, up);
+    Vector3 lightSpaceFocus = Vector3Transform(focus, lightRotation);
+    lightSpaceFocus.x = std::floor(lightSpaceFocus.x / worldPerTexel) * worldPerTexel;
+    lightSpaceFocus.y = std::floor(lightSpaceFocus.y / worldPerTexel) * worldPerTexel;
+    focus = Vector3Transform(lightSpaceFocus, MatrixInvert(lightRotation));
+
+    Camera3D lightCamera {};
+    lightCamera.position = Vector3Subtract(focus, Vector3Scale(kSceneSunDirection, 180.0f));
+    lightCamera.target = focus;
+    lightCamera.up = up;
+    // For CAMERA_ORTHOGRAPHIC raylib treats fovy as the world-space window
+    // height; the square depth target keeps the aspect at 1.
+    lightCamera.fovy = radius * 2.0f;
+    lightCamera.projection = CAMERA_ORTHOGRAPHIC;
+
+    BeginTextureMode(shadowTarget_);
+    ClearBackground(WHITE);
+    BeginMode3D(lightCamera);
+    const Matrix lightView = rlGetMatrixModelview();
+    const Matrix lightProjection = rlGetMatrixProjection();
+    // Only depth matters here: color writes land in a framebuffer without a
+    // color attachment, so the default material shader is good enough.
+    chunkRenderer_.Draw(lightCamera, 180.0f + radius * 2.0f, Shader {});
+    EndMode3D();
+    EndTextureMode();
+
+    sunLightViewProj_ = MatrixMultiply(lightView, lightProjection);
+    sunShadowsValid_ = true;
+}
+
 const ChunkRenderStats& Renderer::GetChunkRenderStats() const
 {
     return chunkRenderer_.GetStats();
 }
 
-void Renderer::RenderHeroPreview(HeroId heroId, Rectangle destination, float yawDegrees) const
+void Renderer::RenderHeroPreview(HeroId heroId, Rectangle destination, float yawDegrees, bool portrait) const
 {
     const HeroVisualAsset* visual = heroVisuals_.Find(heroId);
     if (visual == nullptr || heroPreviewTarget_.id == 0)
@@ -1397,31 +2279,69 @@ void Renderer::RenderHeroPreview(HeroId heroId, Rectangle destination, float yaw
     const float depth = std::max(0.2f, bounds.max.z - bounds.min.z);
     const float radius = std::max({ width, height * 0.72f, depth, 1.0f });
     const float yaw = yawDegrees * kPi / 180.0f;
+    // Keep the showcase silhouette comfortably inside its panel.  A small
+    // preview gets extra breathing room, while larger screens can use more of
+    // the stage without the model becoming a wall of pixels.
+    const float previewExtent = std::max(1.0f, std::min(destination.width, destination.height));
+    const float compactPreview = std::clamp(420.0f / previewExtent, 0.0f, 0.38f);
+    const float cameraDistance = radius * (portrait ? 1.68f : 5.20f + compactPreview * 0.60f);
+    const Vector3 cameraTarget {
+        center.x,
+        center.y + (portrait ? height * 0.20f : 0.0f),
+        center.z
+    };
     Camera3D previewCamera {
-        Vector3 { center.x + std::sin(yaw) * radius * 2.15f, center.y + height * 0.12f, center.z + std::cos(yaw) * radius * 2.15f },
-        center,
+        Vector3 { center.x + std::sin(yaw) * cameraDistance,
+                  center.y + height * (portrait ? 0.22f : 0.12f),
+                  center.z + std::cos(yaw) * cameraDistance },
+        cameraTarget,
         Vector3 { 0.0f, 1.0f, 0.0f },
         34.0f,
         CAMERA_PERSPECTIVE
     };
 
     BeginTextureMode(heroPreviewTarget_);
-    ClearBackground(Color { 9, 12, 18, 255 });
+    ClearBackground(Color { 7, 9, 14, 255 });
     BeginMode3D(previewCamera);
+    const Color heroColor = HeroUiColor(heroId);
+    if (!portrait)
+    {
+        const Vector3 podiumCenter { center.x, bounds.min.y - 0.15f, center.z };
+        DrawCylinder(podiumCenter, radius * 0.60f, radius * 0.54f, 0.18f, 48,
+                     Fade(Color { 38, 42, 52, 255 }, 0.98f));
+        DrawCylinderWires(podiumCenter, radius * 0.60f, radius * 0.54f, 0.18f, 48,
+                          Fade(heroColor, 0.76f));
+        DrawCylinder(Vector3 { center.x, bounds.min.y - 0.055f, center.z },
+                     radius * 0.48f, radius * 0.48f, 0.025f, 48, Fade(heroColor, 0.30f));
+    }
     heroVisuals_.ApplyAnimation(heroId, HeroAnimationState::Idle, 0.0f, static_cast<float>(GetTime()));
     DrawModel(visual->model, Vector3 { 0.0f, 0.0f, 0.0f }, 1.0f, WHITE);
-    DrawCylinderWires(Vector3 { center.x, bounds.min.y - 0.02f, center.z }, radius * 0.52f, radius * 0.52f, 0.025f, 32, Fade(HeroUiColor(heroId), 0.54f));
+    if (!portrait)
+    {
+        DrawCylinderWires(Vector3 { center.x, bounds.min.y - 0.02f, center.z },
+                          radius * 0.44f, radius * 0.44f, 0.025f, 48, Fade(heroColor, 0.88f));
+    }
     EndMode3D();
     EndTextureMode();
 
+    // The preview render target is square.  Stretching it to the (usually
+    // wide) hero stage deforms every model horizontally, so preserve its
+    // aspect ratio and letterbox the unused part of the stage instead.
+    const float previewSide = std::min(destination.width, destination.height);
+    const Rectangle previewDestination {
+        destination.x + (destination.width - previewSide) * 0.5f,
+        destination.y + (destination.height - previewSide) * 0.5f,
+        previewSide,
+        previewSide
+    };
+    DrawRectangleRec(destination, Color { 7, 9, 14, 255 });
     DrawTexturePro(
         heroPreviewTarget_.texture,
         Rectangle { 0.0f, 0.0f, static_cast<float>(heroPreviewTarget_.texture.width), -static_cast<float>(heroPreviewTarget_.texture.height) },
-        destination,
+        previewDestination,
         Vector2 { 0.0f, 0.0f },
         0.0f,
         WHITE);
-    DrawRectangleLinesEx(destination, 1.0f, Fade(HeroUiColor(heroId), 0.62f));
 }
 
 void Renderer::RenderScene(
@@ -1436,6 +2356,7 @@ void Renderer::RenderScene(
         const OrbitaTeleportPreview& orbitaTeleportPreview,
         const PlacementPreview& placementPreview,
     const std::vector<EnergyProjectile>& projectiles,
+    const std::vector<TimedExplosion>& explosives,
     const std::vector<WorldEffect>& worldEffects,
     const ParticleSystem& particles,
     const std::vector<FloatingText>& floatingTexts,
@@ -1468,11 +2389,8 @@ void Renderer::RenderScene(
     bool showHeroDebug = false;
 #endif
 
-    chunkRenderer_.Sync(
-        world,
-        [this, &teams](const Block& block) { return GetBlockColor(block, teams); },
-        [this](BlockType type) { return GetBlockTexture(type); },
-        [](const Block& block, Color color) { return IsTransparentBlock(block.type, color); });
+    SyncChunks(world, teams);
+    UpdateMapPointLights(world);
 
     BeginMode3D(camera);
 
@@ -1487,71 +2405,25 @@ void Renderer::RenderScene(
         DrawCube(Vector3 { x + width * 0.35f, 28.0f + static_cast<float>(i % 2) * 2.4f, z + depth * 0.65f }, width * 0.55f, 0.10f, depth * 0.85f, Fade(WHITE, 0.16f));
     }
 
-    const Vector3 cameraForward = Normalize(Vector3 {
-        camera.target.x - camera.position.x,
-        camera.target.y - camera.position.y,
-        camera.target.z - camera.position.z
-    });
-    const auto shouldDrawWorldBlock = [this, &camera, cameraForward](Vector3 center)
+    SceneShadowParams shadowParams {};
+    const SceneShadowParams* activeShadow = nullptr;
+    if (sunShadowsValid_ && shadowQuality_ > 0 && shadowTarget_.depth.id != 0)
     {
-        const Vector3 toBlock {
-            center.x - camera.position.x,
-            center.y - camera.position.y,
-            center.z - camera.position.z
-        };
-        const float distanceSq = toBlock.x * toBlock.x + toBlock.y * toBlock.y + toBlock.z * toBlock.z;
-        if (distanceSq > worldRenderDistance_ * worldRenderDistance_)
-        {
-            return false;
-        }
-        return Dot(cameraForward, toBlock) > -2.0f;
-    };
-
-    const auto drawWorldBlock = [this, &teams](Vector3 center, const Block& block)
-    {
-        const Color color = GetBlockColor(block, teams);
-        if (const Texture2D* texture = GetBlockTexture(block.type))
-        {
-            DrawTexturedCube(*texture, center, 1.0f, 1.0f, 1.0f, color);
-        }
-        else
-        {
-            DrawCube(center, 1.0f, 1.0f, 1.0f, color);
-        }
-        DrawCubeWires(center, 1.01f, 1.01f, 1.01f, Color { 24, 28, 36, 180 });
-    };
-
-    transparentBlocks_.clear();
-    std::vector<TransparentBlockDraw>& transparentBlocks = transparentBlocks_;
-    sceneShader_.Begin(camera, skyColor, 0.0045f);
-    chunkRenderer_.Draw(camera, worldRenderDistance_, sceneShader_.GetShader());
-    for (const auto& entry : world.GetBlocks())
-    {
-        const GridPos& pos = entry.first;
-        const Block& block = entry.second;
-        if (block.type == BlockType::EnergyCoreBlock)
-        {
-            continue;
-        }
-
-        const Vector3 center = world.GridToWorld(pos);
-        if (!shouldDrawWorldBlock(center))
-        {
-            continue;
-        }
-
-        const Color color = GetBlockColor(block, teams);
-        if (!IsTransparentBlock(block.type, color))
-        {
-            continue;
-        }
-        transparentBlocks.push_back(TransparentBlockDraw {
-            pos,
-            center,
-            block,
-            DistanceSquared(center, camera.position)
-        });
+        shadowParams.lightViewProj = sunLightViewProj_;
+        shadowParams.depthTextureId = shadowTarget_.depth.id;
+        shadowParams.texelSize = 1.0f / static_cast<float>(shadowResolution_);
+        shadowParams.strength = shadowQuality_ >= 2 ? 0.72f : 0.62f;
+        shadowParams.distance = std::min(100.0f, worldRenderDistance_);
+        shadowParams.widePcf = shadowQuality_ >= 2;
+        activeShadow = &shadowParams;
     }
+    sceneShader_.Begin(camera, skyColor, 0.0045f, worldRenderDistance_, activeShadow);
+    SetNearestMapPointLights(camera);
+    // Baked AO and normal maps exist only on chunk meshes; the gates must
+    // close again before players/devices/transparent blocks hit the batch.
+    sceneShader_.SetChunkPassFeatures(true);
+    chunkRenderer_.Draw(camera, worldRenderDistance_, sceneShader_.GetShader());
+    sceneShader_.SetChunkPassFeatures(false);
 
     for (const Team& team : teams)
     {
@@ -2163,6 +3035,17 @@ void Renderer::RenderScene(
         }
     }
 
+    for (const TimedExplosion& explosive : explosives)
+    {
+        const bool flashing = explosive.timer < 0.8f;
+        const float flash = flashing ? 0.58f + 0.42f * std::sin(static_cast<float>(GetTime()) * 20.0f) : 1.0f;
+        DrawCube(explosive.position, 0.90f, 0.90f, 0.90f, Fade(Color { 212, 52, 44, 255 }, flash));
+        DrawCube(Vector3 { explosive.position.x, explosive.position.y, explosive.position.z - 0.456f },
+            0.68f, 0.18f, 0.012f, Fade(WHITE, flash));
+        DrawCubeWires(explosive.position, 0.94f, 0.94f, 0.94f,
+            flashing ? Fade(Color { 255, 224, 122, 255 }, flash) : Fade(BLACK, 0.68f));
+    }
+
     if (placementPreview.visible && placementPreview.valid)
     {
         const Vector3 previewCenter = world.GridToWorld(placementPreview.position);
@@ -2175,26 +3058,16 @@ void Renderer::RenderScene(
     }
     particles.Draw();
 
-    std::sort(
-        transparentBlocks.begin(),
-        transparentBlocks.end(),
-        [](const TransparentBlockDraw& a, const TransparentBlockDraw& b)
-        {
-            return a.distance > b.distance;
-        });
     rlDrawRenderBatchActive();
     rlEnableDepthTest();
     rlDisableDepthMask();
-    for (const TransparentBlockDraw& entry : transparentBlocks)
-    {
-        drawWorldBlock(entry.center, entry.block);
-    }
+    chunkRenderer_.DrawTransparent(camera, worldRenderDistance_, sceneShader_.GetShader());
     rlDrawRenderBatchActive();
     rlEnableDepthMask();
 
     rlDrawRenderBatchActive();
     rlEnableDepthTest();
-    DrawDistantFog(skyColor);
+    DrawDistantFog(skyColor, worldBoundsMin_, worldBoundsMax_, worldBoundsValid_);
 
     // Projectiles are real geometry, not only short-lived particles. This
     // keeps fast arrows and energy bolts readable even at high frame rates.
@@ -2484,7 +3357,7 @@ void Renderer::RenderUI(
         DrawText(shop.GetMenuText().c_str(), panelX + 536, panelY + 58, 14, Fade(WHITE, 0.62f));
 
         int rowY = panelY + 104;
-        const std::vector<ShopItem> visibleItems = shop.GetItemsForCategory(shopCategoryIndex);
+        const std::vector<ShopItem> visibleItems = shop.GetItemsForCategory(shopCategoryIndex, inventory);
         for (int row = 0; row < static_cast<int>(visibleItems.size()); ++row)
         {
             const ShopItem& item = visibleItems[row];
@@ -2643,10 +3516,7 @@ void Renderer::RenderUI(
             DrawRectangleLines(x + 14, y + 12, slotSize - 28, slotSize - 28, Fade(WHITE, 0.42f));
         }
 
-        const char* label = ItemShortName(stack.type);
-        const int labelSize = 10;
-        DrawText(label, x + slotSize / 2 - MeasureText(label, labelSize) / 2, y + slotSize - 18, labelSize, Fade(WHITE, 0.86f));
-        if (stack.count > 1)
+        if (stack.count > 0)
         {
             const std::string count = std::to_string(stack.count);
             DrawText(count.c_str(), x + slotSize - MeasureText(count.c_str(), 14) - 5, y + slotSize - 16, 14, WHITE);
@@ -2814,12 +3684,23 @@ Color Renderer::GetBlockColor(const Block& block, const std::vector<Team>& teams
     case BlockType::DirtBlock:
         return Color { 112, 78, 52, 255 };
     case BlockType::LeafBlock:
-        return Color { 70, 134, 62, 245 };
+        // Fully opaque on purpose: leaves used to ride the no-depth-write
+        // transparent pass at alpha 245, which made everything behind a tree
+        // sort incorrectly.  Solid leaves write depth and receive baked AO.
+        return Color { 70, 134, 62, 255 };
     case BlockType::TeamBlock:
     case BlockType::WoolBlock:
     {
         const Team* team = FindTeam(teams, block.teamId);
-        return team != nullptr ? GetTeamColor(team->color) : Color { 150, 150, 150, 255 };
+        if (team != nullptr)
+        {
+            return GetTeamColor(team->color);
+        }
+        // Imported neutral wool carries a legacy dye ID in variant.  Keep
+        // regular unowned gameplay wool's historical gray fallback.
+        return block.teamId < 0 && !block.breakable
+            ? MinecraftDyeColor(block.variant)
+            : Color { 150, 150, 150, 255 };
     }
     case BlockType::WoodBlock:
         return Color { 146, 101, 62, 255 };
@@ -2850,6 +3731,63 @@ Color Renderer::GetBlockColor(const Block& block, const std::vector<Team>& teams
         return Color { 255, 88, 42, 255 };
     case BlockType::IceBlock:
         return Color { 142, 220, 255, 210 };
+    case BlockType::SmoothStoneBlock:
+        return Color { 184, 190, 198, 255 };
+    case BlockType::DarkBrickBlock:
+        return Color { 70, 62, 74, 255 };
+    case BlockType::LightBrickBlock:
+        return Color { 214, 194, 154, 255 };
+    case BlockType::MetalBlock:
+        return Color { 112, 126, 136, 255 };
+    case BlockType::GlowBlock:
+        return Color { 255, 232, 116, 255 };
+    case BlockType::PlankBlock:
+        return Color { 176, 118, 66, 255 };
+    case BlockType::DecorativeTileBlock:
+        return Color { 78, 170, 184, 255 };
+    case BlockType::TrimBlock:
+        return Color { 218, 164, 76, 255 };
+    case BlockType::CobblestoneBlock:
+        return Color { 128, 133, 138, 255 };
+    case BlockType::AndesiteBlock:
+        return Color { 126, 132, 140, 255 };
+    case BlockType::PolishedAndesiteBlock:
+        return Color { 142, 148, 156, 255 };
+    case BlockType::StoneBrickBlock:
+    case BlockType::ChiseledStoneBrickBlock:
+    case BlockType::StoneBrickSlabBlock:
+    case BlockType::StoneBrickStairsBlock:
+        return Color { 144, 150, 158, 255 };
+    case BlockType::StoneSlabBlock:
+        return Color { 154, 160, 168, 255 };
+    case BlockType::BirchPlankBlock:
+    case BlockType::BirchSlabBlock:
+    case BlockType::BirchStairsBlock:
+        return Color { 224, 204, 150, 255 };
+    case BlockType::ColoredGlassBlock:
+    {
+        Color dye = MinecraftDyeColor(block.variant);
+        dye.a = 156;
+        return dye;
+    }
+    case BlockType::ColoredClayBlock:
+        return MinecraftDyeColor(block.variant);
+    case BlockType::LapisBlock:
+        return Color { 66, 122, 226, 255 };
+    case BlockType::DiamondBlock:
+        return Color { 92, 224, 224, 255 };
+    case BlockType::EmeraldBlock:
+        return Color { 64, 204, 112, 255 };
+    case BlockType::GoldBlock:
+        return Color { 246, 196, 74, 255 };
+    case BlockType::IronBarsBlock:
+        return Color { 138, 150, 162, 255 };
+    case BlockType::LadderBlock:
+        return Color { 176, 116, 58, 255 };
+    case BlockType::TorchBlock:
+        return WHITE;
+    case BlockType::BarrierBlock:
+        return BLANK;
     case BlockType::ResourceGenerator:
         return Color { 82, 82, 92, 255 };
     case BlockType::TeamChestBlock:
@@ -2866,6 +3804,7 @@ Color Renderer::GetBlockColor(const Block& block, const std::vector<Team>& teams
     case BlockType::EnergyCoreBlock:
         return WHITE;
     case BlockType::Air:
+    case BlockType::Count:
         break;
     }
 
@@ -2892,15 +3831,67 @@ const Texture2D* Renderer::GetBlockTexture(BlockType type) const
         return &woolTexture_;
     case BlockType::WoodBlock:
         return &woodTexture_;
+    case BlockType::PlankBlock:
+        return &plankVariantTexture_;
     case BlockType::TeamChestBlock:
         return &teamChestTexture_;
     case BlockType::Solid:
     case BlockType::StoneBlock:
         return &stoneTexture_;
+    case BlockType::SmoothStoneBlock:
+        return &smoothStoneTexture_;
+    case BlockType::DarkBrickBlock:
+        return &darkBrickTexture_;
+    case BlockType::LightBrickBlock:
+        return &lightBrickTexture_;
+    case BlockType::MetalBlock:
+        return &metalBlockTexture_;
+    case BlockType::DecorativeTileBlock:
+        return &decorativeTileTexture_;
+    case BlockType::TrimBlock:
+        return &trimBlockTexture_;
+    case BlockType::CobblestoneBlock:
+        return &cobblestoneTexture_;
+    case BlockType::AndesiteBlock:
+        return &andesiteTexture_;
+    case BlockType::PolishedAndesiteBlock:
+        return &polishedAndesiteTexture_;
+    case BlockType::StoneBrickBlock:
+    case BlockType::StoneBrickSlabBlock:
+    case BlockType::StoneBrickStairsBlock:
+        return &stoneBrickTexture_;
+    case BlockType::ChiseledStoneBrickBlock:
+        return &chiseledStoneBrickTexture_;
+    case BlockType::StoneSlabBlock:
+        return &smoothStoneTexture_;
+    case BlockType::BirchPlankBlock:
+    case BlockType::BirchSlabBlock:
+    case BlockType::BirchStairsBlock:
+        return &birchPlankTexture_;
+    case BlockType::ColoredGlassBlock:
+        return &coloredGlassTexture_;
+    case BlockType::ColoredClayBlock:
+        return &coloredClayTexture_;
+    case BlockType::LapisBlock:
+        return &lapisTexture_;
+    case BlockType::DiamondBlock:
+        return &diamondTexture_;
+    case BlockType::EmeraldBlock:
+        return &emeraldTexture_;
+    case BlockType::GoldBlock:
+        return &goldTexture_;
+    case BlockType::IronBarsBlock:
+        return &ironBarsTexture_;
+    case BlockType::LadderBlock:
+        return &ladderTexture_;
+    case BlockType::TorchBlock:
+        return &torchTexture_;
     case BlockType::ObsidianBlock:
         return &obsidianTexture_;
     case BlockType::EnergyGlassBlock:
         return &glassTexture_;
+    case BlockType::GlowBlock:
+        return &glowBlockTexture_;
     case BlockType::SpringBlock:
         return &springTexture_;
     case BlockType::StickyBlock:
@@ -2918,6 +3909,48 @@ const Texture2D* Renderer::GetBlockTexture(BlockType type) const
     }
 
     return nullptr;
+}
+
+const Texture2D* Renderer::GetBlockNormalTexture(BlockType type) const
+{
+    if (!texturesReady_)
+    {
+        return nullptr;
+    }
+
+    // Types that share an albedo texture share its normal map too.
+    BlockType canonical = type;
+    switch (type)
+    {
+    case BlockType::Solid:
+        canonical = BlockType::StoneBlock;
+        break;
+    case BlockType::TeamBlock:
+        canonical = BlockType::WoolBlock;
+        break;
+    case BlockType::StoneSlabBlock:
+        canonical = BlockType::SmoothStoneBlock;
+        break;
+    case BlockType::StoneBrickSlabBlock:
+    case BlockType::StoneBrickStairsBlock:
+        canonical = BlockType::StoneBrickBlock;
+        break;
+    case BlockType::BirchSlabBlock:
+    case BlockType::BirchStairsBlock:
+        canonical = BlockType::BirchPlankBlock;
+        break;
+    default:
+        break;
+    }
+
+    const Texture2D& normalTexture = blockNormalTextures_[static_cast<std::size_t>(canonical)];
+    if (normalTexture.id != 0)
+    {
+        return &normalTexture;
+    }
+    // Every chunk material must carry some normal map so the shader's
+    // "texture2" sampler never reads an unbound unit.
+    return flatNormalTexture_.id != 0 ? &flatNormalTexture_ : nullptr;
 }
 
 const Texture2D* Renderer::GetItemTexture(ItemType type) const

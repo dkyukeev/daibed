@@ -1,6 +1,7 @@
 #include "Player.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <utility>
 
@@ -18,7 +19,8 @@ constexpr float kCoyoteSeconds = 0.09f;
 constexpr float kSprintResetSeconds = 0.46f;
 constexpr float kKnockbackControlSeconds = 0.18f;
 constexpr float kSneakSpeedMultiplier = 0.30f;
-constexpr float kStepHeight = 1.02f;
+constexpr float kLadderClimbSpeed = 3.05f;
+constexpr float kLadderSlideSpeed = 1.75f;
 constexpr Vector3 kHalfExtents { 0.32f, 0.9f, 0.32f };
 constexpr Vector3 kGroundProbeHalfExtents { 0.28f, 0.9f, 0.28f };
 
@@ -304,7 +306,7 @@ void Player::Move(
     bool sprint,
     bool sneak,
     float terrainSpeedMultiplier,
-    bool allowAutoStep,
+    float autoStepHeight,
     float gravityMultiplier,
     float jumpMultiplier,
     float groundControlMultiplier,
@@ -323,6 +325,59 @@ void Player::Move(
         sprinting_ = false;
         sneaking_ = false;
         return;
+    }
+
+    // Teleports, knockback and imported partial shapes can leave a player
+    // already overlapping world collision. Axis movement alone cannot escape
+    // that state because every intermediate candidate is rejected. Resolve a
+    // small overlap to the nearest clear, supported horizontal position; use
+    // a bounded upward fallback only when no floor-level exit exists.
+    const Vector3 currentPosition { position_.x, position_.y, position_.z };
+    const Vector3 overlapProbe {
+        currentPosition.x, currentPosition.y + 0.02f, currentPosition.z };
+    if (world.CollidesWithAABB(currentPosition, kHalfExtents)
+        && world.CollidesWithAABB(overlapProbe, kHalfExtents))
+    {
+        static constexpr std::array<Vector3, 8> directions {
+            Vector3 { 1.0f, 0.0f, 0.0f }, Vector3 { -1.0f, 0.0f, 0.0f },
+            Vector3 { 0.0f, 0.0f, 1.0f }, Vector3 { 0.0f, 0.0f, -1.0f },
+            Vector3 { 0.70710678f, 0.0f, 0.70710678f },
+            Vector3 { -0.70710678f, 0.0f, 0.70710678f },
+            Vector3 { 0.70710678f, 0.0f, -0.70710678f },
+            Vector3 { -0.70710678f, 0.0f, -0.70710678f }
+        };
+        std::optional<Vector3> resolved;
+        for (float radius = 0.10f; radius <= 1.01f && !resolved.has_value(); radius += 0.10f)
+        {
+            for (const Vector3& direction : directions)
+            {
+                const Vector3 candidate {
+                    currentPosition.x + direction.x * radius,
+                    currentPosition.y,
+                    currentPosition.z + direction.z * radius
+                };
+                if (!world.CollidesWithAABB(candidate, kHalfExtents)
+                    && HasGroundSupportAt(candidate, world))
+                {
+                    resolved = candidate;
+                    break;
+                }
+            }
+        }
+        for (float lift = 0.10f; lift <= 1.51f && !resolved.has_value(); lift += 0.10f)
+        {
+            const Vector3 candidate {
+                currentPosition.x, currentPosition.y + lift, currentPosition.z };
+            if (!world.CollidesWithAABB(candidate, kHalfExtents))
+            {
+                resolved = candidate;
+            }
+        }
+        if (resolved.has_value())
+        {
+            position_ = Vec3 { resolved->x, resolved->y, resolved->z };
+            velocity_ = Vec3 { 0.0f, 0.0f, 0.0f };
+        }
     }
 
     const Vector3 normalizedWish = NormalizeOrZero(wishDirection);
@@ -372,7 +427,38 @@ void Player::Move(
     velocity_.x = Approach(velocity_.x, targetVelocity.x, acceleration * knockbackControl * dt);
     velocity_.z = Approach(velocity_.z, targetVelocity.z, acceleration * knockbackControl * dt);
 
-    if (jumpBufferTimer_ > 0.0f && coyoteTimer_ > 0.0f)
+    // Ladders are non-colliding, so "on a ladder" simply means the body
+    // overlaps a ladder cell.  Climbing is deliberate: Space raises the
+    // player; horizontal movement alone must never pull them upward.
+    const auto ladderAt = [&world](float x, float y, float z)
+    {
+        const Block* block = world.GetBlock(world.WorldToGrid(Vector3 { x, y, z }));
+        return block != nullptr && block->type == BlockType::LadderBlock;
+    };
+    const bool onLadder = ladderAt(position_.x, position_.y - 0.75f, position_.z)
+        || ladderAt(position_.x, position_.y, position_.z)
+        || ladderAt(position_.x, position_.y + 0.75f, position_.z);
+    if (onLadder)
+    {
+        if (jump)
+        {
+            velocity_.y = kLadderClimbSpeed;
+        }
+        else if (sneak)
+        {
+            velocity_.y = std::max(velocity_.y, 0.0f);
+        }
+        else
+        {
+            velocity_.y = std::max(velocity_.y, -kLadderSlideSpeed);
+        }
+        // A buffered jump still detaches from the ladder below.
+        coyoteTimer_ = kCoyoteSeconds;
+    }
+
+    // A jump while gripping a ladder is consumed as a climb input above, not
+    // as a full-strength ground jump.
+    if (!onLadder && jumpBufferTimer_ > 0.0f && coyoteTimer_ > 0.0f)
     {
         velocity_.y = (kJumpSpeed + (jumpBoostTimer_ > 0.0f ? 1.45f : 0.0f))
             * std::clamp(jumpMultiplier, 0.65f, 1.45f)
@@ -382,14 +468,21 @@ void Player::Move(
         jumpBufferTimer_ = 0.0f;
     }
 
-    velocity_.y -= (velocity_.y < 0.0f ? kFallGravity : kGravity) * std::clamp(gravityMultiplier, 0.45f, 1.35f) * dt;
+    if (!onLadder)
+    {
+        velocity_.y -= (velocity_.y < 0.0f ? kFallGravity : kGravity) * std::clamp(gravityMultiplier, 0.45f, 1.35f) * dt;
+    }
 
-    TryMoveAxis(Vector3 { velocity_.x * dt, 0.0f, 0.0f }, world, sneaking_, allowAutoStep);
-    TryMoveAxis(Vector3 { 0.0f, 0.0f, velocity_.z * dt }, world, sneaking_, allowAutoStep);
+    // Use the requested sneak state for edge protection. `onGround_` can be
+    // false for a tick while traversing uneven block tops even though the
+    // ground probe still has support; dropping protection during that tick is
+    // enough for AI momentum to carry the body off a one-block bridge.
+    TryMoveAxis(Vector3 { velocity_.x * dt, 0.0f, 0.0f }, world, sneak, autoStepHeight);
+    TryMoveAxis(Vector3 { 0.0f, 0.0f, velocity_.z * dt }, world, sneak, autoStepHeight);
 
     const float oldYVelocity = velocity_.y;
     onGround_ = false;
-    TryMoveAxis(Vector3 { 0.0f, velocity_.y * dt, 0.0f }, world, false, false);
+    TryMoveAxis(Vector3 { 0.0f, velocity_.y * dt, 0.0f }, world, false, 0.0f);
     if (velocity_.y == 0.0f && oldYVelocity < 0.0f)
     {
         onGround_ = true;
@@ -789,7 +882,12 @@ void Player::ClearHeroActiveEffects()
 
 void Player::RespawnAtHome()
 {
-    position_ = homeSpawnPoint_;
+    RespawnAt(Vector3 { homeSpawnPoint_.x, homeSpawnPoint_.y, homeSpawnPoint_.z });
+}
+
+void Player::RespawnAt(Vector3 position)
+{
+    position_ = Vec3 { position.x, position.y, position.z };
     velocity_ = Vec3 { 0.0f, 0.0f, 0.0f };
     health_ = maxHealth_;
     alive_ = true;
@@ -897,7 +995,7 @@ bool Player::HasGroundSupportAt(Vector3 position, const World& world) const
     return world.CollidesWithAABB(probe, kGroundProbeHalfExtents);
 }
 
-void Player::TryMoveAxis(Vector3 delta, const World& world, bool preventEdgeFall, bool allowAutoStep)
+void Player::TryMoveAxis(Vector3 delta, const World& world, bool preventEdgeFall, float autoStepHeight)
 {
     Vector3 next { position_.x, position_.y, position_.z };
     next.x += delta.x;
@@ -906,7 +1004,10 @@ void Player::TryMoveAxis(Vector3 delta, const World& world, bool preventEdgeFall
 
     const bool horizontalMove = std::fabs(delta.y) <= 0.0001f
         && (std::fabs(delta.x) > 0.0001f || std::fabs(delta.z) > 0.0001f);
-    if (preventEdgeFall && horizontalMove && onGround_ && !HasGroundSupportAt(next, world))
+    const bool currentlySupported = onGround_ || HasGroundSupportAt(
+        Vector3 { position_.x, position_.y, position_.z }, world);
+    if (preventEdgeFall && horizontalMove && currentlySupported
+        && !HasGroundSupportAt(next, world))
     {
         if (delta.x != 0.0f)
         {
@@ -925,18 +1026,23 @@ void Player::TryMoveAxis(Vector3 delta, const World& world, bool preventEdgeFall
         return;
     }
 
-    if (allowAutoStep && horizontalMove && onGround_)
+    if (autoStepHeight > 0.01f && horizontalMove && onGround_)
     {
-        Vector3 lifted { position_.x, position_.y, position_.z };
-        lifted.y += kStepHeight;
-        Vector3 stepped = lifted;
-        stepped.x += delta.x;
-        stepped.z += delta.z;
-        if (!world.CollidesWithAABB(lifted, kHalfExtents)
-            && !world.CollidesWithAABB(stepped, kHalfExtents))
+        // Try the smallest lift that clears the obstacle so stepping onto a
+        // half slab raises the player ~0.55, not a full block; gravity
+        // settles the remaining few centimeters on the next ticks.
+        constexpr float kStepProbeIncrement = 0.28f;
+        for (float probe = kStepProbeIncrement; probe < autoStepHeight + kStepProbeIncrement; probe += kStepProbeIncrement)
         {
-            position_ = Vec3 { stepped.x, stepped.y, stepped.z };
-            return;
+            const float lift = std::min(probe, autoStepHeight);
+            Vector3 lifted { position_.x, position_.y + lift, position_.z };
+            Vector3 stepped { lifted.x + delta.x, lifted.y, lifted.z + delta.z };
+            if (!world.CollidesWithAABB(lifted, kHalfExtents)
+                && !world.CollidesWithAABB(stepped, kHalfExtents))
+            {
+                position_ = Vec3 { stepped.x, stepped.y, stepped.z };
+                return;
+            }
         }
     }
 

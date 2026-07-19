@@ -122,7 +122,8 @@ public:
     {
         for (Generator& generator : generators_)
         {
-            generator.Update(dt, pickups, forgeBonusForTeam(generator.GetTeamId()));
+            const auto tuning = forgeBonusForTeam(generator.GetTeamId());
+            generator.Update(dt, pickups, tuning.first, tuning.second);
         }
     }
 

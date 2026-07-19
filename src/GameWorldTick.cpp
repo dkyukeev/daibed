@@ -1,5 +1,8 @@
 #include "Game.h"
 #include "HeroSystem.h"
+#include "Navigation/NavigationGoal.h"
+#include "Navigation/NavigationWorldView.h"
+#include "Navigation/VoxelPathfinder.h"
 #include "VecConvert.h"
 
 #include "raylib.h"
@@ -7,9 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <queue>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace
@@ -22,8 +23,15 @@ constexpr float kItemMergeInterval = 0.5f;
 constexpr float kResourceMagnetSpeed = 5.8f;
 constexpr float kDroppedItemMagnetAccel = 28.0f;
 constexpr float kDroppedItemMagnetMaxSpeed = 7.0f;
+// Minecraft TNT accelerates downward continuously after it is primed.  The
+// game uses seconds rather than ticks, so this is expressed in blocks/s^2.
+constexpr float kTntGravity = 16.0f;
+constexpr float kTntTerminalFallSpeed = 18.0f;
+constexpr float kTntHalfHeight = 0.45f;
 constexpr int kBuildMinY = -2;
-constexpr int kBuildMaxY = 64;
+// Device ground/path probes need to cover imported map architecture above the
+// stock arena ceiling; normal arenas contain no cells in this extra range.
+constexpr int kBuildMaxY = 112;
 constexpr float kRadonBaseRadiusSq = 105.0f;
 constexpr float kOrbitaMomentumSpeed = 7.2f;
 constexpr int kBromVacuumCapacity = 24;
@@ -113,13 +121,6 @@ float PointSegmentDistanceSquared(Vector3 point, Vector3 start, Vector3 end)
     return DistanceSquared(point, Vector3 { start.x + segment.x * t, start.y + segment.y * t, start.z + segment.z * t });
 }
 
-long long DevicePathKey(const GridPos& pos)
-{
-    return (static_cast<long long>(pos.x + 2048) << 32)
-        ^ (static_cast<long long>(pos.z + 2048) << 8)
-        ^ static_cast<unsigned int>(pos.y + 32);
-}
-
 std::optional<GridPos> FindDeviceSupport(const World& world, Vector3 position, int maxDrop = 7)
 {
     const GridPos column = world.WorldToGrid(Vector3 { position.x, position.y - 0.70f, position.z });
@@ -144,130 +145,42 @@ std::optional<Vector3> FindDeviceGroundWaypoint(const World& world, Vector3 from
         return std::nullopt;
     }
 
-    const GridPos start = *startSupport;
-    GridPos goal = *goalSupport;
-    constexpr int pathRadius = 42;
-    constexpr int maxExpansions = 1800;
-    const auto canStand = [&world, &start](const GridPos& support)
-    {
-        if (std::abs(support.x - start.x) > pathRadius
-            || std::abs(support.z - start.z) > pathRadius
-            || support.y < kBuildMinY || support.y > kBuildMaxY)
-        {
-            return false;
-        }
-        return world.IsSolid(support)
-            && world.IsAir(GridPos { support.x, support.y + 1, support.z });
-    };
-    if (!canStand(goal))
-    {
-        bool found = false;
-        for (int radius = 1; radius <= 4 && !found; ++radius)
-        {
-            for (int dx = -radius; dx <= radius && !found; ++dx)
-            {
-                for (int dz = -radius; dz <= radius && !found; ++dz)
-                {
-                    for (int dy = -1; dy <= 1; ++dy)
-                    {
-                        const GridPos candidate { goal.x + dx, goal.y + dy, goal.z + dz };
-                        if (canStand(candidate))
-                        {
-                            goal = candidate;
-                            found = true;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        if (!found)
-        {
-            return std::nullopt;
-        }
-    }
+    NavigationProfile deviceProfile;
+    deviceProfile.bodyHalfWidth = 0.30f;
+    deviceProfile.bodyHalfHeight = 0.22f;
+    deviceProfile.bodyCenterAboveSupport = 0.68f;
+    deviceProfile.moveSpeed = 3.75f;
+    deviceProfile.sprintSpeed = 3.75f;
+    deviceProfile.canSprint = false;
+    deviceProfile.canJump = false;
+    deviceProfile.canPlaceBlocks = false;
+    deviceProfile.canBreakBlocks = false;
+    deviceProfile.canBridge = false;
+    deviceProfile.canSneak = false;
+    deviceProfile.maxStepHeightBlocks = 1;
+    deviceProfile.maxSafeDropBlocks = 1;
+    deviceProfile.maxGapJumpBlocks = 0;
 
-    struct Node
+    NavigationWorldView view(world);
+    GoalWithinRadius goal(*goalSupport, 1.0f);
+    NavigationSearchLimits limits;
+    limits.maxSearchRadius = 42;
+    limits.maxVerticalRange = 12;
+    limits.maxExpansions = 1800;
+    limits.maxActions = 128;
+    limits.maxOpenNodes = 4096;
+    const NavigationSearchResult result = VoxelPathfinder {}.FindPath(
+        NavigationState { *startSupport, 0, 0 }, goal, view, deviceProfile, limits);
+    if (!result.HasPath())
     {
-        GridPos pos {};
-        float g = 0.0f;
-        float f = 0.0f;
-    };
-    const auto compare = [](const Node& a, const Node& b) { return a.f > b.f; };
-    const auto heuristic = [&goal](const GridPos& pos)
-    {
-        return static_cast<float>(std::abs(pos.x - goal.x) + std::abs(pos.z - goal.z))
-            + static_cast<float>(std::abs(pos.y - goal.y)) * 1.6f;
-    };
-    std::priority_queue<Node, std::vector<Node>, decltype(compare)> open(compare);
-    std::unordered_map<long long, float> cost;
-    std::unordered_map<long long, GridPos> parent;
-    open.push(Node { start, 0.0f, heuristic(start) });
-    cost[DevicePathKey(start)] = 0.0f;
-    std::optional<GridPos> reached;
-    int expansions = 0;
-    while (!open.empty() && expansions++ < maxExpansions)
-    {
-        const Node current = open.top();
-        open.pop();
-        if (std::abs(current.pos.x - goal.x) + std::abs(current.pos.z - goal.z) <= 1
-            && std::abs(current.pos.y - goal.y) <= 1)
-        {
-            reached = current.pos;
-            break;
-        }
-        const GridPos flatOffsets[] {
-            GridPos { 1, 0, 0 }, GridPos { -1, 0, 0 },
-            GridPos { 0, 0, 1 }, GridPos { 0, 0, -1 }
-        };
-        for (const GridPos& offset : flatOffsets)
-        {
-            for (int dy = -1; dy <= 1; ++dy)
-            {
-                const GridPos next { current.pos.x + offset.x, current.pos.y + dy, current.pos.z + offset.z };
-                if (!canStand(next))
-                {
-                    continue;
-                }
-                const float nextCost = current.g + 1.0f + static_cast<float>(std::abs(dy)) * 0.65f;
-                const long long key = DevicePathKey(next);
-                const auto old = cost.find(key);
-                if (old != cost.end() && old->second <= nextCost)
-                {
-                    continue;
-                }
-                cost[key] = nextCost;
-                parent[key] = current.pos;
-                open.push(Node { next, nextCost, nextCost + heuristic(next) });
-            }
-        }
+        return result.status == NavigationSearchStatus::AlreadySatisfied
+            ? std::optional<Vector3>(target)
+            : std::nullopt;
     }
-    if (!reached.has_value())
-    {
-        return std::nullopt;
-    }
-
-    std::vector<GridPos> path;
-    GridPos cursor = *reached;
-    path.push_back(cursor);
-    while (cursor != start && path.size() < static_cast<std::size_t>(maxExpansions))
-    {
-        const auto previous = parent.find(DevicePathKey(cursor));
-        if (previous == parent.end())
-        {
-            return std::nullopt;
-        }
-        cursor = previous->second;
-        path.push_back(cursor);
-    }
-    std::reverse(path.begin(), path.end());
-    if (path.size() < 2)
-    {
-        return target;
-    }
-    const GridPos waypoint = path[std::min<std::size_t>(3, path.size() - 1)];
-    const Vector3 center = world.GridToWorld(waypoint);
-    return Vector3 { center.x, center.y + 0.68f, center.z };
+    const std::size_t lookAhead = std::min<std::size_t>(2, result.path.movements.size() - 1);
+    return view.SupportCenter(
+        result.path.movements[lookAhead].to,
+        deviceProfile.bodyCenterAboveSupport);
 }
 
 Vector3 PickupTargetFor(const Player& player)
@@ -415,9 +328,10 @@ void MergeNearbyDroppedItems(std::vector<DroppedItem>& droppedItems)
 
 void Game::UpdateGenerators(float dt)
 {
-    // Generators are owned by matchSimulation_. The forge bonus depends on
+    // Generators are owned by matchSimulation_. Forge speed and the late-game
+    // amount bonus depend on Game's Team data, so both cross this boundary.
     // Game's Team data, so it is supplied as a callback at the boundary.
-    matchSimulation_.UpdateGenerators(dt, matchSimulation_.Pickups(), [this](int teamId) { return GetForgeBonusForTeam(teamId); });
+    matchSimulation_.UpdateGenerators(dt, matchSimulation_.Pickups(), [this](int teamId) { return GetForgeTuningForTeam(teamId); });
 }
 
 void Game::UpdatePickups(float dt)
@@ -689,14 +603,32 @@ void Game::UpdateExplosives(float dt)
     for (TimedExplosion& explosive : timedExplosions_)
     {
         explosive.timer -= dt;
-        const Vector3 pos = world_.GridToWorld(explosive.block);
+        if (explosive.velocity.y > -kTntTerminalFallSpeed)
+        {
+            explosive.velocity.y = std::max(-kTntTerminalFallSpeed,
+                explosive.velocity.y - kTntGravity * dt);
+        }
+
+        Vector3 nextPosition = explosive.position;
+        nextPosition.y += explosive.velocity.y * dt;
+        const GridPos below = world_.WorldToGrid(Vector3 {
+            nextPosition.x, nextPosition.y - kTntHalfHeight - 0.03f, nextPosition.z });
+        if (explosive.velocity.y < 0.0f && world_.IsSolid(below))
+        {
+            nextPosition.y = world_.GridToWorld(below).y + 1.0f;
+            explosive.velocity.y = 0.0f;
+        }
+        explosive.position = nextPosition;
+
+        const Vector3 pos = explosive.position;
         if (explosive.timer > 0.0f)
         {
             AddWorldEffect(pos, explosive.timer < 0.8f ? Color { 255, 118, 70, 255 } : Color { 255, 224, 122, 255 }, 0.10f, 0.12f);
             continue;
         }
 
-        DetonateAt(pos, explosive.ownerTeamId, explosive.ownerPlayerId, explosive.radius, 48, false);
+        DetonateAt(pos, explosive.ownerTeamId, explosive.ownerPlayerId, explosive.radius, 48,
+            false, false, ExplosionBlockPolicy::PreserveReinforced);
     }
 
     timedExplosions_.erase(
@@ -756,42 +688,14 @@ void Game::UpdateProjectiles(float dt)
             if (!world_.IsAir(sampleBlock))
             {
                 projectile.position = sample;
-                if (EnergyCore* core = FindCoreAt(sampleBlock);
-                    core != nullptr && core->IsAlive() && core->GetTeamId() != projectile.ownerTeamId)
-                {
-                    const int coreDamage = std::max(1, projectile.damage / 2);
-                    const bool coreDestroyed = core->Damage(coreDamage);
-                    AddWorldEffect(sample, Color { 178, 245, 255, 255 }, 0.34f, 0.28f);
-                    // Owner-private replicated feedback, independent of the direct
-                    // AddWorldEffect above: pushes to the replicated event stream only
-                    // (no PresentCombatEvent call here), so a real network shooter
-                    // learns their shot hit the core without touching host presentation.
-                    if (const Player* shooter = matchSimulation_.GetPlayer(projectile.ownerId))
-                    {
-                        PlayerMatchScore& shooterScore = GetPlayerScore(projectile.ownerId);
-                        shooterScore.coreDamage += coreDamage;
-                        if (coreDestroyed)
-                        {
-                            ++shooterScore.coresDestroyed;
-                        }
-                        CombatPresentationEvent presentation {};
-                        presentation.valid = true;
-                        presentation.event.attackerId = projectile.ownerId;
-                        presentation.event.targetTeamId = core->GetTeamId();
-                        presentation.event.position = sample;
-                        presentation.event.damage = coreDamage;
-                        presentation.event.coreHit = true;
-                        presentation.event.coreDestroyed = coreDestroyed;
-                        presentation.message = shooter->GetName() + ": "
-                            + ProjectileImpactLabel(projectile.kind, projectile.fireZone)
-                            + " нанес Кору " + std::to_string(coreDamage) + " урона."
-                            + (coreDestroyed ? " Кор уничтожен!" : "");
-                        PushCombatEventSnapshots(presentation);
-                    }
-                }
                 if (projectile.explosionRadius > 0.0f)
                 {
-                    DetonateAt(sample, projectile.ownerTeamId, projectile.ownerId, projectile.explosionRadius, projectile.damage, projectile.fireZone, projectile.blueFire);
+                    const ExplosionBlockPolicy policy = projectile.kind == ProjectileKind::Fireball
+                        ? ExplosionBlockPolicy::PreserveFortified
+                        : ExplosionBlockPolicy::Default;
+                    DetonateAt(sample, projectile.ownerTeamId, projectile.ownerId,
+                        projectile.explosionRadius, projectile.damage, projectile.fireZone,
+                        projectile.blueFire, policy);
                 }
                 consumed = true;
             }
@@ -842,28 +746,39 @@ void Game::UpdateProjectiles(float dt)
                             state.likhoDisguiseTeamId = -1;
                             state.likhoDisguisePlayerId = -1;
                             state.likhoDisguiseHeroId = HeroId::Likho;
+                            PlayHeroVoiceForPlayer(owner, HeroVoiceEvent::UltimateRevealed, HeroVoiceEvent::Ultimate);
                             break;
                         }
                     }
-                    const float knockback = BiomeKnockbackMultiplier();
-                    if (projectile.kind == ProjectileKind::Arrow)
+                    // Spawn protection already rejects projectile damage in
+                    // Player::Damage; it must reject the matching impulse too.
+                    if (!player.IsInvulnerable())
                     {
-                        const float horizontalSpeed = std::sqrt(
-                            projectile.velocity.x * projectile.velocity.x + projectile.velocity.z * projectile.velocity.z);
-                        const float strength = (kBowTuning.baseKnockback
-                            + kBowTuning.punchKnockbackPerLevel * static_cast<float>(projectile.punchLevel)) * knockback;
-                        player.ApplyKnockback(Vector3 {
-                            horizontalSpeed > 0.001f ? projectile.velocity.x / horizontalSpeed * strength : 0.0f,
-                            kBowTuning.verticalKnockback * knockback,
-                            horizontalSpeed > 0.001f ? projectile.velocity.z / horizontalSpeed * strength : 0.0f });
-                    }
-                    else
-                    {
-                        player.ApplyKnockback(Vector3 { projectile.velocity.x * 0.055f * knockback, 0.85f * knockback, projectile.velocity.z * 0.055f * knockback });
+                        const float knockback = BiomeKnockbackMultiplier();
+                        if (projectile.kind == ProjectileKind::Arrow)
+                        {
+                            const float horizontalSpeed = std::sqrt(
+                                projectile.velocity.x * projectile.velocity.x + projectile.velocity.z * projectile.velocity.z);
+                            const float strength = (kBowTuning.baseKnockback
+                                + kBowTuning.punchKnockbackPerLevel * static_cast<float>(projectile.punchLevel)) * knockback;
+                            player.ApplyKnockback(Vector3 {
+                                horizontalSpeed > 0.001f ? projectile.velocity.x / horizontalSpeed * strength : 0.0f,
+                                kBowTuning.verticalKnockback * knockback,
+                                horizontalSpeed > 0.001f ? projectile.velocity.z / horizontalSpeed * strength : 0.0f });
+                        }
+                        else
+                        {
+                            player.ApplyKnockback(Vector3 { projectile.velocity.x * 0.055f * knockback, 0.85f * knockback, projectile.velocity.z * 0.055f * knockback });
+                        }
                     }
                     if (projectile.explosionRadius > 0.0f)
                     {
-                        DetonateAt(projectile.position, projectile.ownerTeamId, projectile.ownerId, projectile.explosionRadius, projectile.damage, projectile.fireZone, projectile.blueFire);
+                        const ExplosionBlockPolicy policy = projectile.kind == ProjectileKind::Fireball
+                            ? ExplosionBlockPolicy::PreserveFortified
+                            : ExplosionBlockPolicy::Default;
+                        DetonateAt(projectile.position, projectile.ownerTeamId, projectile.ownerId,
+                            projectile.explosionRadius, projectile.damage, projectile.fireZone,
+                            projectile.blueFire, policy);
                     }
                     else
                     {
@@ -1000,16 +915,6 @@ void Game::UpdateHazardZones(float dt)
         }
         zone.tickTimer = 0.55f;
 
-        for (EnergyCore& core : matchSimulation_.Cores())
-        {
-            if (core.IsAlive()
-                && DistanceSquared(world_.GridToWorld(core.GetBlockPosition()), zone.position)
-                    <= (zone.radius + 0.8f) * (zone.radius + 0.8f))
-            {
-                core.Damage(zone.blueFire ? 4 : 2);
-            }
-        }
-
         for (Player& player : players_)
         {
             if (!player.IsAlive() || player.GetTeamId() == zone.ownerTeamId)
@@ -1135,6 +1040,9 @@ void Game::UpdateHeroPassives(float dt)
                         heroState.ultimate.active = false;
                         heroState.ultimate.activeTimer = 0.0f;
                         heroState.likhoDisguiseTeamId = -1;
+                        heroState.likhoDisguisePlayerId = -1;
+                        heroState.likhoDisguiseHeroId = HeroId::Likho;
+                        PlayHeroVoiceForPlayer(player, HeroVoiceEvent::UltimateRevealed, HeroVoiceEvent::Ultimate);
                         if (HasLocalCamera(ControlKindForPlayer(player)))
                         {
                             AddEventMessage("Кор раскрыл маскировку Лихо", HeroAccentColor(HeroId::Likho), 2.0f);
@@ -2537,7 +2445,7 @@ void Game::UpdateBaseHealing(float dt)
         return;
     }
     baseHealTimer_ += dt;
-    if (baseHealTimer_ < 0.25f)
+    if (baseHealTimer_ < 0.5f)
     {
         return;
     }

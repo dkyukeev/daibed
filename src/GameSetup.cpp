@@ -329,6 +329,40 @@ void AddHypixelStyleCenter(World& world)
 
 void Game::SetupMatch()
 {
+    // A normal arena must not inherit the generous editable bounds of the
+    // previously played custom document.
+    if (pendingCreativeDoc_ == nullptr)
+    {
+        hasCustomMapBuildBounds_ = false;
+    }
+    // Sudden-death pacing scales with the battlefield: the stock arena keeps
+    // the classic 12 minutes, while big imported maps (castle spans ~210
+    // blocks) stretch toward half an hour.  Map authors override with the
+    // "collapse <minutes>" header.
+    coreCollapseSeconds_ = 12.0f * 60.0f;
+    if (pendingCreativeDoc_ != nullptr)
+    {
+        if (pendingCreativeDoc_->collapseMinutes > 0.0f)
+        {
+            coreCollapseSeconds_ = std::clamp(pendingCreativeDoc_->collapseMinutes, 6.0f, 60.0f) * 60.0f;
+        }
+        else if (!pendingCreativeDoc_->blocks.empty())
+        {
+            int minX = std::numeric_limits<int>::max();
+            int maxX = std::numeric_limits<int>::min();
+            int minZ = std::numeric_limits<int>::max();
+            int maxZ = std::numeric_limits<int>::min();
+            for (const CreativeMapBlock& block : pendingCreativeDoc_->blocks)
+            {
+                minX = std::min(minX, block.pos.x);
+                maxX = std::max(maxX, block.pos.x);
+                minZ = std::min(minZ, block.pos.z);
+                maxZ = std::max(maxZ, block.pos.z);
+            }
+            const float span = static_cast<float>(std::max(maxX - minX, maxZ - minZ));
+            coreCollapseSeconds_ = std::clamp(12.0f * span / 100.0f, 12.0f, 30.0f) * 60.0f;
+        }
+    }
     world_.Clear();
     teams_.clear();
     matchSimulation_.ResetCores();
@@ -367,11 +401,14 @@ void Game::SetupMatch()
     damageCredits_.clear();
     botMemories_.clear();
     botMemoryIndexByPlayerId_.clear();
+    botNavigationControllers_.clear();
+    botNavigationIntents_.clear();
     for (TeamCoordinationBus& bus : teamCoordBuses_)
     {
         bus.Clear();
     }
     coreDefenseMonitors_ = {};
+    teamDefensePlans_ = {};
     teamChests_ = {};
     personalChest_ = Inventory {};
     placementPreview_ = PlacementPreview {};
@@ -431,6 +468,7 @@ void Game::SetupMatch()
     nextWorldEventSeq_ = 0;
     presentedWorldEventSeq_ = 0;
     nextProjectileId_ = 0;
+    respawnSequence_ = 0;
     nextExplosiveId_ = 0;
     nextHazardZoneId_ = 0;
     nextHeroDeviceId_ = 0;
@@ -520,45 +558,68 @@ void Game::SetupMatch()
     teams_[2].teamChestBlock = GridPos { -3, 1, -40 };
     teams_[3].teamChestBlock = GridPos { 3, 1, 40 };
 
-    switch (arenaBiome_)
+    if (pendingCreativeDoc_ != nullptr)
     {
-    case ArenaBiome::Ice:
-        AddFrozenRingLayout();
-        break;
-    case ArenaBiome::Lava:
-        AddMoltenLayersLayout();
-        break;
-    case ArenaBiome::Space:
-        AddOrbitalShardsLayout();
-        break;
-    case ArenaBiome::Ruins:
-        AddBrokenCitadelLayout();
-        break;
-    case ArenaBiome::Arena:
-        AddClassicArenaLayout();
-        if (arenaLayout_ == ArenaLayout::Vertical)
+        // Custom map: geometry and gameplay entities (cores/generators/spawns/
+        // chests) come from the creative document instead of an arena layout.
+        ApplyPendingCreativeDocToMatch();
+        if (!TeamPlayableForSetup(selectedTeamId_))
         {
-            AddVerticalArenaFeatures();
+            for (const Team& team : teams_)
+            {
+                if (TeamPlayableForSetup(team.id))
+                {
+                    selectedTeamId_ = team.id;
+                    break;
+                }
+            }
         }
-        break;
     }
-
-    for (const Team& team : teams_)
+    else
     {
-        if (!IsTeamActiveForMode(team.id))
+        creativeRouteNodes_.clear();
+        creativeRouteEdges_.clear();
+        routeGraph_.Clear();
+        switch (arenaBiome_)
         {
-            continue;
+        case ArenaBiome::Ice:
+            AddFrozenRingLayout();
+            break;
+        case ArenaBiome::Lava:
+            AddMoltenLayersLayout();
+            break;
+        case ArenaBiome::Space:
+            AddOrbitalShardsLayout();
+            break;
+        case ArenaBiome::Ruins:
+            AddBrokenCitadelLayout();
+            break;
+        case ArenaBiome::Arena:
+            AddClassicArenaLayout();
+            if (arenaLayout_ == ArenaLayout::Vertical)
+            {
+                AddVerticalArenaFeatures();
+            }
+            break;
         }
-        world_.PlaceBlock(team.coreBlock, Block { BlockType::EnergyCoreBlock, team.id, false }, true);
-        matchSimulation_.Cores().emplace_back(team.id, team.coreBlock, 120);
-        world_.PlaceBlock(GridPos { team.coreBlock.x + 1, team.coreBlock.y, team.coreBlock.z }, Block { BlockType::StoneBlock, team.id, true }, true);
-        world_.PlaceBlock(GridPos { team.coreBlock.x - 1, team.coreBlock.y, team.coreBlock.z }, Block { BlockType::WoolBlock, team.id, true }, true);
-        world_.PlaceBlock(GridPos { team.coreBlock.x, team.coreBlock.y, team.coreBlock.z + 1 }, Block { BlockType::WoolBlock, team.id, true }, true);
-        world_.PlaceBlock(GridPos { team.coreBlock.x, team.coreBlock.y, team.coreBlock.z - 1 }, Block { BlockType::WoolBlock, team.id, true }, true);
-        world_.PlaceBlock(team.teamChestBlock, Block { BlockType::TeamChestBlock, team.id, false }, true);
-    }
 
-    SetupGenerators();
+        for (const Team& team : teams_)
+        {
+            if (!IsTeamActiveForMode(team.id))
+            {
+                continue;
+            }
+            world_.PlaceBlock(team.coreBlock, Block { BlockType::EnergyCoreBlock, team.id, false }, true);
+            matchSimulation_.Cores().emplace_back(team.id, team.coreBlock, 120);
+            world_.PlaceBlock(GridPos { team.coreBlock.x + 1, team.coreBlock.y, team.coreBlock.z }, Block { BlockType::StoneBlock, team.id, true }, true);
+            world_.PlaceBlock(GridPos { team.coreBlock.x - 1, team.coreBlock.y, team.coreBlock.z }, Block { BlockType::WoolBlock, team.id, true }, true);
+            world_.PlaceBlock(GridPos { team.coreBlock.x, team.coreBlock.y, team.coreBlock.z + 1 }, Block { BlockType::WoolBlock, team.id, true }, true);
+            world_.PlaceBlock(GridPos { team.coreBlock.x, team.coreBlock.y, team.coreBlock.z - 1 }, Block { BlockType::WoolBlock, team.id, true }, true);
+            world_.PlaceBlock(team.teamChestBlock, Block { BlockType::TeamChestBlock, team.id, false }, true);
+        }
+
+        SetupGenerators();
+    }
 
     const Team* localTeam = FindTeam(selectedTeamId_);
     if (localTeam == nullptr)
@@ -569,10 +630,9 @@ void Game::SetupMatch()
 
     const auto giveHumanLoadout = [](Player& player, HeroId heroId)
     {
+        // Building materials are part of the economy: every player must collect
+        // resources and buy blocks before the first bridge or Core defense.
         player.GetInventory().AddItem(heroId == HeroId::Svidetel ? ItemType::SniperRifle : ItemType::Sword, 1);
-        player.GetInventory().AddBlock(BlockType::WoodBlock, 24);
-        player.GetInventory().AddBlock(BlockType::WoolBlock, 32);
-        player.GetInventory().AddBlock(BlockType::StoneBlock, 8);
     };
 
     if (!pendingNetworkRoster_.empty())
@@ -705,7 +765,9 @@ void Game::SetupMatch()
         std::vector<int> enemyTeams;
         for (const Team& team : teams_)
         {
-            if (team.id != selectedTeamId_ && IsTeamActiveForMode(team.id))
+            // Custom maps define playable teams by their cores (same predicate
+            // as the core/entity setup above); stock matches by the mode.
+            if (team.id != selectedTeamId_ && TeamPlayableForSetup(team.id))
             {
                 enemyTeams.push_back(team.id);
             }
@@ -750,6 +812,7 @@ void Game::SetupMatch()
 
     for (Player& player : players_)
     {
+        player.Teleport(FindTeamRespawnPosition(player));
         GetPlayerScore(player.GetId());
     }
 
@@ -758,15 +821,6 @@ void Game::SetupMatch()
         cameraController_.Reset(localPlayer->GetYaw(), -0.14f, localPlayer->GetPosition());
         localWasOnGround_ = localPlayer->IsOnGround();
         localAirPeakY_ = localPlayer->GetPosition().y;
-    }
-
-    AddEventMessage("Собирайте ресурсы у генератора на базе", Color { 188, 198, 210, 255 }, 5.0f);
-    AddEventMessage("Покупайте блоки, стройте мост к центру и ломайте защиту врага", Color { 255, 235, 142, 255 }, 5.5f);
-    AddEventMessage("Удерживайте ЛКМ, чтобы ломать блоки или бить Кор", Color { 112, 232, 255, 255 }, 6.0f);
-    AddEventMessage("Золотой прицел = враг в радиусе ближнего боя", Color { 255, 235, 142, 255 }, 6.5f);
-    if (arenaBiome_ != ArenaBiome::Arena)
-    {
-        AddEventMessage(std::string("Правило биома: ") + ArenaBiomeName(), BiomeFogColor(), 6.8f);
     }
 
     // The match is set up and the simulation is live (snapshot phase). Reset()
@@ -813,27 +867,6 @@ void Game::AddClassicArenaLayout()
     AddTree(world_, GridPos { 5, 1, -44 });
     AddTree(world_, GridPos { 5, 1, 44 });
     AddTree(world_, GridPos { -5, 1, 44 });
-}
-
-void Game::PrepareStartupSmoke()
-{
-    if (!headless_)
-    {
-        StartSelectedMatch();
-    }
-}
-
-void Game::ExerciseStartupSmokeMutation(bool place)
-{
-    const GridPos probe { 0, 20, 0 };
-    if (place)
-    {
-        world_.PlaceBlock(probe, Block { BlockType::StoneBlock, -1, true }, true);
-    }
-    else
-    {
-        world_.RemoveBlock(probe);
-    }
 }
 
 void Game::AddFrozenRingLayout()
@@ -1276,11 +1309,30 @@ void Game::StartSelectedMatch()
 {
     automatch_.active = false;
     tutorialMode_ = false;
+    creativeMode_ = false;
+    creativeTestActive_ = false;
     selectedTeamId_ = std::clamp(selectedTeamId_, 0, TeamCountForMode() - 1);
     selectedTeamSize_ = std::clamp(selectedTeamSize_, 1, 4);
     selectedBotCount_ = std::clamp(selectedBotCount_, 0, MaxBotCountForSelection());
     SaveSettings();
+    // Playtest default: ordinary "start match" plays the castle map instead
+    // of the generated arena while it is being polished.  Missing or broken
+    // file falls back to the stock arena silently.
+    CreativeMapDocument defaultMapDoc;
+    if (pendingCreativeDoc_ == nullptr)
+    {
+        std::string defaultMapError;
+        if (LoadCreativeMapDocument("maps/castle_bedwars.dbmap", defaultMapDoc, &defaultMapError)
+            && defaultMapDoc.CoreTeamCount() >= 2)
+        {
+            pendingCreativeDoc_ = &defaultMapDoc;
+        }
+    }
     SetupMatch();
+    if (pendingCreativeDoc_ == &defaultMapDoc)
+    {
+        pendingCreativeDoc_ = nullptr;
+    }
     gameplayFov_ = fov_;
     cameraController_.SetFov(gameplayFov_);
     UpdateCamera(0.016f);
@@ -1293,6 +1345,8 @@ void Game::StartTutorialMatch()
 {
     automatch_.active = false;
     tutorialMode_ = true;
+    creativeMode_ = false;
+    creativeTestActive_ = false;
     selectedMode_ = MatchMode::TwoVsTwo;
     selectedTeamId_ = 0;
     selectedTeamSize_ = 1;
