@@ -8,6 +8,7 @@
 #include "raylib.h"
 
 #include <string>
+#include <array>
 
 enum class PlayerControlKind
 {
@@ -36,13 +37,13 @@ public:
     Vector3 GetPosition() const; // raylib adapter over the Vec3 storage
     Vector3 GetVelocity() const; // raylib adapter over the Vec3 storage
     // Raylib-free boundary helpers (preferred for sim/snapshot; the spatial
-    // storage is Vec3 internally). See docs/NETWORK_PREP_PLAN.md.
+    // storage is Vec3 internally). See docs/MULTIPLAYER_TARGET_ARCHITECTURE.md.
     Vec3 GetPositionVec3() const;
     Vec3 GetVelocityVec3() const;
     void SetPosition(Vec3 position);
     void SetVelocity(Vec3 velocity);
     // Client-only: reflect an authoritative snapshot's public health/alive state
-    // (no combat/death logic runs). See docs/NETWORK_PREP_PLAN.md (Phase 0.1T).
+    // (no combat/death logic runs). See docs/MULTIPLAYER_TARGET_ARCHITECTURE.md.
     void ApplyReplicatedState(int health, int maxHealth, bool alive, bool eliminated, float respawnTimer);
     float GetYaw() const;
     int GetHealth() const;
@@ -76,9 +77,12 @@ public:
     // Per-player active hotbar slot. The local player still mirrors the slot in
     // Game::selectedHotbarSlot_ for UI; network-controlled players (bots aside)
     // need their own slot so the authoritative server can replicate it (Phase
-    // 0.1W). See docs/NETWORK_PREP_PLAN.md.
+    // network authority). See docs/MULTIPLAYER_TARGET_ARCHITECTURE.md.
     int GetSelectedSlot() const;
     void SetSelectedSlot(int slot);
+    int GetSelectedWoolVariant() const;
+    void SetSelectedWoolVariant(int variant);
+    void CycleWoolVariant(int direction);
 
     Vector3 Forward() const;
     Vector3 Right() const;
@@ -153,6 +157,14 @@ public:
     // defaults regardless of the server's true state. Not used server-side.
     void SetBowDrawTimerReplicated(float value);
     void SetBlasterStateReplicated(CrossbowState state, float loadTimer);
+    ArrowVariant GetArrowVariant() const;
+    void CycleArrowVariant(int direction);
+    int GetArrowAmmo(ArrowVariant variant) const;
+    float GetArrowReloadTimer(ArrowVariant variant) const;
+    bool TryConsumeArrow();
+    void SetQuiverStateReplicated(ArrowVariant selected,
+        const std::array<int, kArrowVariantCount>& ammo,
+        const std::array<float, kArrowVariantCount>& reloadTimers);
 
 private:
     bool HasGroundSupportAt(Vector3 position, const World& world) const;
@@ -201,7 +213,15 @@ private:
     CrossbowState blasterState_ = CrossbowState::Unloaded;
     float blasterLoadTimer_ = 0.0f;
     float bowDrawTimer_ = 0.0f;
+    ArrowVariant selectedArrowVariant_ = ArrowVariant::Standard;
+    std::array<int, kArrowVariantCount> arrowAmmo_ {
+        ArrowQuiverCapacity(ArrowVariant::Standard),
+        ArrowQuiverCapacity(ArrowVariant::Breacher),
+        ArrowQuiverCapacity(ArrowVariant::Impulse)
+    };
+    std::array<float, kArrowVariantCount> arrowReloadTimers_ {};
     int selectedSlot_ = 0;
+    int selectedWoolVariant_ = -1;
     HeroId heroId_ = HeroId::Radon;
     HeroRuntimeState heroState_ {};
     float heroIncomingDamageMultiplier_ = 1.0f;

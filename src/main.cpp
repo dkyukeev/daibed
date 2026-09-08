@@ -1,7 +1,10 @@
 #include "Game.h"
 #include "CrashLogger.h"
+#include "FirstPersonMotion.h"
 #include "Network/NetworkProtocol.h"
 #include "Network/NetworkTransport.h"
+#include "Platform/SteamLobbyService.h"
+#include "Platform/SteamRuntime.h"
 
 #include "raylib.h"
 
@@ -189,6 +192,8 @@ int main(int argc, char** argv)
         bool cliProtocolSmoke = false;
         bool cliLoopbackSmoke = false;
         bool cliLocalhostNetSmoke = false;
+        bool cliDatagramBackendSmoke = false;
+        bool cliSteamLobbySmoke = false;
         bool cliMpLoopbackSmoke = false;
         bool cliClientGuiSmoke = false;
         bool cliClientInputSmoke = false;
@@ -197,10 +202,13 @@ int main(int argc, char** argv)
         bool cliLagCompSmoke = false;
         bool cliCreativeSmoke = false;
         bool cliUiScreenshot = false;
+        bool cliParticleReview = false;
         bool cliMapReview = false;
         bool cliFrameProfile = false;
         bool cliNetworkRangedSmoke = false;
         bool cliMovementParitySmoke = false;
+        bool cliFirstPersonMotionSmoke = false;
+        bool cliParticleSystemSmoke = false;
         bool cliClientDynamicApplySmoke = false;
         bool cliIntegratedServerSmoke = false;
         bool cliNavigationSmoke = false;
@@ -209,6 +217,8 @@ int main(int argc, char** argv)
         bool cliServer = false;
         bool cliHost = false;
         bool cliConnectRequested = false;
+        bool cliPortExplicit = false;
+        bool cliNetworkBackendExplicit = false;
         std::string cliConnectAddress;
         std::string cliPlayerName;
         int cliLobbyTeam = -1;
@@ -310,6 +320,14 @@ int main(int argc, char** argv)
             {
                 cliLocalhostNetSmoke = true;
             }
+            else if (arg == "--datagram-backend-smoke")
+            {
+                cliDatagramBackendSmoke = true;
+            }
+            else if (arg == "--steam-lobby-smoke")
+            {
+                cliSteamLobbySmoke = true;
+            }
             else if (arg == "--mp-loopback-smoke")
             {
                 cliMpLoopbackSmoke = true;
@@ -342,6 +360,10 @@ int main(int argc, char** argv)
             {
                 cliUiScreenshot = true;
             }
+            else if (arg == "--particle-review")
+            {
+                cliParticleReview = true;
+            }
             else if (arg == "--map-review")
             {
                 cliMapReview = true;
@@ -357,6 +379,14 @@ int main(int argc, char** argv)
             else if (arg == "--movement-parity-smoke")
             {
                 cliMovementParitySmoke = true;
+            }
+            else if (arg == "--first-person-motion-smoke")
+            {
+                cliFirstPersonMotionSmoke = true;
+            }
+            else if (arg == "--particle-system-smoke")
+            {
+                cliParticleSystemSmoke = true;
             }
             else if (arg == "--client-dynamic-apply-smoke")
             {
@@ -393,6 +423,7 @@ int main(int argc, char** argv)
             }
             else if (arg == "--port" && i + 1 < argc)
             {
+                cliPortExplicit = true;
                 const char* portText = argv[++i];
                 char* parseEnd = nullptr;
                 const long parsedPort = std::strtol(portText, &parseEnd, 10);
@@ -408,6 +439,26 @@ int main(int argc, char** argv)
             else if ((arg == "--listen" || arg == "--listen-address") && i + 1 < argc)
             {
                 cliServerConfig.listenAddress = argv[++i];
+            }
+            else if (arg == "--network-backend" && i + 1 < argc)
+            {
+                cliNetworkBackendExplicit = true;
+                const std::string backend = LowerAscii(argv[++i]);
+                if (backend == "udp" || backend == "systemudp")
+                {
+                    cliServerConfig.networkBackend = NetworkBackend::SystemUdp;
+                }
+                else if (backend == "steam" || backend == "steamp2p")
+                {
+                    cliServerConfig.networkBackend = NetworkBackend::SteamP2P;
+                }
+                else
+                {
+                    std::cerr << "error: --network-backend must be udp or steam (got \""
+                              << backend << "\")\n";
+                    CrashLogger::Shutdown();
+                    return 5;
+                }
             }
             else if (arg == "--server-name" && i + 1 < argc)
             {
@@ -539,6 +590,37 @@ int main(int argc, char** argv)
             }
         }
 
+#if defined(DAIBED_HAVE_STEAMWORKS) && DAIBED_HAVE_STEAMWORKS
+        // The universal release contains both transports. Prefer Steam when
+        // its client and authenticated user are ready, otherwise keep the same
+        // executable fully usable over UDP. Explicit CLI selection remains
+        // authoritative for diagnostics and dedicated hosts.
+        if (!cliNetworkBackendExplicit
+            && !cliServer && !cliHost && !cliConnectRequested
+            && !cliLocalhostNetSmoke && !cliDatagramBackendSmoke
+            && !cliMpLoopbackSmoke && !cliSteamLobbySmoke)
+        {
+            SteamRuntimeLease steamProbe;
+            if (steamProbe.Acquire())
+            {
+                cliServerConfig.networkBackend = NetworkBackend::SteamP2P;
+                CrashLogger::LogEvent("network auto-select: Steam P2P available");
+            }
+            else
+            {
+                cliServerConfig.networkBackend = NetworkBackend::SystemUdp;
+                CrashLogger::LogEvent(
+                    "network auto-select: Steam unavailable, using UDP ("
+                    + steamProbe.LastError() + ")");
+            }
+        }
+#endif
+        if (cliServerConfig.networkBackend == NetworkBackend::SteamP2P
+            && !cliPortExplicit)
+        {
+            cliServerConfig.port = 777;
+        }
+
         if (cliCrashTest)
         {
             CrashLogger::LogEvent("artificial crash test requested");
@@ -559,6 +641,38 @@ int main(int argc, char** argv)
             // Real loopback UDP server+client in one process: no window, no Game.
             CrashLogger::LogEvent("localhost net smoke started");
             const int rc = RunLocalhostNetSmoke(cliServerConfig);
+            CrashLogger::Shutdown();
+            return rc;
+        }
+
+        if (cliFirstPersonMotionSmoke)
+        {
+            CrashLogger::LogEvent("first-person motion smoke started");
+            const int rc = RunFirstPersonMotionSmoke();
+            CrashLogger::Shutdown();
+            return rc;
+        }
+
+        if (cliParticleSystemSmoke)
+        {
+            CrashLogger::LogEvent("particle system smoke started");
+            const int rc = RunParticleSystemSmoke();
+            CrashLogger::Shutdown();
+            return rc;
+        }
+
+        if (cliDatagramBackendSmoke)
+        {
+            // Same wire/session protocol over opaque provider-style peer handles.
+            CrashLogger::LogEvent("datagram backend smoke started");
+            const int rc = RunDatagramBackendSmoke();
+            CrashLogger::Shutdown();
+            return rc;
+        }
+        if (cliSteamLobbySmoke)
+        {
+            CrashLogger::LogEvent("Steam lobby smoke started");
+            const int rc = RunSteamLobbySmoke();
             CrashLogger::Shutdown();
             return rc;
         }
@@ -707,7 +821,8 @@ int main(int argc, char** argv)
             // assertions + map_review_*.png shots for visual review.
             CrashLogger::LogEvent("map review diag started");
             const int rc = game.RunMapReviewDiag(
-                cliMapPath.empty() ? std::string("maps/castle_bedwars.dbmap") : cliMapPath);
+                cliMapPath.empty() ? std::string("maps/castle_bedwars.dbmap") : cliMapPath,
+                cliBiome);
             game.Shutdown();
             CrashLogger::Shutdown();
             return rc;
@@ -800,6 +915,15 @@ int main(int argc, char** argv)
             // command crossing the same loopback pipeline multiplayer uses.
             CrashLogger::LogEvent("integrated server smoke started");
             const int rc = game.RunIntegratedServerSmoke();
+            game.Shutdown();
+            CrashLogger::Shutdown();
+            return rc;
+        }
+
+        if (cliParticleReview)
+        {
+            CrashLogger::LogEvent("particle review diag started");
+            const int rc = game.RunParticleReviewDiag();
             game.Shutdown();
             CrashLogger::Shutdown();
             return rc;

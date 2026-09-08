@@ -94,6 +94,21 @@ float NavigationProfile::ThreatCostScale() const noexcept
     return threatWeight * (1.75f - tolerance * 1.45f);
 }
 
+float NavigationProfile::MaximumJumpRise() const noexcept
+{
+    if (!canJump || gravity <= 0.0f) return 0.0f;
+    constexpr float dt = 1.0f / 60.0f;
+    float velocity = jumpSpeed;
+    float height = 0.0f;
+    for (int tick = 0; tick < 180; ++tick)
+    {
+        velocity -= gravity * dt;
+        if (velocity <= 0.0f) break;
+        height += velocity * dt;
+    }
+    return height;
+}
+
 float NavigationProfile::EstimatedJumpHorizontalReach(
     int landingRiseBlocks,
     bool sprint) const noexcept

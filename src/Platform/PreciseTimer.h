@@ -10,7 +10,7 @@
 // a steady 60 Hz, so against a half-speed server it perpetually out-runs the
 // authoritative simulation and gets hard-resynced every snapshot — movement
 // jerks toward the server-sampled positions and fast moves (Orbita's dash)
-// stutter badly. See docs/NETWORK_PREP_PLAN.md.
+// stutter badly. See docs/MULTIPLAYER_QUALITY_TARGET.md.
 //
 // PreciseSleepSeconds waits the requested duration accurately (~sub-millisecond
 // on Windows via a high-resolution waitable timer) with low CPU, so the server

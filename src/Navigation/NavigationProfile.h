@@ -108,6 +108,7 @@ struct NavigationProfile
 
     float BridgeScarcityCost(int remainingBeforePlacement) const noexcept;
     float ThreatCostScale() const noexcept;
+    float MaximumJumpRise() const noexcept;
     float EstimatedJumpHorizontalReach(
         int landingRiseBlocks = 0,
         bool sprint = true) const noexcept;

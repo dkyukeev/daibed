@@ -6,7 +6,9 @@
 #include "Network/NetworkTransport.h"
 #include "Network/SnapshotVisibility.h"
 #include "Platform/PreciseTimer.h"
+#include "Platform/SteamLobbyService.h"
 #include "UiText.h"
+#include "VisualTheme.h"
 
 #include <algorithm>
 #include <chrono>
@@ -19,7 +21,7 @@
 #define DrawText DrawTextUtf8
 #define MeasureText MeasureTextUtf8
 
-// Network preparation layer (see docs/NETWORK_PREP_PLAN.md). This translation
+// Network integration layer (see docs/MULTIPLAYER_TARGET_ARCHITECTURE.md). This translation
 // unit owns the typed command/snapshot glue, the headless diagnostic modes, and
 // (Phase 0.1T) the windowed GUI client. The headless server/smoke code stays
 // free of raylib draw/audio/window calls; the GUI client at the bottom does use
@@ -568,6 +570,137 @@ NetworkMode Game::GetNetworkMode() const
 void Game::SetServerConfig(const ServerConfig& config)
 {
     serverConfig_ = config;
+    hostPortText_ = std::to_string(config.port);
+}
+
+bool Game::EnsureSteamLobbyService(std::string& error)
+{
+    if (steamLobbyService_ == nullptr)
+    {
+        steamLobbyService_ = std::make_unique<SteamLobbyService>();
+    }
+    if (steamLobbyService_->IsActive())
+    {
+        error.clear();
+        return true;
+    }
+    if (steamLobbyStartAttempted_ && GetTime() < steamLobbyRetryAfter_)
+    {
+        error = steamLobbyService_->LastError();
+        return false;
+    }
+    steamLobbyStartAttempted_ = true;
+    if (!steamLobbyService_->Start())
+    {
+        error = steamLobbyService_->LastError();
+        // Steam can still be acquiring the local user immediately after API
+        // startup or reconnecting its backend session.  Do not cache one
+        // transient failure until process exit; retry without busy-looping.
+        steamLobbyRetryAfter_ = GetTime() + 2.0;
+        return false;
+    }
+    steamLobbyRetryAfter_ = 0.0;
+    error.clear();
+    return true;
+}
+
+void Game::UpdateSteamLobbyService()
+{
+    if (headless_ || serverConfig_.networkBackend != NetworkBackend::SteamP2P)
+    {
+        return;
+    }
+
+    std::string error;
+    if (!EnsureSteamLobbyService(error))
+    {
+        return;
+    }
+    steamLobbyService_->PumpCallbacks();
+
+    if (steamLobbyService_->OwnsLobby())
+    {
+        const bool matchOpen = IntegratedListenServerRunning()
+            && integratedServerGame_ != nullptr
+            && !integratedServerGame_->networkLobbyMatchStarted_;
+        steamLobbyService_->SetHostJoinable(matchOpen);
+    }
+
+    const std::optional<SteamLobbyJoinTarget> target =
+        steamLobbyService_->TakeJoinTarget();
+    if (!target.has_value() || !target->IsValid())
+    {
+        return;
+    }
+
+    // Accepting a Steam invitation is an in-game navigation action. Retire an
+    // old hosted/client session, then feed the lobby's authenticated endpoint
+    // into the ordinary snapshot client; the player never handles Steam IDs.
+    if (IntegratedListenServerRunning())
+    {
+        StopIntegratedListenServer();
+    }
+    if (NetworkClientSessionActive())
+    {
+        StopNetworkClientSession(false);
+    }
+    serverConfig_.networkBackend = NetworkBackend::SteamP2P;
+    serverConfig_.port = target->virtualPort;
+    multiplayerAddress_ = std::to_string(target->hostSteamId) + ":"
+        + std::to_string(target->virtualPort);
+    multiplayerTab_ = 0;
+    screen_ = GameScreen::Multiplayer;
+    if (target->passwordProtected)
+    {
+        multiplayerPassword_.clear();
+        multiplayerIndex_ = 2;
+        multiplayerStatus_ = "Введите пароль для «" + target->serverName
+            + "» и нажмите «Подключиться».";
+        return;
+    }
+
+    multiplayerPassword_.clear();
+    multiplayerStatus_ = "Подключение к «" + target->serverName + "» по приглашению Steam...";
+    StartGuiConnect();
+}
+
+void Game::StopSteamLobbyService()
+{
+    steamFriendPickerOpen_ = false;
+    if (steamLobbyService_ != nullptr)
+    {
+        steamLobbyService_->Stop();
+        steamLobbyService_.reset();
+    }
+    steamLobbyStartAttempted_ = false;
+    steamLobbyRetryAfter_ = 0.0;
+}
+
+bool Game::OpenSteamInviteDialog()
+{
+    std::string error;
+    if (!EnsureSteamLobbyService(error))
+    {
+        multiplayerStatus_ = error;
+        return false;
+    }
+    if (!steamLobbyService_->HasLobby())
+    {
+        multiplayerStatus_ = "Сначала дождитесь создания Steam-лобби.";
+        return false;
+    }
+    // Use InviteUserToLobby from an in-game friend picker. This path works even
+    // when the Steam Overlay is disabled; the recipient still receives a
+    // normal Steam lobby invitation and GameLobbyJoinRequested_t callback.
+    steamFriendPickerOpen_ = true;
+    steamFriendPickerScroll_ = 0;
+    multiplayerStatus_ = "Выберите друга для приглашения в Steam-лобби.";
+    return true;
+}
+
+bool Game::SteamLobbyReady() const
+{
+    return steamLobbyService_ != nullptr && steamLobbyService_->OwnsLobby();
 }
 
 const ServerConfig& Game::GetServerConfig() const
@@ -589,6 +722,11 @@ PlayerCommand Game::BuildLocalPlayerCommand() const
     command.sprintTapped = currentInput_.sprintTapped;
     command.sneak = currentInput_.sneak;
     command.selectedSlot = selectedHotbarSlot_;
+    if (const Player* localPlayer = GetLocalPlayer())
+    {
+        command.woolVariant = localPlayer->GetSelectedWoolVariant();
+        command.arrowVariant = static_cast<int>(localPlayer->GetArrowVariant());
+    }
     command.attackPressed = currentInput_.attackPressed;
     command.attackHeld = currentInput_.attackHeld;
     command.attackReleased = currentInput_.attackReleased;
@@ -613,6 +751,8 @@ PlayerCommand Game::BuildLocalPlayerCommand() const
     command.actionType = static_cast<int>(pendingEconomyActionType_);
     command.actionParamA = pendingEconomyActionParamA_;
     command.actionParamB = pendingEconomyActionParamB_;
+    command.chatSeq = pendingChatSeq_;
+    command.chatMessage = pendingChatMessage_;
 
     // Client-side UI gates, applied where the command is BUILT so every
     // consumer (SP integrated server, MP client prediction + send, previews)
@@ -736,6 +876,13 @@ MatchSnapshot Game::BuildNetworkSnapshot() const
         entry.abilityHud.ultimateCharge = heroState.ultimateCharge;
         entry.abilityHud.ultimatePrimed = heroState.ultimatePrimed;
         entry.abilityHud.bowDrawTimer = player.GetBowDrawTimer();
+        entry.abilityHud.arrowVariant = static_cast<int>(player.GetArrowVariant());
+        for (int i = 0; i < kArrowVariantCount; ++i)
+        {
+            const ArrowVariant variant = static_cast<ArrowVariant>(i);
+            entry.abilityHud.arrowAmmo[i] = player.GetArrowAmmo(variant);
+            entry.abilityHud.arrowReloadTimers[i] = player.GetArrowReloadTimer(variant);
+        }
         entry.abilityHud.blasterState = static_cast<int>(player.GetBlasterState());
         entry.abilityHud.blasterLoadTimer = player.GetBlasterLoadTimer();
         // Public animation pose, computed authoritatively each tick on the server
@@ -871,6 +1018,7 @@ MatchSnapshot Game::BuildNetworkSnapshot() const
         // earlier projectile expiring must not reassign a surviving one's id.
         entry.id = projectile.id;
         entry.kind = static_cast<int>(projectile.kind);
+        entry.arrowVariant = static_cast<int>(projectile.arrowVariant);
         entry.position = toVec3(projectile.position);
         entry.velocity = toVec3(projectile.velocity);
         entry.ownerPlayerId = projectile.ownerId;
@@ -1839,13 +1987,8 @@ void Game::ApplyNetworkPlayerActions(Player& player, const PlayerCommand& comman
                 if (previousPower < 1.0f && drawPower >= 1.0f)
                 {
                     audio_.PlayPickup();
-                    AddWorldEffect(
-                        player.GetPosition(),
-                        aimDirection,
-                        Color { 255, 226, 96, 255 },
-                        0.24f,
-                        0.18f,
-                        WorldEffectKind::Ring);
+                    EmitAbilityParticles(player.GetPosition(), aimDirection,
+                        Color { 255, 226, 96, 255 }, 0.44f, WorldEffectKind::Ring);
                 }
             }
             return;
@@ -1897,13 +2040,8 @@ void Game::ApplyNetworkPlayerActions(Player& player, const PlayerCommand& comman
                 if (becameLoaded)
                 {
                     audio_.PlayPickup();
-                    AddWorldEffect(
-                        player.GetPosition(),
-                        aimDirection,
-                        Color { 190, 255, 255, 255 },
-                        0.30f,
-                        0.22f,
-                        WorldEffectKind::Ring);
+                    EmitAbilityParticles(player.GetPosition(), aimDirection,
+                        Color { 190, 255, 255, 255 }, 0.52f, WorldEffectKind::Ring);
                     SetMessage("Blaster charged. Next click fires.");
                 }
             }
@@ -2919,17 +3057,79 @@ void Game::IntegratedServerTick(float dt)
     // Client side: ship this tick's command over the loopback wire. Movement is
     // still applied by the direct SP path (hybrid step) — the server side below
     // only consumes the migrated systems, so nothing double-applies.
-    integratedServer_.SubmitCommand(kIntegratedServerClientId, BuildLocalPlayerCommand());
+    const PlayerCommand localCommand = BuildLocalPlayerCommand();
+    integratedServer_.SubmitCommand(kIntegratedServerClientId, localCommand);
     for (const PlayerCommand& received : integratedServer_.DrainCommands())
     {
         ++integratedServerCommandsDrained_;
         ApplyIntegratedServerCommand(received, dt);
+    }
+    if (localCommand.chatSeq != 0)
+    {
+        pendingChatSeq_ = 0;
+        pendingChatMessage_.clear();
     }
     // Server -> client: the same per-recipient visibility-filtered snapshot a
     // remote client would receive. Presentation does not consume it yet (hybrid);
     // it keeps the channel honest and observable for parity tests.
     integratedServer_.PublishSnapshot(
         kIntegratedServerClientId, BuildNetworkSnapshotForClient(localPlayerId_));
+}
+
+void Game::ApplyChatCommand(Player& player, const PlayerCommand& command)
+{
+    if (command.chatSeq == 0 || command.chatMessage.empty())
+    {
+        return;
+    }
+    std::uint32_t& lastSeq = chatMessageSeq_[player.GetId()];
+    if (command.chatSeq <= lastSeq)
+    {
+        return;
+    }
+    lastSeq = command.chatSeq;
+
+    std::string message;
+    message.reserve(std::min<std::size_t>(command.chatMessage.size(), 384));
+    for (const char* cursor = command.chatMessage.c_str(); *cursor != '\0';)
+    {
+        int sourceBytes = 0;
+        const int codepoint = GetCodepointNext(cursor, &sourceBytes);
+        cursor += std::max(1, sourceBytes);
+        if (codepoint < 32 || codepoint == 127)
+        {
+            continue;
+        }
+        int encodedBytes = 0;
+        const char* encoded = CodepointToUTF8(codepoint, &encodedBytes);
+        if (encoded == nullptr || encodedBytes <= 0
+            || message.size() + static_cast<std::size_t>(encodedBytes) > 384)
+        {
+            break;
+        }
+        message.append(encoded, static_cast<std::size_t>(encodedBytes));
+    }
+    if (message.empty())
+    {
+        return;
+    }
+
+    const std::string line = player.GetName() + ": " + message;
+    if (networkMode_ == NetworkMode::DedicatedServer)
+    {
+        PushWorldEventSnapshot(
+            WorldEventKind::ChatMessage,
+            player.GetId(),
+            -1,
+            player.GetTeamId(),
+            player.GetPosition(),
+            0, 0, 0, line);
+    }
+    else
+    {
+        const Team* team = FindTeam(player.GetTeamId());
+        AddChatMessage(line, team != nullptr ? GetTeamColor(team->color) : WHITE, 10.0f);
+    }
 }
 
 void Game::ApplyIntegratedServerCommand(const PlayerCommand& command, float dt)
@@ -2939,6 +3139,7 @@ void Game::ApplyIntegratedServerCommand(const PlayerCommand& command, float dt)
     {
         return;
     }
+    ApplyChatCommand(*target, command);
     // Migrated system (Phase 6 slice): economy/inventory actions run through the
     // same validated + deduped server method as multiplayer. The result is
     // presented directly instead of via an ActionResultSnapshot round-trip — the
@@ -3023,6 +3224,8 @@ void Game::ApplyBatchedServerCommands(const std::vector<ReceivedCommand>& receiv
         int actionType = static_cast<int>(PlayerActionType::None);
         int actionParamA = 0;
         int actionParamB = 0;
+        std::uint32_t chatSeq = 0;
+        std::string chatMessage;
     };
 
     std::vector<BatchedPlayerCommand> commandBatches;
@@ -3074,6 +3277,11 @@ void Game::ApplyBatchedServerCommands(const std::vector<ReceivedCommand>& receiv
             batch.actionParamA = command.actionParamA;
             batch.actionParamB = command.actionParamB;
         }
+        if (command.chatSeq != 0 && command.chatSeq >= batch.chatSeq)
+        {
+            batch.chatSeq = command.chatSeq;
+            batch.chatMessage = command.chatMessage;
+        }
     }
 
     const auto clearOneShotInputs = [](PlayerCommand& command)
@@ -3097,6 +3305,8 @@ void Game::ApplyBatchedServerCommands(const std::vector<ReceivedCommand>& receiv
         command.actionType = static_cast<int>(PlayerActionType::None);
         command.actionParamA = 0;
         command.actionParamB = 0;
+        command.chatSeq = 0;
+        command.chatMessage.clear();
     };
 
     std::vector<int> playerIdsToApply = networkControlledPlayerIds_;
@@ -3166,6 +3376,8 @@ void Game::ApplyBatchedServerCommands(const std::vector<ReceivedCommand>& receiv
             command.actionType = freshBatch->actionType;
             command.actionParamA = freshBatch->actionParamA;
             command.actionParamB = freshBatch->actionParamB;
+            command.chatSeq = freshBatch->chatSeq;
+            command.chatMessage = freshBatch->chatMessage;
         }
         else
         {
@@ -3183,6 +3395,10 @@ void Game::ApplyBatchedServerCommands(const std::vector<ReceivedCommand>& receiv
         command.controlledPlayerId = static_cast<std::uint32_t>(playerId);
 
         Player* target = matchSimulation_.GetPlayer(static_cast<int>(command.controlledPlayerId));
+        if (target != nullptr && isFreshCommand)
+        {
+            ApplyChatCommand(*target, command);
+        }
         if (target != nullptr && target->IsAlive())
         {
             ScopedLocalFeedbackSuppression suppressServerFeedback(*this, true);
@@ -3260,6 +3476,7 @@ void Game::NetworkServerTick(ServerTransport& transport, float dt)
     {
         serverHeldPlayerCommands_.erase(gone.playerId);
         serverEffectiveCommandTickByPlayer_.erase(gone.playerId);
+        chatMessageSeq_.erase(gone.playerId);
         if (const Player* player = matchSimulation_.GetPlayer(gone.playerId))
         {
             std::cout << "server: " << player->GetName()
@@ -3345,16 +3562,20 @@ int Game::RunNetworkServer(const ServerConfig& config, double maxSeconds)
 
     const float fixedDt = matchSimulation_.FixedDeltaSeconds();
     std::cout << "server: lobby listening on " << config.listenAddress << ':' << transport.BoundPort()
+              << " backend=" << ToString(config.networkBackend)
               << " (headless, no window) password=" << (config.HasPassword() ? "set" : "none")
               << " private=" << (config.privateServer ? "yes" : "no")
               << " maxTeamSize=" << config.maxTeamSize
               << " uniqueHeroes=" << (config.enforceUniqueHeroesPerTeam ? "yes" : "no")
               << " tickRate=" << matchSimulation_.TickRate() << '\n';
-    const std::string joinHost = config.listenAddress == "0.0.0.0"
-        ? std::string("<host-ip>")
-        : config.listenAddress;
+    const std::string joinHost = config.networkBackend == NetworkBackend::SteamP2P
+        ? std::string("<host-steam-id>")
+        : (config.listenAddress == "0.0.0.0" ? std::string("<host-ip>") : config.listenAddress);
     std::cout << "server: join command: DaiBed.exe --connect " << joinHost
               << ':' << transport.BoundPort()
+              << (config.networkBackend == NetworkBackend::SteamP2P
+                      ? " --network-backend steam"
+                      : "")
               << (config.HasPassword() ? " --password <password>" : "")
               << '\n';
     std::cout << "SERVER_READY" << std::endl;
@@ -3425,6 +3646,90 @@ int Game::RunNetworkServer(const ServerConfig& config, double maxSeconds)
     return 0;
 }
 
+bool Game::StartIntegratedListenServer(const ServerConfig& config, std::string& error)
+{
+    StopIntegratedListenServer();
+
+    auto serverGame = std::make_unique<Game>();
+    if (!serverGame->Initialize(true))
+    {
+        error = "failed to initialize the integrated server world";
+        return false;
+    }
+
+    // NetworkServerSetup advertises these selections in the lobby and later
+    // uses them to construct the authoritative match.
+    serverGame->SetSelectedBiome(arenaBiome_);
+    serverGame->SetSelectedMode(selectedMode_);
+    serverGame->SetSelectedTeamSize(selectedTeamSize_);
+    serverGame->SetArenaLayout(arenaLayout_);
+    serverGame->SetBotDifficulty(botDifficulty_);
+    serverGame->SetBotStrategyProfile(botStrategyProfile_);
+
+    auto transport = std::make_unique<ServerTransport>();
+    if (!serverGame->NetworkServerSetup(*transport, config))
+    {
+        error = transport->LastError().empty()
+            ? "failed to start the integrated listen server"
+            : transport->LastError();
+        return false;
+    }
+
+    integratedServerGame_ = std::move(serverGame);
+    integratedServerTransport_ = std::move(transport);
+    integratedServerAccumulator_ = 0.0f;
+    return true;
+}
+
+void Game::PumpIntegratedListenServer(float dt)
+{
+    if (!IntegratedListenServerRunning())
+    {
+        return;
+    }
+
+    const float fixedDt = integratedServerGame_->matchSimulation_.FixedDeltaSeconds();
+    integratedServerAccumulator_ += std::clamp(dt, 0.0f, 0.05f);
+
+    // Keep frame stalls bounded. Steam callbacks, transport polling and the
+    // authoritative simulation all remain serialized on the main thread.
+    int steps = 0;
+    constexpr int kMaxIntegratedServerStepsPerPump = 8;
+    while (integratedServerAccumulator_ >= fixedDt
+           && steps < kMaxIntegratedServerStepsPerPump)
+    {
+        integratedServerGame_->NetworkServerTick(*integratedServerTransport_, fixedDt);
+        integratedServerAccumulator_ -= fixedDt;
+        ++steps;
+    }
+    if (steps == kMaxIntegratedServerStepsPerPump)
+    {
+        integratedServerAccumulator_ = std::min(integratedServerAccumulator_, fixedDt);
+    }
+}
+
+void Game::StopIntegratedListenServer()
+{
+    if (integratedServerTransport_ != nullptr)
+    {
+        integratedServerTransport_->Close();
+    }
+    if (integratedServerGame_ != nullptr)
+    {
+        integratedServerGame_->Shutdown();
+    }
+    integratedServerTransport_.reset();
+    integratedServerGame_.reset();
+    integratedServerAccumulator_ = 0.0f;
+}
+
+bool Game::IntegratedListenServerRunning() const
+{
+    return integratedServerGame_ != nullptr
+        && integratedServerTransport_ != nullptr
+        && integratedServerTransport_->IsOpen();
+}
+
 // ============================================================================
 // Phase 0.1T — GUI network client
 //
@@ -3481,6 +3786,7 @@ void Game::BuildClientWorld(const LobbySnapshot& lobby)
     // position is followed every frame by UpdateCamera. Without this the
     // camera would keep whatever mode the menu left it in (third person).
     cameraController_.Reset(cameraController_.GetYaw(), -0.14f, Vector3 { 0.0f, 0.0f, 0.0f });
+    firstPersonMotion_.Reset(false);
 }
 
 // Locomotion poses are derivable from velocity/ground state alone; event poses
@@ -3605,9 +3911,9 @@ void Game::ApplyClientSnapshotFeedback(const MatchSnapshot& snapshot)
                 static_cast<unsigned char>(std::clamp(replicated.color[3], 0, 255))
             };
             result.seconds = replicated.seconds;
-            // No radius field on the wire; a fixed cosmetic default matches how
-            // PresentBlockActionResult already hardcodes its own effect radius
-            // client-side instead of replicating one.
+            // No radius field on the wire; utility effects still use a fixed
+            // cosmetic default. Block feedback is resolved separately from its
+            // replicated semantic action + BlockType particle recipe.
             result.radius = 0.32f;
             result.hasWorldEffect = (replicated.flags & kUtilityFlagWorldEffect) != 0;
             result.playPickupSound = (replicated.flags & kUtilityFlagPickupSound) != 0;
@@ -3728,6 +4034,19 @@ void Game::ApplyClientSnapshotFeedback(const MatchSnapshot& snapshot)
         {
             audio_.PlayDeath();
             const bool voidDeath = (event.flags & 2) != 0;
+            const bool finalDeath = (event.flags & 1) != 0;
+            const Player* victim = matchSimulation_.GetPlayer(event.targetPlayerId);
+            const Player* killer = matchSimulation_.GetPlayer(event.actorPlayerId);
+            const std::string victimName = victim != nullptr ? victim->GetName() : "Игрок";
+            std::string deathLine = killer != nullptr && event.actorPlayerId != event.targetPlayerId
+                ? killer->GetName() + " → " + victimName
+                : victimName + (voidDeath ? " упал в пустоту" : " погиб");
+            if (finalDeath)
+            {
+                deathLine += " · ФИНАЛ";
+            }
+            AddChatMessage(std::move(deathLine), finalDeath ? RED : ORANGE,
+                finalDeath ? 7.0f : 5.0f);
             if (voidDeath)
             {
                 PlayHeroVoiceForPlayerId(event.targetPlayerId, HeroVoiceEvent::VoidFall);
@@ -3738,8 +4057,6 @@ void Game::ApplyClientSnapshotFeedback(const MatchSnapshot& snapshot)
             }
             if (isOwnTarget)
             {
-                const Player* killer = matchSimulation_.GetPlayer(event.actorPlayerId);
-                const bool finalDeath = (event.flags & 1) != 0;
                 localDeathKiller_ = killer != nullptr ? killer->GetName() : "Окружение";
                 localDeathCause_ = event.cause;
                 localDeathOverlayTimer_ = finalDeath ? 7.0f : 4.0f;
@@ -3774,12 +4091,13 @@ void Game::ApplyClientSnapshotFeedback(const MatchSnapshot& snapshot)
             const bool coreAlive = core == nullptr || core->IsAlive();
             SetMessage((player != nullptr ? player->GetName() : "Игрок")
                 + " возродился. " + (coreAlive ? "Кор работает." : "Кор уничтожен. Последняя жизнь!"));
-            AddWorldEffect(ToRaylibVector3(event.position),
-                team != nullptr ? GetTeamColor(team->color) : WHITE, 0.42f, 0.45f);
+            EmitRespawnParticles(ToRaylibVector3(event.position),
+                team != nullptr ? GetTeamColor(team->color) : WHITE);
             break;
         }
         case WorldEventKind::GeneratorBoost:
             AddEventMessage("10:00 Скорость генераторов увеличена", Color { 255, 235, 142, 255 }, 5.0f);
+            AddChatMessage("Генераторы ускорены", Color { 255, 235, 142, 255 }, 6.0f);
             AddKillFeed("Генераторы ускорены", Color { 255, 235, 142, 255 }, 6.0f);
             audio_.PlayPurchase();
             break;
@@ -3789,34 +4107,64 @@ void Game::ApplyClientSnapshotFeedback(const MatchSnapshot& snapshot)
             AddEventMessage((owner != nullptr ? owner->name : "База") + std::string(": сработала тревога!"), Color { 255, 235, 142, 255 }, 3.0f);
             const Vector3 position = ToRaylibVector3(event.position);
             AddFloatingText("ТРЕВОГА", position, Color { 255, 235, 142, 255 });
-            AddWorldEffect(position, Color { 255, 235, 142, 255 }, 0.42f, 0.45f);
+            EmitTrapParticles(position, Color { 255, 235, 142, 255 }, 0.85f, true);
             audio_.PlayDenied();
             break;
         }
         case WorldEventKind::ResourcePickup:
         {
-            // Own pickups are already handled by the inventory-diff feedback
-            // below (ownPrevious/ownCurrent); only bystanders need this path.
-            if (isOwnActor)
-            {
-                break;
-            }
             const Vector3 position = ToRaylibVector3(event.position);
-            AddWorldEffect(position, Color { 180, 210, 255, 255 }, 0.22f, 0.28f);
-            AddFloatingText(
-                "+" + std::to_string(event.amount) + " " + ToString(static_cast<ResourceType>(event.subjectType)),
-                position, Fade(WHITE, 0.85f));
+            Vector3 target = position;
+            target.y += 0.72f;
+            if (const Player* actor = matchSimulation_.GetPlayer(event.actorPlayerId))
+            {
+                target = actor->GetPosition();
+                target.y += 0.62f;
+            }
+            const ResourceType resource = static_cast<ResourceType>(event.subjectType);
+            EmitPickupParticles(position, target,
+                VisualTheme::ResourcePickup(resource), event.amount);
+            if (!isOwnActor)
+            {
+                AddFloatingText(
+                    "+" + std::to_string(event.amount) + " " + ToString(resource),
+                    position, Fade(WHITE, 0.85f));
+            }
             break;
         }
         case WorldEventKind::ItemPickup:
         {
             const Vector3 position = ToRaylibVector3(event.position);
-            AddWorldEffect(position, Color { 255, 245, 170, 255 }, 0.18f, 0.22f);
+            Vector3 target = position;
+            target.y += 0.72f;
+            if (const Player* actor = matchSimulation_.GetPlayer(event.actorPlayerId))
+            {
+                target = actor->GetPosition();
+                target.y += 0.62f;
+            }
+            const ItemType item = static_cast<ItemType>(event.subjectType);
+            const std::optional<ResourceType> resource = ItemToResource(item);
+            EmitPickupParticles(
+                position,
+                target,
+                resource.has_value()
+                    ? VisualTheme::ResourcePickup(*resource)
+                    : VisualTheme::Palette::Objective,
+                event.amount);
             if (isOwnActor)
             {
-                SetMessage(std::string("Подобрано: ") + ItemDisplayName(static_cast<ItemType>(event.subjectType)) + ".");
+                SetMessage(std::string("Подобрано: ") + ItemDisplayName(item) + ".");
                 audio_.PlayPickup();
             }
+            break;
+        }
+        case WorldEventKind::ChatMessage:
+        {
+            const Team* team = FindTeam(event.targetTeamId);
+            AddChatMessage(
+                event.cause,
+                team != nullptr ? GetTeamColor(team->color) : WHITE,
+                10.0f);
             break;
         }
         }
@@ -3849,7 +4197,21 @@ void Game::ApplyClientSnapshotFeedback(const MatchSnapshot& snapshot)
             const Color color = ownDamage
                 ? Color { 255, 118, 118, 255 }
                 : (enemyDamage ? Color { 255, 236, 135, 255 } : Color { 180, 210, 255, 255 });
-            AddWorldEffect(position, color, ownDamage ? 0.42f : 0.30f, ownDamage ? 0.42f : 0.30f);
+            Vector3 direction { 0.0f, 0.18f, 1.0f };
+            if (ownCurrent != nullptr && current.playerId != ownCurrent->playerId)
+            {
+                direction = Vector3 {
+                    current.position.x - ownCurrent->position.x,
+                    0.18f,
+                    current.position.z - ownCurrent->position.z,
+                };
+            }
+            EmitImpactParticles(
+                position,
+                direction,
+                color,
+                ParticleMaterial::Character,
+                ownDamage ? 1.18f : 0.92f);
             AddFloatingText("-" + std::to_string(damage), position, color);
             if (ownDamage)
             {
@@ -3907,10 +4269,15 @@ void Game::ApplyClientSnapshotFeedback(const MatchSnapshot& snapshot)
         position.y += 0.8f;
 
         const bool destroyed = old->alive && !current.alive;
-        AddWorldEffect(position,
-            destroyed ? Color { 255, 118, 118, 255 } : Color { 112, 232, 255, 255 },
-            destroyed ? 0.75f : 0.48f,
-            destroyed ? 0.80f : 0.42f);
+        if (destroyed)
+        {
+            EmitCoreDestructionParticles(position, Color { 255, 118, 118, 255 }, 1.45f);
+        }
+        else
+        {
+            EmitImpactParticles(position, Vector3 { 0.0f, 0.65f, 0.0f },
+                Color { 112, 232, 255, 255 }, ParticleMaterial::Energy, 1.1f);
+        }
         AddFloatingText("-" + std::to_string(damage), position, Color { 112, 232, 255, 255 });
         AddKillFeed(std::string(TeamName(current.teamId)) + " Кор -" + std::to_string(damage),
             destroyed ? Color { 255, 118, 118, 255 } : Color { 112, 232, 255, 255 },
@@ -3919,6 +4286,8 @@ void Game::ApplyClientSnapshotFeedback(const MatchSnapshot& snapshot)
         {
             AddEventMessage(std::string(TeamName(current.teamId)) + " Кор уничтожен",
                 Color { 255, 118, 118, 255 }, 5.0f);
+            AddChatMessage(std::string(TeamName(current.teamId)) + " Кор уничтожен",
+                Color { 255, 118, 118, 255 }, 7.0f);
             AddCameraShake(0.30f, 0.32f);
             audio_.PlayCoreDestroyed();
         }
@@ -3956,7 +4325,6 @@ void Game::ApplyClientSnapshotFeedback(const MatchSnapshot& snapshot)
             if (playedPickup)
             {
                 SetMessage("Ресурсы подобраны.", 1.15f);
-                AddWorldEffect(position, Color { 255, 245, 170, 255 }, 0.28f, 0.28f);
                 audio_.PlayPickup();
             }
         }
@@ -3977,7 +4345,8 @@ void Game::ApplyClientSnapshotFeedback(const MatchSnapshot& snapshot)
             : (kind == ProjectileKind::Molotov ? Color { 255, 118, 70, 255 }
             : (kind == ProjectileKind::Blaster ? Color { 98, 245, 255, 255 }
             : Color { 210, 220, 235, 255 }));
-        AddWorldEffect(position, direction, color, 0.34f, 0.26f, WorldEffectKind::Burst);
+        EmitProjectileCueParticles(position, direction, color,
+            kind == ProjectileKind::Blaster ? 0.82f : 0.62f);
         audio_.PlayBreakBlockAt(position);
         --dynamicFxBudget;
     }
@@ -3989,7 +4358,7 @@ void Game::ApplyClientSnapshotFeedback(const MatchSnapshot& snapshot)
             continue;
         }
         const Vector3 position = SnapshotVecToRay(explosive.position);
-        AddWorldEffect(position, Color { 255, 210, 120, 255 }, 0.42f, 0.35f);
+        EmitDeviceParticles(position, Color { 255, 210, 120, 255 }, 1.0f, true);
         audio_.PlayBuildAt(position);
         --dynamicFxBudget;
     }
@@ -4001,7 +4370,7 @@ void Game::ApplyClientSnapshotFeedback(const MatchSnapshot& snapshot)
             continue;
         }
         const Vector3 position = SnapshotVecToRay(hazard.position);
-        AddWorldEffect(position, Color { 255, 118, 70, 255 }, hazard.radius, 0.45f);
+        EmitHazardParticles(position, Color { 255, 118, 70, 255 }, hazard.radius);
         audio_.PlayBreakBlockAt(position);
         --dynamicFxBudget;
     }
@@ -4013,7 +4382,7 @@ void Game::ApplyClientSnapshotFeedback(const MatchSnapshot& snapshot)
             continue;
         }
         const Vector3 position = SnapshotVecToRay(device.position);
-        AddWorldEffect(position, Color { 128, 238, 166, 255 }, 0.34f, 0.32f);
+        EmitDeviceParticles(position, Color { 128, 238, 166, 255 }, 1.0f, true);
         audio_.PlayBuildAt(position);
         --dynamicFxBudget;
     }
@@ -4024,6 +4393,7 @@ void Game::ApplyClientSnapshotFeedback(const MatchSnapshot& snapshot)
         const std::string winnerName = winner != nullptr ? winner->name : "Команда";
         SetMessage(winnerName + " побеждает!", 8.0f);
         AddEventMessage(winnerName + " побеждает!", Color { 255, 235, 142, 255 }, 7.0f);
+        AddChatMessage(winnerName + " побеждает!", Color { 255, 235, 142, 255 }, 8.0f);
         audio_.PlayVictory();
     }
 }
@@ -4216,6 +4586,10 @@ void Game::ApplyClientSnapshot(const MatchSnapshot& snapshot)
             hudHeroState.ultimateCharge = s.abilityHud.ultimateCharge;
             hudHeroState.ultimatePrimed = s.abilityHud.ultimatePrimed;
             player->SetBowDrawTimerReplicated(s.abilityHud.bowDrawTimer);
+            player->SetQuiverStateReplicated(
+                player->GetArrowVariant(),
+                s.abilityHud.arrowAmmo,
+                s.abilityHud.arrowReloadTimers);
             player->SetBlasterStateReplicated(
                 static_cast<CrossbowState>(s.abilityHud.blasterState), s.abilityHud.blasterLoadTimer);
         }
@@ -4379,6 +4753,8 @@ void Game::ApplyClientSnapshot(const MatchSnapshot& snapshot)
         EnergyProjectile projectile;
         projectile.id = p.id;
         projectile.kind = ProjectileKindFromSnapshot(p.kind);
+        projectile.arrowVariant = static_cast<ArrowVariant>(std::clamp(
+            p.arrowVariant, 0, kArrowVariantCount - 1));
         projectile.position = SnapshotVecToRay(p.position);
         if (const EnergyProjectile* previousProjectile = FindMatchingVisualProjectile(previousProjectiles, p))
         {
@@ -4769,7 +5145,6 @@ void Game::UpdateClientReplicatedDynamics(float dt)
     for (KonvoyIntruderMark& mark : konvoyIntruderMarks_)
     {
         mark.markedTimer = std::max(0.0f, mark.markedTimer - dt);
-        mark.pulseTimer += dt;
     }
 }
 
@@ -4889,23 +5264,6 @@ void Game::HandleNetworkClientUiInput()
         return;
     }
 
-    if (currentInput_.inventoryPressed)
-    {
-        inventoryOpen_ = true;
-        shopOpen_ = false;
-        CloseChest();
-        inventoryCursorSlot_ = selectedHotbarSlot_;
-        heldInventoryStack_ = ItemStack {};
-        heldInventoryOrigin_ = HeldInventoryOrigin::None;
-        heldInventoryOriginSlot_ = -1;
-        if (!headless_)
-        {
-            EnableCursor();
-        }
-        currentInput_ = PlayerInput {};
-        return;
-    }
-
     if (currentInput_.dropPressed)
     {
         const ItemStack stack = localPlayer->GetInventory().GetSlot(selectedHotbarSlot_);
@@ -5013,10 +5371,19 @@ void Game::SampleClientInput()
     {
         currentInput_ = input_.Poll();
         scoreboardHeld_ = IsKeyDown(KEY_TAB);
-        HandleNetworkClientUiInput();
-        if (!shopOpen_ && !inventoryOpen_ && localPlayer != nullptr)
+        if (HandleChatInput())
         {
-            HandleNetworkClientLookAndHotbarInput(*localPlayer);
+            currentInput_ = PlayerInput {};
+            pendingClientInput_ = PlayerInput {};
+            scoreboardHeld_ = false;
+        }
+        else
+        {
+            HandleNetworkClientUiInput();
+            if (!shopOpen_ && !inventoryOpen_ && localPlayer != nullptr)
+            {
+                HandleNetworkClientLookAndHotbarInput(*localPlayer);
+            }
         }
     }
     else
@@ -5097,6 +5464,12 @@ void Game::StepClientPredictionAndSend(ClientTransport& client, float fixedDt)
     }
     client.SendCommand(command);
 
+    if (command.chatSeq != 0)
+    {
+        pendingChatSeq_ = 0;
+        pendingChatMessage_.clear();
+    }
+
     // A discrete economy action is one-shot: once shipped in a command, stop
     // re-sending it (the server's per-player seq dedupe guards re-application).
     // The seq counter keeps climbing so the next action is strictly newer.
@@ -5117,6 +5490,7 @@ struct LobbyUiLayout
     Rectangle heroButtons[HeroSystem::kHeroCount] {};
     Rectangle readyButton {};
     Rectangle startButton {};
+    Rectangle inviteButton {};
 };
 
 const LobbyPlayerState* FindLobbyPlayer(const LobbySnapshot& lobby, int clientId)
@@ -5202,6 +5576,7 @@ LobbyUiLayout BuildLobbyUiLayout()
     }
     layout.readyButton = Rectangle { static_cast<float>(controlsX), 548.0f, 138.0f, 40.0f };
     layout.startButton = Rectangle { static_cast<float>(controlsX + 150), 548.0f, 138.0f, 40.0f };
+    layout.inviteButton = Rectangle { static_cast<float>(controlsX), 182.0f, 288.0f, 38.0f };
     return layout;
 }
 
@@ -5418,7 +5793,146 @@ void DrawClientMessageFrame(const char* title, const std::string& detail, Color 
     }
     EndDrawing();
 }
+
+Rectangle SteamFriendPickerPanel()
+{
+    const float width = 560.0f;
+    const float height = 470.0f;
+    return Rectangle {
+        static_cast<float>(GetScreenWidth()) * 0.5f - width * 0.5f,
+        static_cast<float>(GetScreenHeight()) * 0.5f - height * 0.5f,
+        width,
+        height
+    };
+}
+
+Rectangle SteamFriendPickerRow(Rectangle panel, int row)
+{
+    return Rectangle { panel.x + 24.0f, panel.y + 76.0f + row * 42.0f,
+                       panel.width - 48.0f, 34.0f };
+}
 } // namespace
+
+bool Game::HandleSteamFriendPickerInput()
+{
+    if (!steamFriendPickerOpen_)
+    {
+        return false;
+    }
+    if (IsKeyPressed(KEY_ESCAPE))
+    {
+        steamFriendPickerOpen_ = false;
+        return true;
+    }
+    if (steamLobbyService_ == nullptr)
+    {
+        steamFriendPickerOpen_ = false;
+        return true;
+    }
+
+    const std::vector<SteamLobbyFriend> friends = steamLobbyService_->Friends();
+    constexpr int kVisibleFriends = 8;
+    const int maxScroll = std::max(0, static_cast<int>(friends.size()) - kVisibleFriends);
+    const float wheel = GetMouseWheelMove();
+    if (wheel != 0.0f)
+    {
+        steamFriendPickerScroll_ = std::clamp(
+            steamFriendPickerScroll_ - (wheel > 0.0f ? 1 : -1), 0, maxScroll);
+    }
+    steamFriendPickerScroll_ = std::clamp(steamFriendPickerScroll_, 0, maxScroll);
+    const Rectangle panel = SteamFriendPickerPanel();
+    const Rectangle close { panel.x + panel.width - 46.0f, panel.y + 14.0f, 30.0f, 30.0f };
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)
+        && CheckCollisionPointRec(GetMousePosition(), close))
+    {
+        steamFriendPickerOpen_ = false;
+        return true;
+    }
+
+    const int visible = std::min(
+        static_cast<int>(friends.size()) - steamFriendPickerScroll_, kVisibleFriends);
+    for (int i = 0; i < visible; ++i)
+    {
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)
+            && CheckCollisionPointRec(GetMousePosition(), SteamFriendPickerRow(panel, i)))
+        {
+            const std::size_t friendIndex = static_cast<std::size_t>(
+                steamFriendPickerScroll_ + i);
+            if (steamLobbyService_->InviteFriend(friends[friendIndex].steamId))
+            {
+                multiplayerStatus_ = "Приглашение отправлено: "
+                    + friends[friendIndex].displayName;
+            }
+            else
+            {
+                multiplayerStatus_ = steamLobbyService_->LastError();
+            }
+            return true;
+        }
+    }
+    return true; // modal consumes the lobby's ordinary controls
+}
+
+void Game::RenderSteamFriendPicker() const
+{
+    if (!steamFriendPickerOpen_ || steamLobbyService_ == nullptr)
+    {
+        return;
+    }
+    DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Fade(BLACK, 0.72f));
+    const Rectangle panel = SteamFriendPickerPanel();
+    DrawRectangleRec(panel, Color { 19, 24, 32, 250 });
+    DrawRectangleLinesEx(panel, 2.0f, Color { 102, 192, 244, 220 });
+    DrawText("Друзья Steam", static_cast<int>(panel.x + 24.0f),
+             static_cast<int>(panel.y + 22.0f), 24, RAYWHITE);
+    DrawText("×", static_cast<int>(panel.x + panel.width - 39.0f),
+             static_cast<int>(panel.y + 16.0f), 26, Fade(WHITE, 0.72f));
+
+    const std::vector<SteamLobbyFriend> friends = steamLobbyService_->Friends();
+    if (friends.empty())
+    {
+        DrawText("Steam не вернул друзей для приглашения.",
+                 static_cast<int>(panel.x + 24.0f), static_cast<int>(panel.y + 92.0f),
+                 17, Fade(WHITE, 0.65f));
+    }
+    constexpr int kVisibleFriends = 8;
+    const int maxScroll = std::max(0, static_cast<int>(friends.size()) - kVisibleFriends);
+    const int first = std::clamp(steamFriendPickerScroll_, 0, maxScroll);
+    const int visible = std::min(static_cast<int>(friends.size()) - first, kVisibleFriends);
+    for (int i = 0; i < visible; ++i)
+    {
+        const SteamLobbyFriend& friendInfo = friends[static_cast<std::size_t>(first + i)];
+        const Rectangle row = SteamFriendPickerRow(panel, i);
+        const bool hot = CheckCollisionPointRec(GetMousePosition(), row);
+        DrawRectangleRec(row, hot ? Color { 48, 68, 88, 245 }
+                                  : Color { 31, 39, 50, 235 });
+        DrawRectangleLinesEx(row, 1.0f, Fade(WHITE, hot ? 0.34f : 0.14f));
+        DrawText(friendInfo.displayName.c_str(), static_cast<int>(row.x + 12.0f),
+                 static_cast<int>(row.y + 8.0f), 16,
+                 friendInfo.online ? WHITE : Fade(WHITE, 0.45f));
+        const char* state = friendInfo.playingDaiBed
+            ? "уже в DaiBed"
+            : (friendInfo.online ? "в сети" : "не в сети");
+        const Color stateColor = friendInfo.playingDaiBed
+            ? Color { 140, 235, 150, 255 }
+            : Fade(WHITE, friendInfo.online ? 0.65f : 0.35f);
+        DrawText(state, static_cast<int>(row.x + row.width - MeasureText(state, 14) - 12.0f),
+                 static_cast<int>(row.y + 9.0f), 14, stateColor);
+    }
+    if (friends.size() > 8)
+    {
+        const std::string range = "Показаны " + std::to_string(first + 1) + "–"
+            + std::to_string(first + visible) + " из " + std::to_string(friends.size())
+            + ". Прокрутка — колёсиком.";
+        DrawText(range.c_str(), static_cast<int>(panel.x + 24.0f),
+                 static_cast<int>(panel.y + panel.height - 42.0f), 14, Fade(WHITE, 0.46f));
+    }
+    const std::string& status = multiplayerStatus_.empty()
+        ? steamLobbyService_->Status()
+        : multiplayerStatus_;
+    DrawText(status.c_str(), static_cast<int>(panel.x + 24.0f),
+             static_cast<int>(panel.y + panel.height - 22.0f), 13, Fade(WHITE, 0.58f));
+}
 
 void Game::RenderNetworkLobby(const LobbySnapshot& lobby, int localClientId, const LobbyUpdate& localPrefs) const
 {
@@ -5537,6 +6051,11 @@ void Game::RenderNetworkLobby(const LobbySnapshot& lobby, int localClientId, con
     {
         const bool canStart = !locked && lobby.canStart && localReady;
         DrawLobbyButton(layout.startButton, "Старт", false, canStart, Color { 255, 225, 150, 255 });
+        if (serverConfig_.networkBackend == NetworkBackend::SteamP2P)
+        {
+            DrawLobbyButton(layout.inviteButton, "Пригласить друзей Steam", false,
+                            SteamLobbyReady() && !locked, Color { 102, 192, 244, 255 });
+        }
     }
     else
     {
@@ -5544,6 +6063,7 @@ void Game::RenderNetworkLobby(const LobbySnapshot& lobby, int localClientId, con
                  16, Fade(WHITE, 0.44f));
     }
 
+    RenderSteamFriendPicker();
     EndDrawing();
 }
 
@@ -5559,6 +6079,7 @@ void Game::RenderNetworkLobby(const LobbySnapshot& lobby, int localClientId, con
 // so `--connect` and the smokes behave exactly as before.
 // ---------------------------------------------------------------------------
 
+Game::Game() = default;
 Game::~Game() = default;
 
 bool Game::NetworkClientSessionActive() const
@@ -5610,36 +6131,32 @@ bool Game::StartNetworkClientSession(const std::string& host, std::uint16_t port
         return true;
     }
 
-    // Bounded, blocking connect (handshake retried internally). Graceful on a
-    // dead server or a wrong password — the failure phase renders the reason
-    // for a moment, then the session ends.
-    netClient_ = std::make_unique<ClientTransport>();
-    if (!netClient_->Connect(host, port, password, 3.0f))
+    // Open only; the main Update loop advances the provider and protocol
+    // handshake. Steam relay/certificate negotiation can legitimately take
+    // several seconds on a cold route, so never stall rendering here.
+    netClient_ = std::make_unique<ClientTransport>(serverConfig_.networkBackend);
+    const float connectTimeout = serverConfig_.networkBackend == NetworkBackend::SteamP2P
+        ? 20.0f
+        : 5.0f;
+    if (!netClient_->Open(host, port, password, connectTimeout))
     {
-        const std::string detail = netClient_->WasDenied()
-            ? ("отклонено: " + LocalizeNetworkReason(netClient_->DenyReason()))
-            : ("не удалось подключиться к " + host + ':' + std::to_string(port) + " - "
-               + (netClient_->LastError().empty() ? LocalizeNetworkReason("connect timed out") : netClient_->LastError()));
+        const std::string detail = "не удалось открыть подключение к " + host + ':'
+            + std::to_string(port) + " - " + netClient_->LastError();
         std::cout << "connect mode: " << detail << '\n';
         FailNetworkClientSession("Не удалось подключиться", detail, Color { 255, 150, 130, 255 }, 2.5);
         return true;
     }
 
-    // Announce ourselves to the lobby with the caller's preferences (CLI flags
-    // or the GUI join form), defaulting the display name when none was given.
     clientSessionLobbyPrefs_ = lobbyPrefs;
-    if (clientSessionLobbyPrefs_.playerName.empty())
-    {
-        clientSessionLobbyPrefs_.playerName = "Игрок " + std::to_string(netClient_->LobbyClientId());
-    }
-    netClient_->SendLobbyUpdate(clientSessionLobbyPrefs_);
-    std::cout << "connect mode: connected to " << host << ':' << port
-              << " as lobbyClientId=" << netClient_->LobbyClientId() << ". Rendering...\n";
-    clientSessionPhase_ = ClientSessionPhase::Lobby;
+    clientSessionConnectDetail_ = serverConfig_.networkBackend == NetworkBackend::SteamP2P
+        ? "Steam устанавливает защищённый P2P-маршрут... Esc — отменить."
+        : "Подключение к серверу... Esc — отменить.";
+    clientSessionPhase_ = ClientSessionPhase::Connecting;
+    clientSessionDraw_ = ClientSessionDraw::Connecting;
     return true;
 }
 
-void Game::StopNetworkClientSession()
+void Game::StopNetworkClientSession(bool leaveSteamLobby)
 {
     if (clientSessionPhase_ == ClientSessionPhase::Inactive && netClient_ == nullptr)
     {
@@ -5651,6 +6168,11 @@ void Game::StopNetworkClientSession()
         std::cout << "connect mode: left (rx=" << netClient_->PacketsReceived()
                   << " tx=" << netClient_->PacketsSent() << ").\n";
         netClient_.reset();
+    }
+    if (leaveSteamLobby && steamLobbyService_ != nullptr && steamLobbyService_->HasLobby()
+        && !steamLobbyService_->OwnsLobby())
+    {
+        steamLobbyService_->LeaveLobby();
     }
     EnableCursor();
     clientSessionPhase_ = ClientSessionPhase::Inactive;
@@ -5707,6 +6229,51 @@ void Game::UpdateNetworkClientSession(float dt)
     }
 
     client.Poll();
+    if (clientSessionPhase_ == ClientSessionPhase::Connecting)
+    {
+        if (client.WasDenied())
+        {
+            FailNetworkClientSession(
+                "Подключение отклонено",
+                "отклонено: " + LocalizeNetworkReason(client.DenyReason()),
+                Color { 255, 200, 120, 255 }, 2.5);
+            return;
+        }
+        if (client.TimedOut())
+        {
+            const std::string providerError = client.LastError().empty()
+                ? LocalizeNetworkReason("connect timed out")
+                : client.LastError();
+            const std::string provider = serverConfig_.networkBackend == NetworkBackend::SteamP2P
+                ? "Steam P2P: "
+                : "Сеть: ";
+            FailNetworkClientSession(
+                "Не удалось подключиться",
+                provider + providerError,
+                Color { 255, 150, 130, 255 }, 4.0);
+            return;
+        }
+        if (!client.IsConnected())
+        {
+            if (IsKeyPressed(KEY_ESCAPE))
+            {
+                StopNetworkClientSession();
+                return;
+            }
+            clientSessionDraw_ = ClientSessionDraw::Connecting;
+            return;
+        }
+
+        if (clientSessionLobbyPrefs_.playerName.empty())
+        {
+            clientSessionLobbyPrefs_.playerName =
+                "Игрок " + std::to_string(client.LobbyClientId());
+        }
+        client.SendLobbyUpdate(clientSessionLobbyPrefs_);
+        std::cout << "connect mode: connected to " << clientSessionTarget_
+                  << " as lobbyClientId=" << client.LobbyClientId() << ". Rendering...\n";
+        clientSessionPhase_ = ClientSessionPhase::Lobby;
+    }
     networkSnapshotAgeMs_ = client.SnapshotAgeSeconds() * 1000.0f;
     networkPacketLossEstimate_ = client.PacketsReceived() > 0
         ? static_cast<float>(client.DroppedSnapshots()) / static_cast<float>(client.PacketsReceived())
@@ -5866,6 +6433,12 @@ void Game::UpdateNetworkClientSession(float dt)
     else
     {
         clientSessionPhase_ = ClientSessionPhase::Lobby;
+        if (steamFriendPickerOpen_)
+        {
+            HandleSteamFriendPickerInput();
+            clientSessionDraw_ = ClientSessionDraw::Lobby;
+            return;
+        }
         // Pre-match lobby: ESC leaves before the match begins.
         if (IsKeyPressed(KEY_ESCAPE))
         {
@@ -5874,6 +6447,16 @@ void Game::UpdateNetworkClientSession(float dt)
         }
         HandleNetworkLobbyControls(client, clientSessionLobbyPrefs_, client.LatestLobbySnapshot(),
                                    input_.IsDevKeyboard());
+        const LobbySnapshot& lobby = client.LatestLobbySnapshot();
+        const bool isHost = client.LobbyClientId() >= 0
+            && client.LobbyClientId() == lobby.hostClientId;
+        if (isHost && serverConfig_.networkBackend == NetworkBackend::SteamP2P
+            && SteamLobbyReady() && !lobby.matchStarting && !lobby.matchStarted
+            && (LobbyButtonPressed(BuildLobbyUiLayout().inviteButton, true)
+                || IsKeyPressed(KEY_F2)))
+        {
+            OpenSteamInviteDialog();
+        }
         clientSessionDraw_ = ClientSessionDraw::Lobby;
     }
 }
@@ -5882,6 +6465,10 @@ bool Game::RenderNetworkClientSessionOverlay()
 {
     switch (clientSessionDraw_)
     {
+    case ClientSessionDraw::Connecting:
+        DrawClientMessageFrame("Подключение", clientSessionConnectDetail_,
+                               Color { 102, 192, 244, 255 });
+        return true;
     case ClientSessionDraw::Failure:
         DrawClientMessageFrame(clientSessionFailTitle_.c_str(), clientSessionFailDetail_, clientSessionFailColor_);
         return true;

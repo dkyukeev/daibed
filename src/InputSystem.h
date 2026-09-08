@@ -106,7 +106,7 @@ public:
     // Developer kit: when enabled, Poll() adds keyboard fallbacks for the
     // otherwise mouse-only actions (attack/place/break/scope and look), so the
     // whole game is drivable without a mouse. Additive (OR'd with mouse), so it
-    // never disturbs normal play. See --dev-keyboard / docs/NETWORK_PREP_PLAN.md.
+    // never disturbs normal play. See --dev-keyboard and the multiplayer architecture docs.
     void SetDevKeyboard(bool enabled);
     bool IsDevKeyboard() const;
     void SetGamepadDeadZone(float deadZone);

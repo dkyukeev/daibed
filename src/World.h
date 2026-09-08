@@ -47,6 +47,9 @@ public:
     Vector3 GridToWorld(const GridPos& pos) const;
 
     bool CollidesWithAABB(Vector3 center, Vector3 halfExtents) const;
+    // Highest collision surface of a support voxel (lower slabs are half a
+    // block below a full cube). Shares the player collision shape definition.
+    std::optional<float> BlockCollisionTop(const GridPos& pos) const;
     std::optional<RaycastHit> Raycast(Vector3 origin, Vector3 direction, float maxDistance) const;
 
     void AddIsland(Vector3 center, int halfSize, int y);

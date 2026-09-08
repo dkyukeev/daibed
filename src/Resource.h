@@ -11,7 +11,7 @@ enum class ResourceType
 
 // Spatial state uses the raylib-free Vec3 so generators/pickups can later move
 // into MatchSimulation. Conversion to raylib Vector3 happens at the
-// Game/render boundary (VecConvert.h). See docs/NETWORK_PREP_PLAN.md.
+// Game/render boundary (VecConvert.h). See docs/MULTIPLAYER_TARGET_ARCHITECTURE.md.
 struct ResourcePickup
 {
     ResourceType type = ResourceType::Iron;

@@ -1,12 +1,20 @@
 #pragma once
 
 #include "Block.h"
+#include "BotStrategicPolicy.h"
 #include "raylib.h"
 
 #include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
+
+enum class BotDifficulty
+{
+    Easy,
+    Normal,
+    Hard
+};
 
 enum class BotState
 {
@@ -188,6 +196,8 @@ struct TeamCoordinationBus
 
     std::array<TeamCoordinationEntry, MaxEntries> entries {};
     int count = 0;
+    BotAttackCommitment attackCommitment;
+    BotSearchMemory searchMemory;
     int pressureTeamId = -1;
     int reserveDefenderId = -1;
     int assistActorId = -1;
@@ -214,6 +224,12 @@ struct TeamCoordinationBus
     int bridgeRequestTargetTeamId = -1;
     float bridgeRequestTimestamp = -1000.0f;
     float bridgeRequestReservationUntil = -1000.0f;
+    float bridgeRequestProgressAt = -1000.0f;
+    float bridgeRequestBestDistanceSq = 0.0f;
+    int bridgeRequestLastBlocks = 0;
+    int preferredBridgeHelperId = -1;
+    float bridgeHelperRecheckAt = 0.0f;
+    std::vector<BotBridgeHelpFollowup> bridgeHelpFollowups;
     // One stable cleanup assignment lets the team finish a Core-less opponent
     // without pulling every attacker away from the remaining live Cores.
     int cleanupHunterId = -1;
@@ -228,6 +244,8 @@ struct TeamCoordinationBus
     {
         entries = {};
         count = 0;
+        attackCommitment = {};
+        searchMemory = {};
         pressureTeamId = -1;
         reserveDefenderId = -1;
         assistActorId = -1;
@@ -251,6 +269,12 @@ struct TeamCoordinationBus
         bridgeRequestTargetTeamId = -1;
         bridgeRequestTimestamp = -1000.0f;
         bridgeRequestReservationUntil = -1000.0f;
+        bridgeRequestProgressAt = -1000.0f;
+        bridgeRequestBestDistanceSq = 0.0f;
+        bridgeRequestLastBlocks = 0;
+        preferredBridgeHelperId = -1;
+        bridgeHelperRecheckAt = 0.0f;
+        bridgeHelpFollowups.clear();
         cleanupHunterId = -1;
         cleanupTargetTeamId = -1;
         cleanupLastKnownPosition = {};
@@ -258,6 +282,91 @@ struct TeamCoordinationBus
         openedRouteSignatures = {};
         routeOpenedTimestamps.fill(-1000.0f);
         openedRouteWriteIndex = 0;
+    }
+
+    bool PublishBridgeRequest(int requestor, BotIntent intent, Vector3 target, int targetTeam, float now)
+    {
+        // Give a completed rendezvous time to produce observable progress;
+        // otherwise the same stranded bot repeatedly summons a nearby ally.
+        for (const auto& followup : bridgeHelpFollowups)
+            if (followup.requesterId == requestor && now - followup.arrivedAt < 30.0f) return false;
+        const bool live = bridgeRequestorId >= 0 && now - bridgeRequestTimestamp <= 7.0f;
+        if (live && bridgeRequestorId != requestor) return false;
+        const float dx = target.x - bridgeRequestTarget.x;
+        const float dy = target.y - bridgeRequestTarget.y;
+        const float dz = target.z - bridgeRequestTarget.z;
+        const bool same = live && bridgeRequestIntent == intent && bridgeRequestTargetTeamId == targetTeam
+            && dx * dx + dy * dy + dz * dz <= 4.0f;
+        if (!same)
+        {
+            preferredBridgeHelperId = -1;
+            bridgeHelperRecheckAt = 0.0f;
+            bridgeRequestBuilderId = -1;
+            bridgeRequestReservationUntil = -1000.0f;
+            bridgeRequestProgressAt = -1000.0f;
+            bridgeRequestTarget = target;
+        }
+        bridgeRequestorId = requestor;
+        bridgeRequestIntent = intent;
+        bridgeRequestTargetTeamId = targetTeam;
+        bridgeRequestTimestamp = now;
+        return true;
+    }
+
+    bool TryClaimBridgeRequest(int builder, Vector3 position, int blocks, float now, bool ownerAlive)
+    {
+        if (bridgeRequestorId < 0 || bridgeRequestorId == builder || now - bridgeRequestTimestamp > 7.0f)
+            return false;
+        const float dx = position.x - bridgeRequestTarget.x;
+        const float dy = position.y - bridgeRequestTarget.y;
+        const float dz = position.z - bridgeRequestTarget.z;
+        const float distance = dx * dx + dy * dy + dz * dz;
+        if (bridgeRequestBuilderId == builder)
+        {
+            if (blocks <= 0) return false;
+            if (distance + 1.0f < bridgeRequestBestDistanceSq || blocks < bridgeRequestLastBlocks)
+            {
+                bridgeRequestProgressAt = now;
+                bridgeRequestBestDistanceSq = distance;
+            }
+            if (now - bridgeRequestProgressAt > 12.0f) return false;
+        }
+        else
+        {
+            if (blocks < 4 || (ownerAlive && bridgeRequestReservationUntil > now)) return false;
+            bridgeRequestBuilderId = builder;
+            bridgeRequestProgressAt = now;
+            bridgeRequestBestDistanceSq = distance;
+        }
+        bridgeRequestLastBlocks = blocks;
+        bridgeRequestReservationUntil = now + 2.5f;
+        bridgeRequestTimestamp = now;
+        return true;
+    }
+
+    bool CompleteBridgeRequest(int builder)
+    {
+        if (bridgeRequestBuilderId != builder) return false;
+        bridgeRequestorId = -1;
+        bridgeRequestBuilderId = -1;
+        bridgeRequestTimestamp = -1000.0f;
+        bridgeRequestReservationUntil = -1000.0f;
+        return true;
+    }
+
+    bool TryReserveBridge(int builderId, std::uint64_t signature, float now, Vector3 position, int blocks)
+    {
+        if (signature == 0 || blocks <= 0) return false;
+        if (bridgeBuilderId >= 0 && bridgeReservationUntil > now
+            && now - bridgeLastProgressTimestamp <= 8.0f)
+            return bridgeBuilderId == builderId && bridgeRouteSignature == signature;
+        bridgeBuilderId = builderId;
+        bridgeRouteSignature = signature;
+        bridgeReservationUntil = now + 8.0f;
+        bridgeLastProgressTimestamp = now;
+        bridgeLastProgressPosition = position;
+        bridgeLastProgressBlocks = blocks;
+        return true;
     }
 
     bool IsRouteOpened(std::uint64_t signature, float matchTime, float maxAge = 600.0f) const
@@ -460,6 +569,12 @@ struct BotMemory
     Vector3 routeCorridorObjective {};
     bool hasRouteCorridorObjective = false;
     bool usingRouteCorridor = false;
+    // A bounded entry search may find a safe approach without reaching the
+    // strategic graph. Navigation retains movement ownership during recovery.
+    bool routeEntryPending = false;
+    bool routeEntryRepair = false;
+    Vector3 routeEntryTarget {};
+    Vector3 routeEntryObjective {};
     std::uint64_t routeCorridorSignature = 0;
     float routeCorridorReplanCooldown = 0.0f;
     int routeCorridorAdvances = 0;

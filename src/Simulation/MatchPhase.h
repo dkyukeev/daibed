@@ -1,7 +1,7 @@
 #pragma once
 
 // Lifecycle phase of a match. Raylib-free leaf header shared by MatchSimulation
-// (which owns the phase) and the network snapshot. See docs/NETWORK_PREP_PLAN.md.
+// (which owns the phase) and the network snapshot. See docs/MULTIPLAYER_TARGET_ARCHITECTURE.md.
 enum class MatchPhase
 {
     Lobby,

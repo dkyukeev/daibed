@@ -17,10 +17,10 @@
 // includes), so it is only forward-declared here: MatchSimulation references
 // the players vector (owned by Game for now) without pulling raylib into this
 // header. Promoting to true ownership is the next step once Player is
-// raylib-free. See docs/NETWORK_PREP_PLAN.md.
+// raylib-free. See docs/MULTIPLAYER_TARGET_ARCHITECTURE.md.
 class Player;
 
-// Phase 0.1A of the server-authoritative split (see docs/NETWORK_PREP_PLAN.md).
+// Server-authoritative simulation boundary (see docs/MULTIPLAYER_TARGET_ARCHITECTURE.md).
 //
 // MatchSimulation is the first real simulation boundary: it owns the
 // authoritative simulation clock, the fixed-step configuration and the
@@ -61,7 +61,7 @@ public:
     void AdvanceClock(float dt);
     float MatchTimeSeconds() const;
     // Client-only: set the match clock directly from a replicated snapshot (the
-    // client does not run AdvanceClock). See docs/NETWORK_PREP_PLAN.md (0.1T).
+    // client does not run AdvanceClock). See docs/MULTIPLAYER_TARGET_ARCHITECTURE.md.
     void SetMatchTimeSeconds(float seconds);
 
     // --- Fixed-step configuration ---------------------------------------

@@ -19,7 +19,7 @@
 // truth), not here — this class is only the transport/snapshot channel. A real
 // ENet/Steam/UDP transport replaces it while keeping the same command-in /
 // snapshot-out shape, so Game/simulation code does not change when networking
-// arrives. See docs/NETWORK_PREP_PLAN.md.
+// arrives. See docs/MULTIPLAYER_TARGET_ARCHITECTURE.md.
 class LocalServerSession
 {
 public:

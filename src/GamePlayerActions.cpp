@@ -1,5 +1,6 @@
 #include "Game.h"
 #include "RangedCombat.h"
+#include "VisualTheme.h"
 
 #include "raylib.h"
 
@@ -368,7 +369,26 @@ void Game::PresentUtilityActionResult(const UtilityActionResult& result)
     }
     if (result.hasWorldEffect)
     {
-        AddWorldEffect(result.position, result.color, result.radius, result.seconds);
+        switch (result.type)
+        {
+        case UtilityType::Heal:
+            EmitHealParticles(result.position, result.color, 1.25f);
+            break;
+        case UtilityType::AlarmTrap:
+            EmitTrapParticles(result.position, result.color, result.radius, false);
+            break;
+        case UtilityType::Dash:
+            EmitAbilityParticles(result.position, Vector3 { 0.0f, 0.0f, 1.0f }, result.color,
+                result.radius, WorldEffectKind::Trail);
+            break;
+        case UtilityType::HomeTeleport:
+            EmitRespawnParticles(result.position, result.color);
+            break;
+        default:
+            EmitAbilityParticles(result.position, Vector3 { 0.0f, 0.0f, 1.0f }, result.color,
+                result.radius, WorldEffectKind::Burst);
+            break;
+        }
     }
     if (result.playPickupSound)
     {
@@ -489,11 +509,8 @@ void Game::HandleInventoryInput(Player& player)
         const int gridX = panelX + 21;
         const int gridY = panelY + 58;
         const int inventoryHotbarY = gridY + 3 * (slotSize + gap) + 14;
-        const int mainSlot = hitGrid(gridX, gridY, 9, 3, kHotbarSlotCount);
-        if (mainSlot >= 0)
-        {
-            return mainSlot;
-        }
+        // Normal play exposes only the hotbar; the three legacy storage rows
+        // are deliberately neither rendered nor interactive.
         return hitGrid(gridX, inventoryHotbarY, 9, 1, 0);
     };
     const auto chestSlotAtMouse = []() -> int
@@ -561,6 +578,10 @@ void Game::HandleInventoryInput(Player& player)
     if (IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_S))
     {
         row = std::min(3, row + 1);
+    }
+    if (teamChestOpen_ || personalChestOpen_)
+    {
+        row = 3;
     }
     inventoryCursorSlot_ = visualToSlot(row, col);
 
@@ -1031,6 +1052,20 @@ void Game::HandleDeathInventory(Player& player, int killerId)
     inventory.DowngradeSword();
     inventory.DowngradeTool();
 
+    for (ResourceType type : { ResourceType::Iron, ResourceType::Gold, ResourceType::Crystal })
+    {
+        const int amount = inventory.GetResource(type);
+        if (amount <= 0)
+        {
+            continue;
+        }
+        inventory.SpendResource(type, amount);
+        if (killer != nullptr)
+        {
+            killer->GetInventory().AddResource(type, amount);
+        }
+    }
+
     for (int slot = 0; slot < kInventorySlotCount; ++slot)
     {
         const ItemStack stack = inventory.GetSlot(slot);
@@ -1047,7 +1082,7 @@ void Game::HandleDeathInventory(Player& player, int killerId)
         }
     }
 
-    inventory.AddItem(player.GetHeroId() == HeroId::Svidetel ? ItemType::SniperRifle : ItemType::Sword, 1);
+    inventory.AddItem(ItemType::Sword, 1);
     if (inventory.GetToolLevel() > 0)
     {
         inventory.AddItem(ItemType::Pickaxe, 1);
@@ -1378,6 +1413,7 @@ void Game::DetonateAt(Vector3 position, int ownerTeamId, int ownerPlayerId, floa
 {
     const int blockRadius = static_cast<int>(std::ceil(radius));
     const GridPos center = world_.WorldToGrid(position);
+    int blockBreakFxBudget = effectsQuality_ == 0 ? 2 : (effectsQuality_ == 1 ? 4 : 7);
     for (int x = center.x - blockRadius; x <= center.x + blockRadius; ++x)
     {
         for (int y = center.y - blockRadius; y <= center.y + blockRadius; ++y)
@@ -1421,11 +1457,28 @@ void Game::DetonateAt(Vector3 position, int ownerTeamId, int ownerPlayerId, floa
                     }
                     else
                     {
+                        const BlockType brokenType = block->type;
                         const bool enemyDefense = block->teamId >= 0 && block->teamId != ownerTeamId;
-                        if (BreakWorldBlock(pos, ownerTeamId, BlockDeltaReason::Explosion, ownerPlayerId)
-                            && enemyDefense)
+                        if (BreakWorldBlock(pos, ownerTeamId, BlockDeltaReason::Explosion, ownerPlayerId))
                         {
-                            RecordAutomatchDefenseBlockDestroyed(ownerPlayerId, blockPolicy);
+                            if (blockBreakFxBudget > 0)
+                            {
+                                const Vector3 blockPosition = world_.GridToWorld(pos);
+                                EmitBlockBreakParticles(
+                                    blockPosition,
+                                    Vector3 {
+                                        blockPosition.x - position.x,
+                                        blockPosition.y - position.y + 0.25f,
+                                        blockPosition.z - position.z,
+                                    },
+                                    VisualTheme::SurfaceDust(brokenType),
+                                    brokenType);
+                                --blockBreakFxBudget;
+                            }
+                            if (enemyDefense)
+                            {
+                                RecordAutomatchDefenseBlockDestroyed(ownerPlayerId, blockPolicy);
+                            }
                         }
                     }
                 }
@@ -1483,13 +1536,18 @@ void Game::DetonateAt(Vector3 position, int ownerTeamId, int ownerPlayerId, floa
         hazardZones_.push_back(HazardZone { position, ownerTeamId, ownerPlayerId, 2.4f, blueFire ? 4.0f : 5.0f, 0.0f, blueFire ? 16 : 8, blueFire, NextHazardZoneId() });
     }
 
-    AddWorldEffect(
-        position,
-        Vector3 { 0.0f, 0.0f, 1.0f },
-        createFireZone ? (blueFire ? Color { 92, 164, 255, 255 } : Color { 255, 118, 70, 255 }) : Color { 255, 224, 122, 255 },
-        createFireZone ? radius : radius * 0.24f,
-        0.55f,
-        createFireZone ? WorldEffectKind::FireZone : WorldEffectKind::Burst);
+    const Color explosionColor = createFireZone
+        ? (blueFire ? Color { 92, 164, 255, 255 } : Color { 255, 118, 70, 255 })
+        : Color { 255, 224, 122, 255 };
+    if (createFireZone)
+    {
+        EmitHazardParticles(position, explosionColor, radius);
+    }
+    else
+    {
+        EmitImpactParticles(position, Vector3 { 0.0f, 1.0f, 0.0f }, explosionColor,
+            ParticleMaterial::Stone, 1.45f);
+    }
     AddCameraShake(0.18f + radius * 0.04f, 0.24f);
     audio_.PlayCoreDestroyed();
 }
@@ -1516,7 +1574,7 @@ void Game::UpdateAlarmTraps()
                 const Team* owner = FindTeam(trap.ownerTeamId);
                 AddEventMessage((owner != nullptr ? owner->name : "База") + std::string(": сработала тревога!"), Color { 255, 235, 142, 255 }, 3.0f);
                 AddFloatingText("ТРЕВОГА", player.GetPosition(), Color { 255, 235, 142, 255 });
-                AddWorldEffect(player.GetPosition(), Color { 255, 235, 142, 255 }, 0.42f, 0.45f);
+                EmitTrapParticles(player.GetPosition(), Color { 255, 235, 142, 255 }, 0.85f, true);
                 audio_.PlayDenied();
                 PushWorldEventSnapshot(
                     WorldEventKind::AlarmTriggered,

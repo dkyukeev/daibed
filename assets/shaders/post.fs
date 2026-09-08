@@ -6,6 +6,8 @@ in vec4 fragColor;
 uniform sampler2D texture0;
 uniform sampler2D bloomTexture;
 uniform float bloomStrength;
+uniform float exposure;
+uniform float saturation;
 uniform float vignetteStrength;
 uniform float damageFlash;
 uniform float scopeBlend;
@@ -94,6 +96,11 @@ void main()
         color += texture(bloomTexture, uv).rgb * bloomStrength;
     }
 
+    // Decode before exposure and grading; identity settings preserve the image.
+    vec3 linearColor = pow(max(color, vec3(0.0)), vec3(2.2)) * exposure;
+    float luminance = dot(linearColor, vec3(0.2126, 0.7152, 0.0722));
+    linearColor = mix(vec3(luminance), linearColor, saturation);
+    color = pow(max(linearColor, vec3(0.0)), vec3(1.0 / 2.2));
     color = ShoulderToneMap(max(color, vec3(0.0)));
     color *= vec3(1.012, 1.004, 0.992);
     float vignette = smoothstep(0.20, 0.70, radial);

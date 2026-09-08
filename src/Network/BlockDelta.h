@@ -9,6 +9,7 @@ enum class BlockDeltaReason
     Unknown,
     PlayerPlace,
     PlayerBreak,
+    Projectile,
     Explosion,
     FireBurn,
     TemporaryPlace,

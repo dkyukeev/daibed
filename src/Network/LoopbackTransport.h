@@ -14,7 +14,7 @@
 // player it controls, the server drains everyone's commands, and it publishes a
 // per-client snapshot. A real transport replaces this class while keeping the
 // same shape (connect -> submit -> drain -> publish -> read). See
-// docs/NETWORK_PREP_PLAN.md.
+// docs/MULTIPLAYER_TARGET_ARCHITECTURE.md.
 //
 // clientId <-> playerId mapping is authoritative here: a client may only command
 // the player it owns. SubmitCommand stamps the command's controlledPlayerId from

@@ -6,7 +6,7 @@
 // and network snapshots use this instead of raylib's Vector3 so they build and
 // link without the renderer. This is the prerequisite for migrating spatial
 // state (generators, then world/players) into the raylib-free MatchSimulation —
-// see docs/NETWORK_PREP_PLAN.md.
+// see docs/MULTIPLAYER_TARGET_ARCHITECTURE.md.
 //
 // Conversion to/from raylib Vector3 happens at the Game boundary, where raylib
 // is already included (e.g. Vec3{ v.x, v.y, v.z }); this header never pulls in

@@ -31,6 +31,7 @@ void CameraController::Reset(float yaw, float pitch, Vector3 focus)
     shakeTimer_ = 0.0f;
     shakeDuration_ = 0.0f;
     shakeIntensity_ = 0.0f;
+    firstPersonPresentationOffset_ = Vector3 {};
 
     camera_.fovy = fov_;
     camera_.projection = CAMERA_PERSPECTIVE;
@@ -92,6 +93,23 @@ void CameraController::Update(Vector3 focus, float dt)
     if (mode_ == ViewMode::FirstPerson)
     {
         desiredPosition = targetBase;
+
+        // A shared local offset moves position and target together. The view
+        // gains weight while the aim ray remains sourced from yaw/pitch and the
+        // unshifted eye origin.
+        const Vector3 right = GetFlatRight();
+        const Vector3 forward = GetFlatForward();
+        const Vector3 worldOffset {
+            right.x * firstPersonPresentationOffset_.x + forward.x * firstPersonPresentationOffset_.z,
+            firstPersonPresentationOffset_.y,
+            right.z * firstPersonPresentationOffset_.x + forward.z * firstPersonPresentationOffset_.z,
+        };
+        desiredPosition.x += worldOffset.x;
+        desiredPosition.y += worldOffset.y;
+        desiredPosition.z += worldOffset.z;
+        desiredTarget.x += worldOffset.x;
+        desiredTarget.y += worldOffset.y;
+        desiredTarget.z += worldOffset.z;
     }
     else
     {
@@ -154,6 +172,11 @@ void CameraController::SetFov(float fov)
 void CameraController::SetCrouching(bool crouching)
 {
     crouching_ = crouching;
+}
+
+void CameraController::SetFirstPersonPresentationOffset(Vector3 localOffset)
+{
+    firstPersonPresentationOffset_ = localOffset;
 }
 
 const Camera3D& CameraController::GetCamera() const

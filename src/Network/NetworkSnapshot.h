@@ -11,7 +11,7 @@
 
 // Public, replication-oriented view of the match. Raylib-free so the server can
 // build it headless and a future transport can serialize it (spatial fields use
-// the raylib-free Vec3). See docs/NETWORK_PREP_PLAN.md.
+// the raylib-free Vec3). See docs/MULTIPLAYER_TARGET_ARCHITECTURE.md.
 //
 // Visibility model (see SnapshotVisibility.h for the per-client filter):
 //   - public state      — every client may see it (player positions, cores,
@@ -69,6 +69,9 @@ struct HeroAbilityHudSnapshot
     // hero, so one bool is enough).
     bool ultimatePrimed = false;
     float bowDrawTimer = 0.0f;
+    int arrowVariant = 0;
+    std::array<int, 3> arrowAmmo { 16, 12, 10 };
+    std::array<float, 3> arrowReloadTimers {};
     int blasterState = 0; // mirrors CrossbowState (Unloaded/Loading/Loaded).
     float blasterLoadTimer = 0.0f;
 };
@@ -238,7 +241,7 @@ struct DroppedItemSnapshot
 // On visibility: no per-client filtering happens yet (every recipient would get
 // every entry). `visibility` is scaffolding for the future public/private split
 // (e.g. a buried Konvoy trap or a Likho disguise marker should only reach the
-// owner team). It is recorded but NOT yet enforced — see docs/NETWORK_PREP_PLAN.md.
+// owner team). See docs/MULTIPLAYER_TARGET_ARCHITECTURE.md.
 enum class SnapshotVisibility
 {
     Public,    // every client may see it (projectile in flight, explosion).
@@ -279,6 +282,7 @@ struct ProjectileSnapshot
 {
     int id = -1;
     int kind = 0; // mirrors ProjectileKind (Arrow/Fireball/Molotov/Blaster).
+    int arrowVariant = 0; // mirrors ArrowVariant for bow projectiles.
     Vec3 position {};
     Vec3 velocity {};
     int ownerPlayerId = -1;
@@ -347,9 +351,8 @@ struct StatusEffectSnapshot
 // UpdateMatchSimulation locally, which a network client never calls at all.
 // Deduped client-side by a single monotonic eventSeq high-water mark (no
 // per-player keying needed: the stream itself is global, not per-recipient).
-// Message text is NOT sent over the wire; the client reconstructs the exact
-// same strings singleplayer builds, using replicated player/team/core state
-// plus these fields, to avoid duplicating large string payloads every tick.
+// Most message text is reconstructed client-side from these fields. Chat is
+// the deliberate exception: its validated UTF-8 display line uses `cause`.
 enum class WorldEventKind
 {
     PlayerDied,
@@ -358,7 +361,8 @@ enum class WorldEventKind
     GeneratorBoost,
     AlarmTriggered,
     ResourcePickup,
-    ItemPickup // dropped inventory stack picked up (subjectType mirrors ItemType).
+    ItemPickup, // dropped inventory stack picked up (subjectType mirrors ItemType).
+    ChatMessage // validated display text is carried in cause.
 };
 
 struct WorldEventSnapshot

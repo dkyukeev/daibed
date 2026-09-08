@@ -6,7 +6,7 @@
 
 // Pure simulation/networking types. Intentionally free of raylib so the
 // authoritative server and future transport can build/link without the
-// renderer or windowing layer. See docs/NETWORK_PREP_PLAN.md.
+// renderer or windowing layer. See docs/MULTIPLAYER_TARGET_ARCHITECTURE.md.
 
 enum class NetworkMode
 {
@@ -32,10 +32,96 @@ inline const char* ToString(NetworkMode mode)
     return "Unknown";
 }
 
+enum class NetworkBackend
+{
+    SystemUdp,
+    InProcessP2P,
+    SteamP2P
+};
+
+inline const char* ToString(NetworkBackend backend)
+{
+    switch (backend)
+    {
+    case NetworkBackend::SystemUdp:
+        return "SystemUdp";
+    case NetworkBackend::InProcessP2P:
+        return "InProcessP2P";
+    case NetworkBackend::SteamP2P:
+        return "SteamP2P";
+    }
+    return "Unknown";
+}
+
+// Opaque 128-bit identities used by the transport handshake. They are kept as
+// distinct types so a server session, player session, and bearer reconnect
+// secret cannot be mixed accidentally at call sites.
+struct SessionId
+{
+    std::uint64_t high = 0;
+    std::uint64_t low = 0;
+    bool IsValid() const { return high != 0 || low != 0; }
+};
+
+struct PlayerSessionId
+{
+    std::uint64_t high = 0;
+    std::uint64_t low = 0;
+    bool IsValid() const { return high != 0 || low != 0; }
+};
+
+struct ReconnectToken
+{
+    std::uint64_t high = 0;
+    std::uint64_t low = 0;
+    bool IsValid() const { return high != 0 || low != 0; }
+};
+
+inline bool operator==(const SessionId& a, const SessionId& b)
+{
+    return a.high == b.high && a.low == b.low;
+}
+inline bool operator!=(const SessionId& a, const SessionId& b) { return !(a == b); }
+inline bool operator==(const PlayerSessionId& a, const PlayerSessionId& b)
+{
+    return a.high == b.high && a.low == b.low;
+}
+inline bool operator!=(const PlayerSessionId& a, const PlayerSessionId& b) { return !(a == b); }
+inline bool operator==(const ReconnectToken& a, const ReconnectToken& b)
+{
+    return a.high == b.high && a.low == b.low;
+}
+inline bool operator!=(const ReconnectToken& a, const ReconnectToken& b) { return !(a == b); }
+
+struct SessionCredentials
+{
+    SessionId sessionId;
+    PlayerSessionId playerSessionId;
+    ReconnectToken reconnectToken;
+
+    bool CanReconnect() const
+    {
+        return sessionId.IsValid() && playerSessionId.IsValid() && reconnectToken.IsValid();
+    }
+};
+
+struct ConnectRequest
+{
+    std::string password;
+    SessionCredentials resume;
+};
+
+struct ConnectAccept
+{
+    int clientId = -1;
+    SessionCredentials credentials;
+};
+
 // Configuration for a (future) listening server. Stored and validated now;
 // no real socket/transport or cryptography is wired in this pass.
 struct ServerConfig
 {
+    NetworkBackend networkBackend = NetworkBackend::SystemUdp;
     std::string listenAddress = "127.0.0.1";
     std::uint16_t port = 7777;
     int maxPlayers = 16;
@@ -51,7 +137,7 @@ struct ServerConfig
 
     // World/map configuration the server is running, advertised to clients so a
     // GUI client can rebuild an identical arena locally (the map is deterministic
-    // from these — see docs/NETWORK_PREP_PLAN.md Phase 0.1T). Stored as plain ints
+    // from these — see docs/MULTIPLAYER_TARGET_ARCHITECTURE.md). Stored as plain ints
     // (mirroring Game's ArenaBiome/ArenaLayout/MatchMode enums) to keep this header
     // raylib-free. Defaults match Game's defaults (Arena/Classic/FourTeams).
     int worldBiome = 0;  // ArenaBiome: Arena=0, Ice=1, Lava=2, Space=3, Ruins=4.

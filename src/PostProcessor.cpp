@@ -1,4 +1,6 @@
 #include "PostProcessor.h"
+#include "VisualTheme.h"
+#include "rlgl.h"
 
 #include <algorithm>
 #include <cmath>
@@ -38,10 +40,12 @@ bool PostProcessor::Initialize()
     if (!fragmentPath.empty())
     {
         shader_ = LoadShader(nullptr, fragmentPath.c_str());
-        shaderReady_ = shader_.id != 0;
+        shaderReady_ = shader_.id != 0 && shader_.id != rlGetShaderIdDefault();
     }
     if (shaderReady_)
     {
+        exposureLocation_ = GetShaderLocation(shader_, "exposure");
+        saturationLocation_ = GetShaderLocation(shader_, "saturation");
         bloomLocation_ = GetShaderLocation(shader_, "bloomStrength");
         bloomTextureLocation_ = GetShaderLocation(shader_, "bloomTexture");
         vignetteLocation_ = GetShaderLocation(shader_, "vignetteStrength");
@@ -57,7 +61,7 @@ bool PostProcessor::Initialize()
     if (!bloomFragmentPath.empty())
     {
         bloomShader_ = LoadShader(nullptr, bloomFragmentPath.c_str());
-        bloomShaderReady_ = bloomShader_.id != 0;
+        bloomShaderReady_ = bloomShader_.id != 0 && bloomShader_.id != rlGetShaderIdDefault();
     }
     if (bloomShaderReady_)
     {
@@ -72,7 +76,7 @@ bool PostProcessor::Initialize()
     if (!bloomBlurFragmentPath.empty())
     {
         bloomBlurShader_ = LoadShader(nullptr, bloomBlurFragmentPath.c_str());
-        bloomBlurShaderReady_ = bloomBlurShader_.id != 0;
+        bloomBlurShaderReady_ = bloomBlurShader_.id != 0 && bloomBlurShader_.id != rlGetShaderIdDefault();
     }
     if (bloomBlurShaderReady_)
     {
@@ -144,6 +148,7 @@ void PostProcessor::EndFrameAndDraw(
     bool effectsEnabled,
     bool bloomEnabled,
     int effectsQuality,
+    int bloomQuality,
     float damageFlash,
     float scopeBlend,
     bool reducedFlashes)
@@ -154,6 +159,16 @@ void PostProcessor::EndFrameAndDraw(
     }
     EndTextureMode();
     frameActive_ = false;
+
+    // Switching to the performance profile also returns bloom memory to the GPU.
+    if (!effectsEnabled || !bloomEnabled || settings_.bloomIntensity <= 0.001f)
+    {
+        if (bloomTarget_.id != 0) UnloadRenderTexture(bloomTarget_);
+        if (bloomScratchTarget_.id != 0) UnloadRenderTexture(bloomScratchTarget_);
+        bloomTarget_ = {};
+        bloomScratchTarget_ = {};
+        bloomWidth_ = bloomHeight_ = 0;
+    }
 
     const Rectangle source = FlippedSourceRect(target_);
     const Rectangle destination {
@@ -169,10 +184,15 @@ void PostProcessor::EndFrameAndDraw(
     }
 
     const int quality = std::clamp(effectsQuality, 0, 2);
+    const int selectedBloomQuality = std::clamp(bloomQuality, 0, 2);
     const float bloomScales[] { 0.25f, 0.35f, 0.50f };
-    const float bloomStrengths[] { 0.30f, 0.40f, 0.52f };
+    const float bloomStrengths[] {
+        VisualTheme::Screen::BloomLow,
+        VisualTheme::Screen::BloomMedium,
+        VisualTheme::Screen::BloomHigh
+    };
     float bloom = 0.0f;
-    if (bloomEnabled && bloomShaderReady_ && EnsureBloomTargets(bloomScales[quality]))
+    if (bloomEnabled && settings_.bloomIntensity > 0.001f && bloomShaderReady_ && EnsureBloomTargets(bloomScales[selectedBloomQuality]))
     {
         const Rectangle bloomDestination {
             0.0f,
@@ -183,7 +203,7 @@ void PostProcessor::EndFrameAndDraw(
 
         // Pass 1: bright-pass downsample from the scene target.
         const float sourceSize[] { static_cast<float>(targetWidth_), static_cast<float>(targetHeight_) };
-        const float shaderQuality = static_cast<float>(quality);
+        const float shaderQuality = static_cast<float>(selectedBloomQuality);
         BeginTextureMode(bloomTarget_);
         ClearBackground(BLACK);
         SetShaderValue(bloomShader_, bloomSourceSizeLocation_, sourceSize, SHADER_UNIFORM_VEC2);
@@ -219,10 +239,15 @@ void PostProcessor::EndFrameAndDraw(
         }
 
         SetShaderValueTexture(shader_, bloomTextureLocation_, bloomTarget_.texture);
-        bloom = bloomStrengths[quality];
+        bloom = bloomStrengths[selectedBloomQuality] * settings_.bloomIntensity;
     }
-    const float vignette = 0.28f;
-    const float flash = std::clamp(damageFlash * (reducedFlashes ? 0.22f : 0.72f), 0.0f, 1.0f);
+    const float vignette = VisualTheme::Screen::Vignette;
+    const float flash = std::clamp(
+        damageFlash * (reducedFlashes
+            ? VisualTheme::Screen::DamageFlashReduced
+            : VisualTheme::Screen::DamageFlashFull),
+        0.0f,
+        1.0f);
     const float scope = std::clamp(scopeBlend, 0.0f, 1.0f);
     // FXAA reads neighbors through this; zero disables it on the low preset
     // where the five extra fetches are not worth it.
@@ -234,6 +259,8 @@ void PostProcessor::EndFrameAndDraw(
     {
         SetShaderValue(shader_, texelSizeLocation_, fxaaTexel, SHADER_UNIFORM_VEC2);
     }
+    SetShaderValue(shader_, exposureLocation_, &settings_.exposure, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(shader_, saturationLocation_, &settings_.saturation, SHADER_UNIFORM_FLOAT);
     SetShaderValue(shader_, bloomLocation_, &bloom, SHADER_UNIFORM_FLOAT);
     SetShaderValue(shader_, vignetteLocation_, &vignette, SHADER_UNIFORM_FLOAT);
     SetShaderValue(shader_, damageLocation_, &flash, SHADER_UNIFORM_FLOAT);

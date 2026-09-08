@@ -140,7 +140,7 @@ void Player::SetVelocity(Vec3 velocity)
 void Player::ApplyReplicatedState(int health, int maxHealth, bool alive, bool eliminated, float respawnTimer)
 {
     // Client-only: reflect an authoritative snapshot's public state without
-    // running combat/death logic. See docs/NETWORK_PREP_PLAN.md (Phase 0.1T).
+    // running combat/death logic. See docs/MULTIPLAYER_TARGET_ARCHITECTURE.md.
     maxHealth_ = maxHealth > 0 ? maxHealth : maxHealth_;
     health_ = std::clamp(health, 0, maxHealth_);
     alive_ = alive;
@@ -276,6 +276,26 @@ int Player::GetSelectedSlot() const
 void Player::SetSelectedSlot(int slot)
 {
     selectedSlot_ = slot;
+}
+
+int Player::GetSelectedWoolVariant() const
+{
+    return selectedWoolVariant_;
+}
+
+void Player::SetSelectedWoolVariant(int variant)
+{
+    selectedWoolVariant_ = std::clamp(variant, -1, 15);
+}
+
+void Player::CycleWoolVariant(int direction)
+{
+    if (selectedWoolVariant_ < 0)
+    {
+        selectedWoolVariant_ = direction >= 0 ? 0 : 15;
+        return;
+    }
+    selectedWoolVariant_ = (selectedWoolVariant_ + (direction >= 0 ? 1 : -1) + 16) % 16;
 }
 
 Vector3 Player::Forward() const
@@ -500,6 +520,18 @@ void Player::UpdateTimers(float dt)
     shieldTimer_ = std::max(0.0f, shieldTimer_ - dt);
     invulnerabilityTimer_ = std::max(0.0f, invulnerabilityTimer_ - dt);
     controlDebuffTimer_ = std::max(0.0f, controlDebuffTimer_ - dt);
+    for (int i = 0; i < kArrowVariantCount; ++i)
+    {
+        if (arrowReloadTimers_[i] <= 0.0f)
+        {
+            continue;
+        }
+        arrowReloadTimers_[i] = std::max(0.0f, arrowReloadTimers_[i] - dt);
+        if (arrowReloadTimers_[i] <= 0.0f)
+        {
+            arrowAmmo_[i] = ArrowQuiverCapacity(static_cast<ArrowVariant>(i));
+        }
+    }
     if (controlDebuffTimer_ <= 0.0f)
     {
         controlMoveMultiplier_ = 1.0f;
@@ -883,6 +915,59 @@ void Player::ClearHeroActiveEffects()
 void Player::RespawnAtHome()
 {
     RespawnAt(Vector3 { homeSpawnPoint_.x, homeSpawnPoint_.y, homeSpawnPoint_.z });
+}
+
+ArrowVariant Player::GetArrowVariant() const
+{
+    return selectedArrowVariant_;
+}
+
+void Player::CycleArrowVariant(int direction)
+{
+    const int current = static_cast<int>(selectedArrowVariant_);
+    selectedArrowVariant_ = static_cast<ArrowVariant>(
+        (current + (direction >= 0 ? 1 : -1) + kArrowVariantCount) % kArrowVariantCount);
+}
+
+int Player::GetArrowAmmo(ArrowVariant variant) const
+{
+    const int index = std::clamp(static_cast<int>(variant), 0, kArrowVariantCount - 1);
+    return arrowAmmo_[index];
+}
+
+float Player::GetArrowReloadTimer(ArrowVariant variant) const
+{
+    const int index = std::clamp(static_cast<int>(variant), 0, kArrowVariantCount - 1);
+    return arrowReloadTimers_[index];
+}
+
+bool Player::TryConsumeArrow()
+{
+    const int index = static_cast<int>(selectedArrowVariant_);
+    if (arrowReloadTimers_[index] > 0.0f || arrowAmmo_[index] <= 0)
+    {
+        return false;
+    }
+    --arrowAmmo_[index];
+    if (arrowAmmo_[index] <= 0)
+    {
+        arrowReloadTimers_[index] = kQuiverReloadSeconds;
+    }
+    return true;
+}
+
+void Player::SetQuiverStateReplicated(ArrowVariant selected,
+    const std::array<int, kArrowVariantCount>& ammo,
+    const std::array<float, kArrowVariantCount>& reloadTimers)
+{
+    selectedArrowVariant_ = static_cast<ArrowVariant>(std::clamp(
+        static_cast<int>(selected), 0, kArrowVariantCount - 1));
+    for (int i = 0; i < kArrowVariantCount; ++i)
+    {
+        const ArrowVariant variant = static_cast<ArrowVariant>(i);
+        arrowAmmo_[i] = std::clamp(ammo[i], 0, ArrowQuiverCapacity(variant));
+        arrowReloadTimers_[i] = std::clamp(reloadTimers[i], 0.0f, kQuiverReloadSeconds);
+    }
 }
 
 void Player::RespawnAt(Vector3 position)

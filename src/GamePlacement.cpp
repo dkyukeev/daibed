@@ -1,5 +1,7 @@
 #include "Game.h"
 
+#include "VisualTheme.h"
+
 #include "raylib.h"
 
 #include <algorithm>
@@ -166,10 +168,21 @@ void Game::UpdateCombatPreview()
             * (1.0f + kBowTuning.powerDamageBonusPerLevel
                 * BowPowerLevelForUpgrade(inventory.GetBowUpgradeLevel()))
             * (drawPower >= 0.999f ? kBowTuning.criticalMultiplier : 1.0f)));
-        combatPreview_.label = inventory.GetUtility(UtilityType::Arrows) <= 0
-            ? "Лук · нет стрел"
-            : "Лук · натяжение " + std::to_string(static_cast<int>(std::round(drawPower * 100.0f)))
-                + "% · урон ≈ " + std::to_string(combatPreview_.damage);
+        const ArrowVariant variant = player->GetArrowVariant();
+        if (variant == ArrowVariant::Impulse)
+        {
+            combatPreview_.damage = static_cast<int>(std::ceil(
+                static_cast<float>(combatPreview_.damage) * 0.75f));
+        }
+        const float reload = player->GetArrowReloadTimer(variant);
+        combatPreview_.ready = combatPreview_.ready && reload <= 0.0f;
+        combatPreview_.label = std::string(ArrowVariantName(variant)) + " · "
+            + std::to_string(player->GetArrowAmmo(variant)) + "/"
+            + std::to_string(ArrowQuiverCapacity(variant))
+            + (reload > 0.0f
+                ? " · перезарядка " + FormatTenths(reload) + " с"
+                : " · натяжение " + std::to_string(static_cast<int>(std::round(drawPower * 100.0f)))
+                    + "% · урон ≈ " + std::to_string(combatPreview_.damage));
         return;
     }
     const ItemType selectedRangedItem = GetSelectedHotbarStack(*player).type;
@@ -803,6 +816,11 @@ Game::BlockActionResult Game::ApplyPlaceBlockForPlayer(Player& player, const Gri
     // Fresh Creative coloured materials start cyan (Minecraft dye 9), the
     // dominant castle accent. Imported maps retain their exact dye in variant.
     int variant = (blockType == BlockType::ColoredGlassBlock || blockType == BlockType::ColoredClayBlock) ? 9 : 0;
+    if (blockType == BlockType::WoolBlock && player.GetSelectedWoolVariant() >= 0)
+    {
+        // 16..31 marks an explicitly selected dye while retaining team ownership.
+        variant = 16 + player.GetSelectedWoolVariant();
+    }
     const int orientation = OrientationVariantFor(blockType, world_, pos, player.GetPosition(), supportBlock);
     if (orientation == -1)
     {
@@ -896,9 +914,26 @@ void Game::PresentBlockActionResult(const Player& player, const BlockActionResul
 
     if (result.hasWorldEffect)
     {
-        const float radius = result.kind == BlockActionKind::Break ? 0.28f : 0.24f;
-        const float seconds = result.kind == BlockActionKind::Break ? 0.25f : 0.22f;
-        AddWorldEffect(result.position, result.color, radius, seconds);
+        Vector3 direction {
+            result.position.x - player.GetPosition().x,
+            0.18f,
+            result.position.z - player.GetPosition().z,
+        };
+        Color materialColor = result.blockType == BlockType::Air
+            ? result.color
+            : VisualTheme::SurfaceDust(result.blockType);
+        if (result.blockType == BlockType::WoolBlock || result.blockType == BlockType::TeamBlock)
+        {
+            materialColor = result.color;
+        }
+        if (result.kind == BlockActionKind::Break)
+        {
+            EmitBlockBreakParticles(result.position, direction, materialColor, result.blockType);
+        }
+        else if (result.kind == BlockActionKind::Place)
+        {
+            EmitBlockPlaceParticles(result.position, direction, materialColor, result.blockType);
+        }
     }
     if (result.kind == BlockActionKind::Break && result.success)
     {

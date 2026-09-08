@@ -146,6 +146,12 @@ private:
     MovementType recoveredActionType_ = MovementType::Count;
     GridPos recoveredActionFrom_ {};
     GridPos recoveredActionTo_ {};
+    struct FailedTransitionMemory
+    {
+        NavigationFailedTransition transition;
+        float remainingSeconds = 0.0f;
+    };
+    std::vector<FailedTransitionMemory> failedTransitions_;
     NavigationMetrics metrics_;
     NavigationMetrics metricsDelta_;
     NavigationDebugSnapshot debug_;

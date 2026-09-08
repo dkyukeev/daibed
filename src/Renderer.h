@@ -3,6 +3,7 @@
 #include "Core.h"
 #include "ChunkRenderer.h"
 #include "Feedback.h"
+#include "FirstPersonMotion.h"
 #include "Generator.h"
 #include "HeroVisuals.h"
 #include "Player.h"
@@ -42,6 +43,7 @@ public:
         const std::vector<FloatingText>& floatingTexts,
         const Camera3D& camera,
         const ItemStack& localHeldItem,
+        const FirstPersonMotionPose& firstPersonPose,
         Color skyColor,
         bool hideLocalPlayer) const;
 
@@ -53,6 +55,8 @@ public:
         int shopCategoryIndex,
         const Shop& shop,
         const std::string& message,
+        bool chatInputOpen,
+        const std::string& chatInput,
         const PlacementPreview& placementPreview,
         const BreakProgress& breakProgress,
         const CombatPreview& combatPreview,
@@ -62,7 +66,7 @@ public:
         int inventoryCursorSlot,
         const ItemStack& heldInventoryStack,
         const char* cameraModeText,
-        const std::vector<EventMessage>& eventMessages,
+        const std::vector<EventMessage>& chatMessages,
         const MatchStats& stats,
         float hitMarkerTimer,
         float damageFlashTimer,
@@ -76,11 +80,13 @@ public:
 
     void RenderHeroPreview(HeroId heroId, Rectangle destination, float yawDegrees, bool portrait = false) const;
     void SetWorldRenderDistance(float distance);
+    void SetShaderSettings(const ShaderSettings& settings) { sceneShader_.SetSettings(settings); }
     void SetShadowQuality(int quality);
+    void SetAmbientOcclusionQuality(int quality);
     // Depth pass from the sun for shadowQuality >= 1.  Must run before the
     // post-processor opens its render target: raylib cannot nest
     // BeginTextureMode, so the shadow framebuffer has to come first.
-    void PrepareSunShadows(const World& world, const std::vector<Team>& teams, const Camera3D& camera);
+    void PrepareSunShadows(const World& world, const std::vector<Team>& teams, const Camera3D& camera, const std::vector<Player>& players);
     const ChunkRenderStats& GetChunkRenderStats() const;
 
 private:
@@ -90,9 +96,9 @@ private:
     const Texture2D* GetItemTexture(ItemType type) const;
     void SyncChunks(const World& world, const std::vector<Team>& teams) const;
     void UpdateMapPointLights(const World& world) const;
-    void SetNearestMapPointLights(const Camera3D& camera) const;
-    bool EnsureShadowTarget(int resolution);
-    void UnloadShadowTarget();
+    void SetNearestPointLights(const Camera3D& camera, const std::vector<ScenePointLight>& dynamicLights) const;
+    bool EnsureShadowTargets(const std::array<int, SceneShadowParams::kCascadeCount>& resolutions);
+    void UnloadShadowTargets();
     Color GetResourceColor(ResourceType type) const;
     const Team* FindTeam(const std::vector<Team>& teams, int teamId) const;
     const EnergyCore* FindCore(const std::vector<EnergyCore>& cores, int teamId) const;
@@ -155,6 +161,7 @@ private:
     mutable std::uint64_t mapPointLightsRevision_ = 0;
     float worldRenderDistance_ = 150.0f;
     int shadowQuality_ = 1;
+    int ambientOcclusionQuality_ = 1;
     SceneShader sceneShader_;
     HeroVisualLibrary heroVisuals_;
     RenderTexture2D heroPreviewTarget_ {};
@@ -163,16 +170,19 @@ private:
     // chunk material never leaves the "texture2" sampler unbound.
     std::array<Texture2D, static_cast<std::size_t>(BlockType::Count)> blockNormalTextures_ {};
     Texture2D flatNormalTexture_ {};
-    // Sun shadow map state (shadowQuality >= 1); the depth texture lives in
-    // shadowTarget_.depth and is sampled by the lighting shader.
+    // Cascaded sun shadow state (shadowQuality >= 1); each depth texture is
+    // sampled independently by the lighting shader.
     // World bounding box cached alongside the torch scan; sizes the fog
     // shell so large imported maps are not cut by arena-sized fog walls.
     mutable Vector3 worldBoundsMin_ {};
     mutable Vector3 worldBoundsMax_ {};
     mutable bool worldBoundsValid_ = false;
-    RenderTexture2D shadowTarget_ {};
-    int shadowResolution_ = 0;
-    Matrix sunLightViewProj_ {};
+    std::array<RenderTexture2D, SceneShadowParams::kCascadeCount> shadowTargets_ {};
+    std::array<int, SceneShadowParams::kCascadeCount> shadowResolutions_ {};
+    std::array<Matrix, SceneShadowParams::kCascadeCount> sunLightViewProj_ {};
+    std::array<float, SceneShadowParams::kCascadeCount> sunShadowWorldPerTexel_ {};
+    float sunShadowSplitDistance_ = 0.0f;
+    float sunShadowDistance_ = 0.0f;
     bool sunShadowsValid_ = false;
     bool shadowTargetFailed_ = false;
 };

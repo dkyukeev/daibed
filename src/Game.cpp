@@ -4,7 +4,9 @@
 #include "HeroSystem.h"
 #include "RangedCombat.h"
 #include "UiText.h"
+#include "VisualTheme.h"
 #include "raylib.h"
+#include "raymath.h"
 
 #include <algorithm>
 #include <array>
@@ -41,6 +43,47 @@ constexpr float kVoidFallVoiceY = -12.0f;
 constexpr float kVoidDeathY = -36.0f;
 constexpr float kCreativeFlightVoidDeathY = -512.0f;
 constexpr float kCreativeFlightDoubleTapSeconds = 0.28f;
+constexpr std::size_t kChatMaxCodepoints = 96;
+
+std::size_t Utf8CodepointCount(const std::string& text)
+{
+    std::size_t count = 0;
+    for (const char* cursor = text.c_str(); *cursor != '\0'; ++count)
+    {
+        int bytes = 0;
+        GetCodepointNext(cursor, &bytes);
+        cursor += std::max(1, bytes);
+    }
+    return count;
+}
+
+void PopUtf8(std::string& text)
+{
+    if (text.empty())
+    {
+        return;
+    }
+    std::size_t index = text.size() - 1;
+    while (index > 0 && (static_cast<unsigned char>(text[index]) & 0xC0u) == 0x80u)
+    {
+        --index;
+    }
+    text.erase(index);
+}
+
+void AppendChatCodepoint(std::string& text, int codepoint)
+{
+    if (codepoint < 32 || codepoint == 127 || Utf8CodepointCount(text) >= kChatMaxCodepoints)
+    {
+        return;
+    }
+    int bytes = 0;
+    const char* encoded = CodepointToUTF8(codepoint, &bytes);
+    if (encoded != nullptr && bytes > 0)
+    {
+        text.append(encoded, static_cast<std::size_t>(bytes));
+    }
+}
 constexpr float kCreativeFlightSpeed = 9.0f;
 constexpr float kCreativeFlightSprintSpeed = 18.0f;
 constexpr int kBuildMinY = -2;
@@ -53,14 +96,6 @@ constexpr float kOrbitaDashLift = 2.55f;
 constexpr float kOrbitaTeleportMaxDistance = 20.0f;
 constexpr float kOrbitaEnemyCoreRestrictionSq = 16.0f;
 constexpr float kOrbitaTeleportDamagePerBlock = 1.65f;
-constexpr int kBromVacuumIronCost = 48;
-constexpr int kBromTurretGoldCost = 12;
-constexpr int kBromVacuumCapacity = 24;
-constexpr float kBromVacuumStepHeight = 1.08f;
-constexpr float kBromVacuumDropHeight = 1.15f;
-constexpr float kBromTurretAttackRange = 16.0f;
-constexpr float kBromUltimateCooldownSeconds = 70.0f;
-constexpr float kBromUltimateDeviceLifetime = 90.0f;
 constexpr int kKonvoyMaxTraps = 2;
 constexpr float kKonvoyHandcuffRadius = 6.0f;
 constexpr float kKonvoyDomeVisualRadius = 6.0f;
@@ -226,26 +261,6 @@ std::string BoolCoreState(bool alive)
     return alive ? "Кор работает." : "Кор уничтожен. Последняя жизнь!";
 }
 
-Color HeroAccentColor(HeroId id)
-{
-    switch (id)
-    {
-    case HeroId::Radon:
-        return Color { 92, 164, 255, 255 };
-    case HeroId::Orbita:
-        return Color { 255, 96, 82, 255 };
-    case HeroId::Brom:
-        return Color { 96, 202, 118, 255 };
-    case HeroId::Konvoy:
-        return Color { 92, 210, 255, 255 };
-    case HeroId::Likho:
-        return Color { 104, 238, 92, 255 };
-    case HeroId::Svidetel:
-        return Color { 180, 104, 255, 255 };
-    }
-    return WHITE;
-}
-
 std::string FormatTenths(float value)
 {
     const int tenths = static_cast<int>(value * 10.0f + 0.5f);
@@ -320,6 +335,7 @@ bool Game::Initialize(bool headless)
     renderer_.Initialize();
     renderer_.SetWorldRenderDistance(kDrawDistances[drawDistanceIndex_]);
     renderer_.SetShadowQuality(shadowQuality_);
+    renderer_.SetAmbientOcclusionQuality(ambientOcclusionQuality_);
     CrashLogger::Heartbeat("initialize-post");
     postProcessor_.Initialize();
 
@@ -338,6 +354,8 @@ void Game::Shutdown()
     }
 
     StopNetworkClientSession();
+    StopIntegratedListenServer();
+    StopSteamLobbyService();
     SaveSettings();
     network_.Disconnect();
     network_.Stop();
@@ -529,7 +547,24 @@ void Game::HandleHotbarSelectionInput(Player& player)
     }
     else if (std::fabs(currentInput_.mouseWheel) > 0.01f)
     {
-        if (IsSniperScopeRequested(player))
+        const bool variantModifier = !headless_ && IsKeyDown(KEY_CAPS_LOCK);
+        const int variantDirection = currentInput_.mouseWheel > 0.0f ? 1 : -1;
+        const ItemStack selected = player.GetInventory().GetHotbarSlots()[selectedHotbarSlot_];
+        if (variantModifier && selected.type == ItemType::LightBlock)
+        {
+            player.CycleWoolVariant(variantDirection);
+            SetMessage("Цвет шерсти: "
+                + std::to_string(player.GetSelectedWoolVariant() + 1) + "/16", 1.0f);
+        }
+        else if (variantModifier && selected.type == ItemType::Bow)
+        {
+            player.CycleArrowVariant(variantDirection);
+            const ArrowVariant variant = player.GetArrowVariant();
+            SetMessage(std::string(ArrowVariantName(variant)) + ": "
+                + std::to_string(player.GetArrowAmmo(variant)) + "/"
+                + std::to_string(ArrowQuiverCapacity(variant)), 1.2f);
+        }
+        else if (IsSniperScopeRequested(player))
         {
             sniperMagnification_ = std::clamp(
                 sniperMagnification_ + currentInput_.mouseWheel * 0.25f,
@@ -596,6 +631,13 @@ void Game::HandleInput()
     Player* localPlayer = GetLocalPlayer();
     if (localPlayer == nullptr)
     {
+        return;
+    }
+
+    if (HandleChatInput())
+    {
+        currentInput_ = PlayerInput {};
+        scoreboardHeld_ = false;
         return;
     }
 
@@ -718,7 +760,7 @@ void Game::HandleInput()
         }
     }
 
-    if (currentInput_.inventoryPressed && !shopOpen_)
+    if (currentInput_.inventoryPressed && !shopOpen_ && creativeMode_)
     {
         inventoryOpen_ = true;
         shopOpen_ = false;
@@ -826,6 +868,10 @@ void Game::HandleInput()
 
 void Game::Update(float dt)
 {
+    UpdateSteamLobbyService();
+    // An embedded Steam host owns a separate headless authoritative Game, but
+    // is pumped from this same thread before the local snapshot client.
+    PumpIntegratedListenServer(dt);
     if (NetworkClientSessionActive())
     {
         // One frame of the MP client session (Stage 4: the single standard
@@ -967,7 +1013,7 @@ void Game::UpdatePresentation(float dt)
 void Game::UpdateMatchSimulation(float dt)
 {
     // MatchSimulation owns the authoritative simulation clock (single source of
-    // truth for the tick). See docs/NETWORK_PREP_PLAN.md.
+    // truth for the tick). See docs/MULTIPLAYER_TARGET_ARCHITECTURE.md.
     matchSimulation_.AdvanceTick();
     if (!players_.empty())
     {
@@ -1001,6 +1047,7 @@ void Game::UpdateMatchSimulation(float dt)
         {
             generatorBoostTriggered_ = true;
             AddEventMessage("10:00 Скорость генераторов увеличена", Color { 255, 235, 142, 255 }, 5.0f);
+            AddChatMessage("Генераторы ускорены", Color { 255, 235, 142, 255 }, 6.0f);
             AddKillFeed("Генераторы ускорены", Color { 255, 235, 142, 255 }, 6.0f);
             audio_.PlayPurchase();
             PushWorldEventSnapshot(WorldEventKind::GeneratorBoost, -1, -1, -1, Vector3 { 0.0f, 0.0f, 0.0f });
@@ -1057,6 +1104,7 @@ void Game::UpdateMatchSimulation(float dt)
             const Team* winner = FindTeam(matchSimulation_.WinnerTeamId());
             SetMessage((winner != nullptr ? winner->name : "Команда") + std::string(" побеждает!"), 8.0f);
             AddEventMessage((winner != nullptr ? winner->name : "Команда") + std::string(" побеждает!"), Color { 255, 235, 142, 255 }, 7.0f);
+            AddChatMessage((winner != nullptr ? winner->name : "Команда") + std::string(" побеждает!"), Color { 255, 235, 142, 255 }, 8.0f);
             audio_.PlayVictory();
         }
     }
@@ -1142,6 +1190,8 @@ void Game::Render()
         return;
     }
 
+    renderer_.SetShaderSettings(shaderSettings_);
+    postProcessor_.SetSettings(shaderSettings_);
     BeginDrawing();
     const bool inWorldView = screen_ == GameScreen::Playing || screen_ == GameScreen::Paused;
     if (inWorldView)
@@ -1149,7 +1199,7 @@ void Game::Render()
         // Sun depth pass renders into its own framebuffer, and raylib cannot
         // nest render targets, so it must finish before the post-processing
         // target opens.
-        renderer_.PrepareSunShadows(world_, teams_, cameraController_.GetCamera());
+        renderer_.PrepareSunShadows(world_, teams_, cameraController_.GetCamera(), players_);
     }
     const bool postFrameActive = inWorldView
         && (postProcessing_ || renderScale_ < 0.99f)
@@ -1236,6 +1286,7 @@ void Game::Render()
         floatingTexts_,
         cameraController_.GetCamera(),
         localHeldItem,
+        firstPersonMotion_.GetPose(),
         BiomeSkyColor(),
         cameraController_.GetMode() == ViewMode::FirstPerson);
 
@@ -1267,6 +1318,7 @@ void Game::Render()
             postProcessing_,
             bloomEnabled_,
             effectsQuality_,
+            bloomQuality_,
             damageFlashTimer_,
             sniperScopeBlend_,
             reducedFlashes_);
@@ -1274,7 +1326,8 @@ void Game::Render()
 
     if (localPlayer != nullptr)
     {
-        const bool standardInventoryOpen = inventoryOpen_ && !creativeMode_;
+        // Normal matches expose only the hotbar. Chests render in their own overlay.
+        const bool standardInventoryOpen = false;
         renderer_.RenderUI(
             *localPlayer,
             teams_,
@@ -1283,6 +1336,8 @@ void Game::Render()
             shopCategoryIndex_,
             shop_,
             message_,
+            chatInputOpen_,
+            chatInput_,
             placementPreview_,
             breakProgress_,
             combatPreview_,
@@ -1292,7 +1347,7 @@ void Game::Render()
             inventoryCursorSlot_,
             heldInventoryStack_,
             cameraController_.GetModeName(),
-            eventMessages_,
+            chatMessages_,
             stats_,
             hitMarkerTimer_,
             reducedFlashes_ ? damageFlashTimer_ * 0.25f : damageFlashTimer_,
@@ -1419,7 +1474,8 @@ void Game::TriggerCoreCollapse()
         {
             team->coreAlive = false;
         }
-        AddWorldEffect(world_.GridToWorld(core.GetBlockPosition()), Color { 255, 118, 118, 255 }, 0.75f, 0.8f);
+        EmitCoreDestructionParticles(world_.GridToWorld(core.GetBlockPosition()),
+            Color { 255, 118, 118, 255 }, 1.45f);
         ++destroyedCount;
     }
 
@@ -1427,6 +1483,7 @@ void Game::TriggerCoreCollapse()
     {
         SetMessage("Арена рушится! Все Коры уничтожены, распад арены ранит каждого. Последняя жизнь.", 6.0f);
         AddEventMessage("Все Коры разрушены", Color { 255, 118, 118, 255 }, 6.0f);
+        AddChatMessage("Все Коры разрушены — последняя жизнь", Color { 255, 118, 118, 255 }, 7.0f);
         audio_.PlayCoreDestroyed();
         AddCameraShake(0.34f, 0.45f);
     }
@@ -1436,7 +1493,7 @@ void Game::ApplyBotLoadout(Player& bot) const
 {
     // Everyone now starts without free building materials. Bots use the same
     // generators and shop as humans before they can bridge or fortify.
-    bot.GetInventory().AddItem(bot.GetHeroId() == HeroId::Svidetel ? ItemType::SniperRifle : ItemType::Sword, 1);
+    bot.GetInventory().AddItem(ItemType::Sword, 1);
     if (botStrategyProfile_ == BotStrategyProfile::HypixelRush)
     {
         // Test-profile abstraction of Hypixel's first wool buy. It guarantees
@@ -1532,7 +1589,8 @@ void Game::ApplyStandingBlockEffects(Player& player, bool hasLocalCamera)
     if (block->type == BlockType::SpringBlock && player.IsOnGround())
     {
         player.ApplyKnockback(Vector3 { 0.0f, 8.8f, 0.0f });
-        AddWorldEffect(world_.GridToWorld(underFeet), Color { 128, 238, 166, 255 }, 0.34f, 0.25f);
+        EmitAbilityParticles(world_.GridToWorld(underFeet), Vector3 { 0.0f, 1.0f, 0.0f },
+            Color { 128, 238, 166, 255 }, 0.55f, WorldEffectKind::Ring);
         if (hasLocalCamera)
         {
             AddCameraShake(0.10f, 0.12f);
@@ -1609,6 +1667,8 @@ void Game::UpdateCamera(float dt)
 
     if (spectatorMode_)
     {
+        firstPersonMotion_.Reset(false);
+        cameraController_.SetFirstPersonPresentationOffset(Vector3 {});
         sniperScopeBlend_ += (0.0f - sniperScopeBlend_) * std::min(1.0f, dt * 12.0f);
         gameplayFov_ += (fov_ - gameplayFov_) * std::min(1.0f, dt * 10.0f);
         cameraController_.SetFov(gameplayFov_);
@@ -1618,6 +1678,8 @@ void Game::UpdateCamera(float dt)
 
     if (player == nullptr)
     {
+        firstPersonMotion_.Reset(false);
+        cameraController_.SetFirstPersonPresentationOffset(Vector3 {});
         return;
     }
 
@@ -1625,8 +1687,41 @@ void Game::UpdateCamera(float dt)
     sniperScopeBlend_ += (scopeTarget - sniperScopeBlend_) * std::min(1.0f, dt * 10.0f);
     const float smoothScope = sniperScopeBlend_ * sniperScopeBlend_ * (3.0f - 2.0f * sniperScopeBlend_);
 
+    firstPersonMotion_.SetMode(static_cast<FirstPersonMotionMode>(
+        std::clamp(firstPersonMotionMode_, 0, 2)));
+    if (cameraController_.GetMode() == ViewMode::FirstPerson && !creativeFlightActive_)
+    {
+        const Vector3 velocity = player->GetVelocity();
+        const Vector3 flatRight = cameraController_.GetFlatRight();
+        const Vector3 flatForward = cameraController_.GetFlatForward();
+        firstPersonMotion_.Update(
+            FirstPersonMotionInput {
+                velocity,
+                player->IsOnGround(),
+                player->IsSprinting(),
+                currentInput_.jumpHeld,
+                smoothScope,
+                Vector2 {
+                    velocity.x * flatRight.x + velocity.z * flatRight.z,
+                    velocity.x * flatForward.x + velocity.z * flatForward.z,
+                },
+                currentInput_.yawDelta,
+                currentInput_.pitchDelta,
+            },
+            dt);
+        cameraController_.SetFirstPersonPresentationOffset(firstPersonMotion_.GetPose().cameraOffset);
+    }
+    else
+    {
+        firstPersonMotion_.Reset(player->IsOnGround());
+        cameraController_.SetFirstPersonPresentationOffset(Vector3 {});
+    }
+
     fovKick_ = std::max(0.0f, fovKick_ - fovKick_ * std::min(1.0f, dt * 7.0f));
-    const float normalFov = fov_ + (player->IsSprinting() && scopeTarget < 0.5f ? 6.0f : 0.0f) + fovKick_;
+    const float sprintFov = cameraController_.GetMode() == ViewMode::FirstPerson
+        ? firstPersonMotion_.GetPose().fovOffset
+        : (player->IsSprinting() && scopeTarget < 0.5f ? 6.0f : 0.0f);
+    const float normalFov = fov_ + sprintFov + fovKick_;
     const float scopedFov = 2.0f * std::atan(
         std::tan(fov_ * DEG2RAD * 0.5f) / sniperMagnification_) * RAD2DEG;
     const float targetFov = normalFov + (scopedFov - normalFov) * smoothScope;
@@ -1719,7 +1814,7 @@ bool Game::LaunchBlasterShot(Player& player, Vector3 direction, bool aimed, bool
     projectiles_.push_back(projectile);
     player.ConsumeLoadedBlaster();
     player.ResetAttackCooldown(kBlasterTuning.cooldown);
-    AddWorldEffect(projectile.position, direction, Color { 98, 245, 255, 255 }, 0.50f, 0.32f, WorldEffectKind::Burst);
+    EmitProjectileCueParticles(projectile.position, direction, Color { 98, 245, 255, 255 }, 1.0f);
     const bool sniperItem = GetSelectedHotbarStack(player).type == ItemType::SniperRifle;
     // Owner-private spawn feedback, independent of `announce`: the local human
     // path (announce=true) already gets an immediate SetMessage below, but a
@@ -1747,13 +1842,15 @@ bool Game::LaunchBowShot(Player& player, Vector3 direction, float drawPower, boo
     {
         return false;
     }
-    if (!SpendUtilityItem(player, UtilityType::Arrows))
+    const ArrowVariant arrowVariant = player.GetArrowVariant();
+    if (!player.TryConsumeArrow())
     {
         PushProjectileActionResultSnapshot(player, false, ProjectileKind::Arrow, false, player.GetPosition(),
-            "Нет стрел. Купите боеприпасы в магазине.");
+            "Колчан перезаряжается.");
         if (announce)
         {
-            SetMessage("Нет стрел. Купите боеприпасы в магазине.");
+            SetMessage("Колчан перезаряжается: "
+                + FormatTenths(player.GetArrowReloadTimer(arrowVariant)) + " с.");
             audio_.PlayDenied();
         }
         return false;
@@ -1763,7 +1860,9 @@ bool Game::LaunchBowShot(Player& player, Vector3 direction, float drawPower, boo
     direction = length > 0.0001f
         ? Vector3 { direction.x / length, direction.y / length, direction.z / length }
         : player.Forward();
-    const float speed = kBowTuning.maximumArrowSpeed * std::clamp(drawPower, 0.0f, 1.0f);
+    const float variantSpeed = arrowVariant == ArrowVariant::Impulse ? 0.82f : 1.0f;
+    const float speed = kBowTuning.maximumArrowSpeed * variantSpeed
+        * std::clamp(drawPower, 0.0f, 1.0f);
     const int upgradeLevel = player.GetInventory().GetBowUpgradeLevel();
     const int powerLevel = BowPowerLevelForUpgrade(upgradeLevel);
 
@@ -1780,24 +1879,34 @@ bool Game::LaunchBowShot(Player& player, Vector3 direction, float drawPower, boo
     projectile.velocity = Vector3 { direction.x * speed, direction.y * speed, direction.z * speed };
     projectile.baseDamage = kBowTuning.baseArrowDamage
         * (1.0f + kBowTuning.powerDamageBonusPerLevel * static_cast<float>(powerLevel));
+    if (arrowVariant == ArrowVariant::Impulse)
+    {
+        projectile.baseDamage *= 0.75f;
+    }
     projectile.damage = 1;
     projectile.radius = kArrowTuning.radius;
     projectile.gravity = kProjectilePhysicsTuning.arrowGravityPerSecond;
     projectile.airDragPerTick = kProjectilePhysicsTuning.arrowAirDragPerTick;
     projectile.lifetime = kProjectilePhysicsTuning.maxLifetime;
     projectile.maxRange = kProjectilePhysicsTuning.maximumRange;
-    projectile.punchLevel = BowPunchLevelForUpgrade(upgradeLevel);
+    projectile.punchLevel = BowPunchLevelForUpgrade(upgradeLevel)
+        + (arrowVariant == ArrowVariant::Impulse ? 1 : 0);
     projectile.kind = ProjectileKind::Arrow;
+    projectile.arrowVariant = arrowVariant;
     projectile.critical = drawPower >= 0.999f;
     projectile.speedBasedDamage = true;
     projectile.affectedByDrag = true;
     projectiles_.push_back(projectile);
     player.ResetAttackCooldown(kArrowTuning.cooldown);
-    PushProjectileActionResultSnapshot(player, true, ProjectileKind::Arrow, projectile.critical, projectile.position,
-        projectile.critical ? "Лук: критический выстрел!" : "Лук: выстрел.");
+    const std::string shotMessage = std::string(ArrowVariantName(arrowVariant)) + ": "
+        + std::to_string(player.GetArrowAmmo(arrowVariant)) + "/"
+        + std::to_string(ArrowQuiverCapacity(arrowVariant))
+        + (player.GetArrowReloadTimer(arrowVariant) > 0.0f ? " · перезарядка" : "");
+    PushProjectileActionResultSnapshot(player, true, ProjectileKind::Arrow,
+        projectile.critical, projectile.position, shotMessage);
     if (announce)
     {
-        SetMessage(projectile.critical ? "Лук: критический выстрел!" : "Лук: выстрел.");
+        SetMessage(shotMessage);
         audio_.PlayBreakBlock();
     }
     return true;
@@ -1935,6 +2044,13 @@ void Game::SetCreativeFlightActive(Player& player, bool active)
 void Game::UpdateCreativeFlight(Player& player, const PlayerCommand& command, float dt)
 {
     player.SetYaw(command.aimYaw);
+    player.SetSelectedWoolVariant(command.woolVariant);
+    const ArrowVariant requestedArrow = static_cast<ArrowVariant>(std::clamp(
+        command.arrowVariant, 0, kArrowVariantCount - 1));
+    while (player.GetArrowVariant() != requestedArrow)
+    {
+        player.CycleArrowVariant(1);
+    }
     if (command.selectedSlot >= 0 && command.selectedSlot < kHotbarSlotCount)
     {
         player.SetSelectedSlot(command.selectedSlot);
@@ -2045,7 +2161,29 @@ void Game::UpdateLocalPlayer(float dt)
     if (!wasOnGround && player->IsOnGround() && fallDistance >= 3.0f)
     {
         const float strength = std::min(0.42f, 0.12f + (fallDistance - 3.0f) * 0.055f + std::fabs(fallingVelocity) * 0.008f);
-        AddWorldEffect(player->GetPosition(), Color { 210, 220, 235, 255 }, 0.22f + strength, 0.25f);
+        Vector3 groundPosition = player->GetPosition();
+        groundPosition.y -= 0.88f;
+        const GridPos supportPos = world_.WorldToGrid(Vector3 {
+            groundPosition.x, groundPosition.y - 0.08f, groundPosition.z });
+        const Block* support = world_.GetBlock(supportPos);
+        Color surfaceColor = support != nullptr
+            ? VisualTheme::SurfaceDust(support->type)
+            : VisualTheme::SurfaceDust(BlockType::StoneBlock);
+        if (support != nullptr
+            && (support->type == BlockType::TeamBlock || support->type == BlockType::WoolBlock))
+        {
+            if (const Team* team = FindTeam(support->teamId))
+            {
+                surfaceColor = GetTeamColor(team->color);
+            }
+        }
+        const float particleIntensity = std::clamp(
+            (strength - 0.10f) / 0.32f, 0.18f, 1.0f);
+        EmitLandingParticles(
+            groundPosition,
+            Vector3 { player->GetVelocity().x, 0.0f, player->GetVelocity().z },
+            surfaceColor,
+            particleIntensity);
         AddCameraShake(strength, 0.16f);
         audio_.PlayLanding();
         localAirPeakY_ = player->GetPosition().y;
@@ -2063,6 +2201,13 @@ void Game::ApplyPlayerCommand(Player& player, const PlayerCommand& command, floa
     // actions (currently unused). For the local player command.aimYaw equals
     // the camera yaw, so this reproduces the previous behaviour exactly.
     player.SetYaw(command.aimYaw);
+    player.SetSelectedWoolVariant(command.woolVariant);
+    const ArrowVariant requestedArrow = static_cast<ArrowVariant>(std::clamp(
+        command.arrowVariant, 0, kArrowVariantCount - 1));
+    while (player.GetArrowVariant() != requestedArrow)
+    {
+        player.CycleArrowVariant(1);
+    }
     if (command.selectedSlot >= 0 && command.selectedSlot < kHotbarSlotCount)
     {
         // Every player's slot lives on the Player (single source of truth for
@@ -2517,10 +2662,20 @@ void Game::HandleDeathsAndRespawns()
             }
             SetMessage(player.GetName() + (finalDeath ? " выбывает." : " повержен и скоро возродится."));
             AddEventMessage(player.GetName() + (finalDeath ? " выбыл" : " повержен"), finalDeath ? RED : ORANGE, 2.2f);
+            const Player* killer = matchSimulation_.GetPlayer(killerId);
+            std::string deathLine = killer != nullptr && killerId != player.GetId()
+                ? killer->GetName() + " → " + player.GetName()
+                : player.GetName() + (voidDeath ? " упал в пустоту" : " погиб");
+            if (finalDeath)
+            {
+                deathLine += " · ФИНАЛ";
+            }
+            AddChatMessage(std::move(deathLine), finalDeath ? RED : ORANGE,
+                finalDeath ? 7.0f : 5.0f);
             AddKillFeed(
                 player.GetName()
                     + (killerId >= 0
-                            ? " потерял инвентарь"
+                            ? " потерял снаряжение"
                             : (voidDeath ? " упал в воид" : " погиб")),
                 finalDeath ? RED : ORANGE,
                 5.0f);
@@ -2608,7 +2763,7 @@ void Game::HandleDeathsAndRespawns()
                     memory.hasNavWaypoint = false;
                 }
                 SetMessage(player.GetName() + " возродился. " + BoolCoreState(team->coreAlive));
-                AddWorldEffect(player.GetPosition(), GetTeamColor(team->color), 0.42f, 0.45f);
+                EmitRespawnParticles(player.GetPosition(), GetTeamColor(team->color));
                 PushWorldEventSnapshot(
                     WorldEventKind::PlayerRespawned,
                     -1,
@@ -2838,7 +2993,7 @@ bool Game::RepairTeamCore(Player& player, Team& team, std::string& message)
     inventory.SpendResource(ResourceType::Gold, 3);
     core->Repair(30);
     message = "Кор починен +" + std::to_string(core->GetHealth() - beforeHealth) + ".";
-    AddWorldEffect(world_.GridToWorld(core->GetBlockPosition()), Color { 112, 232, 255, 255 }, 0.55f, 0.50f);
+    EmitHealParticles(world_.GridToWorld(core->GetBlockPosition()), Color { 112, 232, 255, 255 }, 1.35f);
     AddKillFeed(team.name + " Кор починен", Color { 112, 232, 255, 255 }, 4.0f);
     return true;
 }
@@ -3092,6 +3247,65 @@ void Game::SetMessage(std::string message, float seconds)
     messageTimer_ = seconds;
 }
 
+bool Game::HandleChatInput()
+{
+    if (!chatInputOpen_)
+    {
+        // T remains the special-block palette key in the map editor.
+        if (!creativeMode_ && !shopOpen_ && !inventoryOpen_ && IsKeyPressed(KEY_T))
+        {
+            chatInputOpen_ = true;
+            chatInput_.clear();
+            return true;
+        }
+        return false;
+    }
+
+    if (IsKeyPressed(KEY_ESCAPE))
+    {
+        chatInputOpen_ = false;
+        chatInput_.clear();
+        return true;
+    }
+    if (IsKeyPressed(KEY_ENTER))
+    {
+        const std::size_t first = chatInput_.find_first_not_of(" \t\r\n");
+        const std::size_t last = chatInput_.find_last_not_of(" \t\r\n");
+        if (first != std::string::npos)
+        {
+            pendingChatMessage_ = chatInput_.substr(first, last - first + 1);
+            pendingChatSeq_ = ++clientChatSeq_;
+        }
+        chatInputOpen_ = false;
+        chatInput_.clear();
+        return true;
+    }
+
+    const bool ctrlDown = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+    if (ctrlDown && IsKeyPressed(KEY_V))
+    {
+        if (const char* clipboard = GetClipboardText())
+        {
+            for (const char* cursor = clipboard; *cursor != '\0';)
+            {
+                int bytes = 0;
+                const int codepoint = GetCodepointNext(cursor, &bytes);
+                AppendChatCodepoint(chatInput_, codepoint);
+                cursor += std::max(1, bytes);
+            }
+        }
+    }
+    if (IsKeyPressed(KEY_BACKSPACE))
+    {
+        PopUtf8(chatInput_);
+    }
+    for (int codepoint = GetCharPressed(); codepoint > 0; codepoint = GetCharPressed())
+    {
+        AppendChatCodepoint(chatInput_, codepoint);
+    }
+    return true;
+}
+
 void Game::AddEventMessage(std::string message, Color color, float seconds)
 {
     if (suppressLocalFeedback_)
@@ -3102,6 +3316,19 @@ void Game::AddEventMessage(std::string message, Color color, float seconds)
     if (eventMessages_.size() > 5)
     {
         eventMessages_.erase(eventMessages_.begin());
+    }
+}
+
+void Game::AddChatMessage(std::string message, Color color, float seconds)
+{
+    if (suppressLocalFeedback_ || message.empty())
+    {
+        return;
+    }
+    chatMessages_.push_back(EventMessage { std::move(message), color, seconds, 0.0f });
+    if (chatMessages_.size() > 5)
+    {
+        chatMessages_.erase(chatMessages_.begin());
     }
 }
 
@@ -3201,39 +3428,146 @@ Game::ScopedLagCompensation::~ScopedLagCompensation()
     }
 }
 
-void Game::AddWorldEffect(Vector3 position, Color color, float radius, float seconds)
+void Game::EmitPickupParticles(Vector3 source, Vector3 target, Color color, int amount)
 {
-    if (suppressLocalFeedback_)
+    if (!suppressLocalFeedback_)
     {
-        return;
+        particles_.EmitPickup(source, target, color, amount);
     }
-    const std::size_t limit = effectsQuality_ == 0 ? 48u : (effectsQuality_ == 1 ? 96u : 192u);
-    if (worldEffects_.size() >= limit)
-    {
-        worldEffects_.erase(worldEffects_.begin());
-    }
-    worldEffects_.push_back(WorldEffect { position, Vector3 { 0.0f, 0.0f, 1.0f }, color, radius, seconds, 0.0f, WorldEffectKind::Burst });
-    particles_.Emit(ParticleKind::Debris, position, Vector3 { 0.0f, 1.0f, 0.0f }, color, 9, 2.4f);
-    particles_.Emit(ParticleKind::Dust, position, Vector3 { 0.0f, 0.7f, 0.0f }, Fade(color, 0.72f), 6, 1.3f);
 }
 
-void Game::AddWorldEffect(Vector3 position, Vector3 direction, Color color, float radius, float seconds, WorldEffectKind kind)
+void Game::EmitLandingParticles(Vector3 position, Vector3 planarVelocity, Color color, float intensity)
+{
+    if (!suppressLocalFeedback_)
+    {
+        particles_.EmitLanding(position, planarVelocity, color, intensity);
+    }
+}
+
+void Game::EmitImpactParticles(
+    Vector3 position,
+    Vector3 direction,
+    Color color,
+    ParticleMaterial material,
+    float intensity)
+{
+    if (!suppressLocalFeedback_)
+    {
+        particles_.EmitImpact(position, direction, color, material, intensity);
+    }
+}
+
+void Game::EmitBlockBreakParticles(
+    Vector3 position,
+    Vector3 direction,
+    Color color,
+    BlockType blockType)
+{
+    if (!suppressLocalFeedback_)
+    {
+        particles_.EmitBlockBreak(position, direction, color, ParticleMaterialFromBlock(blockType));
+    }
+}
+
+void Game::EmitBlockPlaceParticles(
+    Vector3 position,
+    Vector3 direction,
+    Color color,
+    BlockType blockType)
+{
+    if (!suppressLocalFeedback_)
+    {
+        particles_.EmitBlockPlace(position, direction, color, ParticleMaterialFromBlock(blockType));
+    }
+}
+
+void Game::EmitAbilityParticles(
+    Vector3 position,
+    Vector3 direction,
+    Color color,
+    float radius,
+    WorldEffectKind kind)
 {
     if (suppressLocalFeedback_)
     {
         return;
     }
-    const Vector3 flatDirection = Normalize2D(direction);
-    const Vector3 safeDirection = Length2D(flatDirection) > 0.0001f ? flatDirection : Vector3 { 0.0f, 0.0f, 1.0f };
-    const std::size_t limit = effectsQuality_ == 0 ? 48u : (effectsQuality_ == 1 ? 96u : 192u);
-    if (worldEffects_.size() >= limit)
+    AbilityParticleStyle style = AbilityParticleStyle::Burst;
+    switch (kind)
     {
-        worldEffects_.erase(worldEffects_.begin());
+    case WorldEffectKind::Ring: style = AbilityParticleStyle::Ring; break;
+    case WorldEffectKind::Cone: style = AbilityParticleStyle::Cone; break;
+    case WorldEffectKind::Pull: style = AbilityParticleStyle::Pull; break;
+    case WorldEffectKind::Trail: style = AbilityParticleStyle::Trail; break;
+    case WorldEffectKind::CorePulse: style = AbilityParticleStyle::CorePulse; break;
+    case WorldEffectKind::Sacrifice: style = AbilityParticleStyle::Sacrifice; break;
+    case WorldEffectKind::FireZone:
+        particles_.EmitHazard(position, color, radius);
+        return;
+    case WorldEffectKind::Burst:
+    default: break;
     }
-    worldEffects_.push_back(WorldEffect { position, safeDirection, color, radius, seconds, 0.0f, kind });
-    const ParticleKind particleKind = kind == WorldEffectKind::Trail ? ParticleKind::Trail
-        : (kind == WorldEffectKind::FireZone ? ParticleKind::Smoke : ParticleKind::Spark);
-    particles_.Emit(particleKind, position, safeDirection, color, kind == WorldEffectKind::FireZone ? 5 : 8, 2.1f);
+    particles_.EmitAbility(position, direction, color, radius, style);
+}
+
+void Game::EmitHealParticles(Vector3 position, Color color, float intensity)
+{
+    if (!suppressLocalFeedback_)
+    {
+        particles_.EmitHeal(position, color, intensity);
+    }
+}
+
+void Game::EmitTrapParticles(Vector3 position, Color color, float radius, bool triggered)
+{
+    if (!suppressLocalFeedback_)
+    {
+        particles_.EmitTrap(position, color, radius, triggered);
+    }
+}
+
+void Game::EmitDeviceParticles(Vector3 position, Color color, float intensity, bool assembling)
+{
+    if (!suppressLocalFeedback_)
+    {
+        particles_.EmitDevice(position, color, intensity, assembling);
+    }
+}
+
+void Game::EmitCoreDestructionParticles(Vector3 position, Color color, float intensity)
+{
+    if (!suppressLocalFeedback_)
+    {
+        particles_.EmitCoreDestruction(position, color, intensity);
+    }
+}
+
+void Game::EmitRespawnParticles(Vector3 position, Color color)
+{
+    if (!suppressLocalFeedback_)
+    {
+        particles_.EmitRespawn(position, color);
+    }
+}
+
+void Game::EmitProjectileCueParticles(
+    Vector3 position,
+    Vector3 direction,
+    Color color,
+    float intensity)
+{
+    if (!suppressLocalFeedback_)
+    {
+        particles_.EmitProjectileCue(position, direction, color, intensity);
+    }
+}
+
+void Game::EmitHazardParticles(Vector3 position, Color color, float radius)
+{
+    if (!suppressLocalFeedback_)
+    {
+        particles_.EmitHazard(position, color, radius);
+    }
 }
 
 void Game::AddFloatingText(std::string text, Vector3 position, Color color)
@@ -3355,7 +3689,7 @@ Game::CombatPresentationEvent Game::ApplyCombatGameplayEvent(const CombatEvent& 
                 presentation.extraFloatingTexts.push_back(CombatFloatingTextResult {
                     "НАРУШИТЕЛЬ -" + std::to_string(bonusDamage),
                     targetPlayer->GetPosition(),
-                    HeroAccentColor(HeroId::Konvoy)
+                    VisualTheme::HeroAccent(HeroId::Konvoy)
                 });
                 attackerPlayer->AddHeroUltimateCharge(2.0f);
             }
@@ -3381,7 +3715,7 @@ Game::CombatPresentationEvent Game::ApplyCombatGameplayEvent(const CombatEvent& 
                     presentation.extraFloatingTexts.push_back(CombatFloatingTextResult {
                         "в спину -" + std::to_string(bonusDamage),
                         targetPlayer->GetPosition(),
-                        HeroAccentColor(HeroId::Likho)
+                        VisualTheme::HeroAccent(HeroId::Likho)
                     });
                 }
             }
@@ -3418,7 +3752,7 @@ Game::CombatPresentationEvent Game::ApplyCombatGameplayEvent(const CombatEvent& 
                         presentation.extraFloatingTexts.push_back(CombatFloatingTextResult {
                             "КРОВОТЕЧЕНИЕ -12",
                             targetPlayer->GetPosition(),
-                            HeroAccentColor(HeroId::Likho)
+                            VisualTheme::HeroAccent(HeroId::Likho)
                         });
                         found->successfulHits = 0;
                     }
@@ -3694,7 +4028,49 @@ void Game::PresentCombatEvent(const CombatPresentationEvent& presentation)
     const std::string& message = presentation.message;
     SetMessage(message, event.coreDestroyed ? 4.0f : 2.2f);
     AddEventMessage(message, event.coreDestroyed ? Color { 255, 118, 118, 255 } : Color { 255, 235, 142, 255 });
-    AddWorldEffect(event.position, event.coreHit ? Color { 112, 232, 255, 255 } : Color { 255, 224, 122, 255 }, event.coreHit ? 0.48f : 0.32f, event.coreDestroyed ? 0.9f : 0.36f);
+    if (event.coreDestroyed)
+    {
+        AddChatMessage(message, Color { 255, 118, 118, 255 }, 7.0f);
+    }
+    Vector3 impactDirection = event.knockback;
+    if (Vector3LengthSqr(impactDirection) < 0.0001f)
+    {
+        if (const Player* attacker = matchSimulation_.GetPlayer(event.attackerId))
+        {
+            impactDirection = Vector3Subtract(event.position, attacker->GetPosition());
+        }
+    }
+    ParticleMaterial impactMaterial = event.coreHit
+        ? ParticleMaterial::Energy
+        : ParticleMaterial::Character;
+    Color impactColor = event.coreHit
+        ? Color { 112, 232, 255, 255 }
+        : Color { 255, 224, 122, 255 };
+    if (!event.coreHit)
+    {
+        if (const Player* target = matchSimulation_.GetPlayer(event.targetId))
+        {
+            if (target->HasShield())
+            {
+                impactMaterial = ParticleMaterial::Energy;
+                impactColor = VisualTheme::Palette::Shield;
+            }
+            else if (target->GetInventory().GetArmorLevel() > 0)
+            {
+                impactMaterial = ParticleMaterial::Metal;
+                impactColor = Color { 196, 210, 224, 255 };
+            }
+        }
+    }
+    if (event.coreDestroyed)
+    {
+        EmitCoreDestructionParticles(event.position, Color { 255, 118, 118, 255 }, 1.5f);
+    }
+    else
+    {
+        EmitImpactParticles(event.position, impactDirection, impactColor, impactMaterial,
+            event.hitZone == HitZone::Head ? 1.18f : 1.0f);
+    }
     AddFloatingText("-" + std::to_string(event.damage), event.position, event.coreHit ? Color { 112, 232, 255, 255 } : Color { 255, 236, 135, 255 });
     if (event.combo)
     {

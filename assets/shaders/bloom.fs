@@ -16,10 +16,10 @@ float luminance(vec3 color)
 
 vec3 ExtractBloom(vec3 color)
 {
-    // The scene target is LDR, so a soft knee starts below pure white.  It
-    // retains the warm highlight visible in the references and avoids hard
-    // halos around ordinary light-colored blocks.
-    float amount = smoothstep(0.54, 0.98, luminance(color));
+    // Non-emissive lighting is shoulder-compressed below this knee by
+    // lighting.fs. Explicit energy/core/fire/device emission can still reach
+    // white and produce a stable halo in the LDR scene target.
+    float amount = smoothstep(0.93, 0.998, luminance(color));
     return color * amount;
 }
 

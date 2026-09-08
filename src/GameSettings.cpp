@@ -272,6 +272,10 @@ void Game::LoadSettings()
         {
             file >> shadowQuality_;
         }
+        else if (key == "ambientOcclusionQuality")
+        {
+            file >> ambientOcclusionQuality_;
+        }
         else if (key == "effectsQuality")
         {
             file >> effectsQuality_;
@@ -283,6 +287,23 @@ void Game::LoadSettings()
         else if (key == "bloom")
         {
             file >> bloomEnabled_;
+        }
+        else if (key == "shader_giQuality") { file >> shaderSettings_.giQuality; }
+        else if (key == "shader_giStrength") { file >> shaderSettings_.giStrength; }
+        else if (key == "shader_localShadows") { file >> shaderSettings_.localShadows; }
+        else if (key == "shader_shadowSoftness") { file >> shaderSettings_.shadowSoftness; }
+        else if (key == "shader_skyQuality") { file >> shaderSettings_.skyQuality; }
+        else if (key == "shader_materialQuality") { file >> shaderSettings_.materialQuality; }
+        else if (key == "shader_volumetricQuality") { file >> shaderSettings_.volumetricQuality; }
+        else if (key == "shader_haze") { file >> shaderSettings_.haze; }
+        else if (key == "shader_sunIntensity") { file >> shaderSettings_.sunIntensity; }
+        else if (key == "shader_exposure") { file >> shaderSettings_.exposure; }
+        else if (key == "shader_bloomIntensity") { file >> shaderSettings_.bloomIntensity; }
+        else if (key == "shader_saturation") { file >> shaderSettings_.saturation; }
+        else if (key == "shaderPreset") { file >> shaderPreset_; }
+        else if (key == "bloomQuality")
+        {
+            file >> bloomQuality_;
         }
         else if (key == "showHints")
         {
@@ -299,6 +320,10 @@ void Game::LoadSettings()
         else if (key == "reducedFlashes")
         {
             file >> reducedFlashes_;
+        }
+        else if (key == "firstPersonMotion")
+        {
+            file >> firstPersonMotionMode_;
         }
         else if (key == "selectedMode")
         {
@@ -507,10 +532,15 @@ void Game::LoadSettings()
     musicVolume_ = std::clamp(musicVolume_, 0.0f, 1.0f);
     sfxVolume_ = std::clamp(sfxVolume_, 0.0f, 1.0f);
     ambientVolume_ = std::clamp(ambientVolume_, 0.0f, 1.0f);
+    shaderSettings_.Clamp();
+    shaderPreset_ = std::clamp(shaderPreset_, 0, 3);
     renderScaleIndex_ = std::clamp(renderScaleIndex_, 0, static_cast<int>(std::size(kRenderScales)) - 1);
     drawDistanceIndex_ = std::clamp(drawDistanceIndex_, 0, static_cast<int>(std::size(kDrawDistances)) - 1);
     shadowQuality_ = std::clamp(shadowQuality_, 0, 2);
+    ambientOcclusionQuality_ = std::clamp(ambientOcclusionQuality_, 0, 2);
     effectsQuality_ = std::clamp(effectsQuality_, 0, 2);
+    bloomQuality_ = std::clamp(bloomQuality_, 0, 2);
+    firstPersonMotionMode_ = std::clamp(firstPersonMotionMode_, 0, 2);
     renderScale_ = kRenderScales[renderScaleIndex_];
     selectedTeamSize_ = std::clamp(selectedTeamSize_, 1, 4);
     selectedTeamId_ = std::clamp(selectedTeamId_, 0, TeamCountForMode() - 1);
@@ -650,13 +680,29 @@ void Game::SaveSettings() const
     file << "renderScaleIndex " << renderScaleIndex_ << "\n";
     file << "drawDistanceIndex " << drawDistanceIndex_ << "\n";
     file << "shadowQuality " << shadowQuality_ << "\n";
+    file << "ambientOcclusionQuality " << ambientOcclusionQuality_ << "\n";
     file << "effectsQuality " << effectsQuality_ << "\n";
     file << "postProcessing " << postProcessing_ << "\n";
     file << "bloom " << bloomEnabled_ << "\n";
+    file << "shader_giQuality " << shaderSettings_.giQuality << "\n";
+    file << "shader_giStrength " << shaderSettings_.giStrength << "\n";
+    file << "shader_localShadows " << shaderSettings_.localShadows << "\n";
+    file << "shader_shadowSoftness " << shaderSettings_.shadowSoftness << "\n";
+    file << "shader_skyQuality " << shaderSettings_.skyQuality << "\n";
+    file << "shader_materialQuality " << shaderSettings_.materialQuality << "\n";
+    file << "shader_volumetricQuality " << shaderSettings_.volumetricQuality << "\n";
+    file << "shader_haze " << shaderSettings_.haze << "\n";
+    file << "shader_sunIntensity " << shaderSettings_.sunIntensity << "\n";
+    file << "shader_exposure " << shaderSettings_.exposure << "\n";
+    file << "shader_bloomIntensity " << shaderSettings_.bloomIntensity << "\n";
+    file << "shader_saturation " << shaderSettings_.saturation << "\n";
+    file << "shaderPreset " << shaderPreset_ << "\n";
+    file << "bloomQuality " << bloomQuality_ << "\n";
     file << "showHints " << showControlHints_ << "\n";
     file << "showMinimap " << showMinimap_ << "\n";
     file << "reducedCameraShake " << reducedCameraShake_ << "\n";
     file << "reducedFlashes " << reducedFlashes_ << "\n";
+    file << "firstPersonMotion " << firstPersonMotionMode_ << "\n";
     file << "selectedMode " << static_cast<int>(selectedMode_) << "\n";
     file << "selectedTeamId " << selectedTeamId_ << "\n";
     file << "selectedTeamSize " << selectedTeamSize_ << "\n";
@@ -920,4 +966,29 @@ const char* Game::KeyLabel(int key) const
     }
 
     return "?";
+}
+
+void Game::ApplyShaderPreset(int preset)
+{
+    shaderPreset_ = std::clamp(preset, 0, 2);
+    shaderSettings_ = ShaderSettings {};
+    const bool low = shaderPreset_ == 0;
+    const bool high = shaderPreset_ == 2;
+    shaderSettings_.giQuality = low ? 0 : (high ? 2 : 1);
+    shaderSettings_.localShadows = high;
+    shaderSettings_.skyQuality = low ? 0 : (high ? 2 : 1);
+    shaderSettings_.materialQuality = low ? 0 : (high ? 2 : 1);
+    shaderSettings_.volumetricQuality = high ? 2 : 0;
+    renderScaleIndex_ = low ? 0 : 3;
+    renderScale_ = kRenderScales[renderScaleIndex_];
+    drawDistanceIndex_ = low ? 0 : (high ? 3 : 2);
+    shadowQuality_ = low ? 0 : (high ? 2 : 1);
+    ambientOcclusionQuality_ = low ? 1 : 2;
+    effectsQuality_ = low ? 0 : (high ? 2 : 1);
+    bloomQuality_ = high ? 2 : 0;
+    postProcessing_ = !low;
+    bloomEnabled_ = !low;
+    renderer_.SetWorldRenderDistance(kDrawDistances[drawDistanceIndex_]);
+    renderer_.SetShadowQuality(shadowQuality_);
+    renderer_.SetAmbientOcclusionQuality(ambientOcclusionQuality_);
 }

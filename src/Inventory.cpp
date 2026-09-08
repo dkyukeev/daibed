@@ -247,6 +247,10 @@ const char* ItemShortName(ItemType type)
 
 int ItemMaxStack(ItemType type)
 {
+    if (type == ItemType::LightBlock)
+    {
+        return 16 * 64;
+    }
     if (ItemIsWeapon(type) || ItemIsPickaxe(type))
     {
         return 1;
@@ -541,7 +545,6 @@ void Inventory::AddResource(ResourceType type, int amount)
 {
     const int gained = std::max(0, amount);
     resources_[Index(type)] += gained;
-    AddItemRaw(ItemFromResource(type), gained);
 }
 
 bool Inventory::SpendResource(ResourceType type, int amount)
@@ -553,7 +556,6 @@ bool Inventory::SpendResource(ResourceType type, int amount)
     }
 
     resources_[index] -= amount;
-    SpendItemRaw(ItemFromResource(type), amount);
     return true;
 }
 
@@ -733,7 +735,7 @@ bool Inventory::AddItem(ItemType type, int amount)
     {
         const int gained = std::max(0, amount);
         resources_[Index(*resource)] += gained;
-        return AddItemRaw(type, gained);
+        return gained > 0;
     }
 
     return AddItemRaw(type, amount);
@@ -747,7 +749,6 @@ bool Inventory::AddItemRaw(ItemType type, int amount)
     }
 
     int remaining = amount;
-    const bool resourceItem = ItemIsResource(type);
     auto fillExisting = [type, &remaining](auto& slots)
     {
         for (ItemStack& slot : slots)
@@ -769,20 +770,8 @@ bool Inventory::AddItemRaw(ItemType type, int amount)
         }
     };
 
-    if (resourceItem)
-    {
-        fillExisting(hotbar_);
-        fillEmpty(hotbar_);
-        fillExisting(mainSlots_);
-        fillEmpty(mainSlots_);
-    }
-    else
-    {
-        fillExisting(hotbar_);
-        fillExisting(mainSlots_);
-        fillEmpty(hotbar_);
-        fillEmpty(mainSlots_);
-    }
+    fillExisting(hotbar_);
+    fillEmpty(hotbar_);
 
     return remaining == 0;
 }
@@ -793,10 +782,6 @@ bool Inventory::SpendItem(ItemType type, int amount)
     {
         const int index = Index(*resource);
         if (resources_[index] < amount)
-        {
-            return false;
-        }
-        if (!SpendItemRaw(type, amount))
         {
             return false;
         }
@@ -871,6 +856,10 @@ bool Inventory::SpendSlotItem(int slot, int amount)
 
 int Inventory::CountItem(ItemType type) const
 {
+    if (const std::optional<ResourceType> resource = ItemToResource(type))
+    {
+        return resources_[Index(*resource)];
+    }
     int total = 0;
     for (const ItemStack& slot : hotbar_)
     {

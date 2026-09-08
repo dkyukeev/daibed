@@ -2,6 +2,7 @@ build/
 build-release/
 build-*/
 build-public/
+sdk/
 _CPack_Packages/
 DaiBed-*-windows-x64.zip
 .vs/
@@ -23,6 +24,7 @@ cmake_install.cmake
 *.user
 *.suo
 DaiBed.settings
+steam_appid.txt
 
 # Runtime/generated diagnostics
 automatch_stats.json

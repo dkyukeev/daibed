@@ -489,9 +489,30 @@ PathExecutionUpdate PathExecutor::Update(
             edgeBrakeIssuedThisMovement_ = true;
             ++metricsDelta_.edgeBrakeActions;
         }
+        // Sneak deliberately refuses to step off the current collision
+        // surface. On a lower slab that also refuses a safe half-block drop,
+        // although both voxels are supported. Inspect the next footprint and
+        // cross that small, verified height change at controlled walking speed.
+        bool descendingSurface = false;
+        if ((movement.type == MovementType::Walk || movement.type == MovementType::Sprint)
+            && remaining > 0.05f)
+        {
+            const float probeDistance = std::min(0.65f, remaining);
+            const Vector3 probe {
+                actorPosition.x + (target.x - actorPosition.x) * probeDistance / remaining,
+                actorPosition.y,
+                actorPosition.z + (target.z - actorPosition.z) * probeDistance / remaining };
+            const std::optional<GridPos> nextSupport = world.FindSupport(probe, 1, 0, profile.bodyCenterAboveSupport);
+            if (nextSupport.has_value() && world.IsBodyClear(*nextSupport, profile))
+            {
+                const float drop = actorPosition.y - world.SupportCenter(*nextSupport, profile.bodyCenterAboveSupport).y;
+                descendingSurface = drop > 0.20f && drop <= 0.75f;
+            }
+        }
         MoveToward(command, actorPosition, target,
-            movement.type == MovementType::Sprint && !edgeBrake && !exposedSprint,
-            edgeBrake || precisionWalk || exposedSprint);
+            movement.type == MovementType::Sprint && !edgeBrake && !exposedSprint && !descendingSurface,
+            !descendingSurface && (edgeBrake || precisionWalk || exposedSprint));
+        if (descendingSurface) command.moveForward *= 0.45f;
         // A safe diagonal sprint from the planner carries requiresJump. Keep
         // the hop grounded and cancel it whenever edge braking takes over, so
         // exposed routes still use the conservative walk/sneak behaviour.

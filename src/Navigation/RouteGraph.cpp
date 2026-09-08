@@ -224,8 +224,23 @@ bool RouteGraph::IsAccessible(int nodeIndex, int teamId) const noexcept
     return owner < 0 || owner == teamId;
 }
 
-int RouteGraph::FindNearestNode(GridPos pos, int teamId) const noexcept
+int RouteGraph::FindNearestNode(GridPos pos, int teamId,
+    const std::function<bool(const CreativeRouteNode&)>& canReach) const
 {
+    if (canReach)
+    {
+        std::vector<int> candidates;
+        for (int i = 0; i < static_cast<int>(nodes_.size()); ++i)
+            if (IsAccessible(i, teamId)) candidates.push_back(i);
+        std::sort(candidates.begin(), candidates.end(), [&](int a, int b) {
+            const float da = RouteDistance(pos, nodes_[a].pos);
+            const float db = RouteDistance(pos, nodes_[b].pos);
+            return da != db ? da < db : nodes_[a].id < nodes_[b].id;
+        });
+        for (int candidate : candidates)
+            if (canReach(nodes_[candidate])) return candidate;
+        return -1;
+    }
     int best = -1;
     float bestDistance = std::numeric_limits<float>::max();
     for (int i = 0; i < static_cast<int>(nodes_.size()); ++i)
@@ -249,10 +264,11 @@ RouteCorridor RouteGraph::FindCorridor(
     GridPos goal,
     int teamId,
     const GridPos* recentlyFailedPosition,
-    float failurePenalty) const
+    float failurePenalty,
+    const std::function<bool(const CreativeRouteNode&)>& canReachEntry) const
 {
     RouteCorridor result;
-    const int startNode = FindNearestNode(start, teamId);
+    const int startNode = FindNearestNode(start, teamId, canReachEntry);
     const int goalNode = FindNearestNode(goal, teamId);
     if (startNode < 0 || goalNode < 0) return result;
 
@@ -328,7 +344,9 @@ RouteCorridor RouteGraph::FindCorridor(
         result.segments.push_back(RouteCorridorSegment {
             from, to, found->tag, found->expectedBridgeBlocks });
     }
-    result.cost = distance[static_cast<std::size_t>(goalNode)];
+    result.cost = distance[static_cast<std::size_t>(goalNode)]
+        + RouteDistance(start, nodes_[static_cast<std::size_t>(startNode)].pos)
+        + RouteDistance(nodes_[static_cast<std::size_t>(goalNode)].pos, goal);
     result.signature = 1469598103934665603ull;
     for (int index : result.nodeIndices)
     {

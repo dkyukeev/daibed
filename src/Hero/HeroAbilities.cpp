@@ -2,6 +2,7 @@
 #include "HeroSystem.h"
 #include "RangedCombat.h"
 #include "VecConvert.h"
+#include "VisualTheme.h"
 
 #include "raylib.h"
 
@@ -24,7 +25,7 @@ constexpr float kOrbitaTeleportMaxDistance = 20.0f;
 constexpr float kOrbitaEnemyCoreRestrictionSq = 16.0f;
 constexpr float kOrbitaTeleportDamagePerBlock = 1.65f;
 constexpr int kBromVacuumIronCost = 48;
-constexpr int kBromTurretGoldCost = 12;
+constexpr int kBromKamikazeGoldCost = 12;
 constexpr int kBromVacuumCapacity = 24;
 constexpr float kBromUltimateCooldownSeconds = 70.0f;
 constexpr float kBromUltimateDeviceLifetime = 90.0f;
@@ -130,26 +131,6 @@ Vector3 OffsetAround(Vector3 center, int index, float radius)
     };
 }
 
-Color HeroAccentColor(HeroId id)
-{
-    switch (id)
-    {
-    case HeroId::Radon:
-        return Color { 92, 164, 255, 255 };
-    case HeroId::Orbita:
-        return Color { 255, 96, 82, 255 };
-    case HeroId::Brom:
-        return Color { 96, 202, 118, 255 };
-    case HeroId::Konvoy:
-        return Color { 92, 210, 255, 255 };
-    case HeroId::Likho:
-        return Color { 104, 238, 92, 255 };
-    case HeroId::Svidetel:
-        return Color { 180, 104, 255, 255 };
-    }
-    return WHITE;
-}
-
 std::string FormatTenths(float value)
 {
     const int tenths = static_cast<int>(value * 10.0f + 0.5f);
@@ -223,7 +204,7 @@ void Game::UseHeroAbilityInputs(Player& player)
 // Applies the per-tick action intents of a command (hero abilities) to a
 // player. The single entry point the network smoke and the local input path
 // share. Other actions (attack/break/place/utility) still live in their own
-// command-driven methods — see docs/NETWORK_PREP_PLAN.md.
+// command-driven methods — see docs/MULTIPLAYER_TARGET_ARCHITECTURE.md.
 bool Game::ApplyPlayerActionCommand(Player& player, const PlayerCommand& command)
 {
     const PlayerControlKind controlKind = ControlKindForPlayer(player);
@@ -297,7 +278,7 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
         const HeroAbilityState& state = slot == HeroAbilitySlot::Active1
             ? player.GetHeroState().active1
             : (slot == HeroAbilitySlot::Active2 ? player.GetHeroState().active2 : player.GetHeroState().ultimate);
-        const Color accent = HeroAccentColor(HeroId::Radon);
+        const Color accent = VisualTheme::HeroAccent(HeroId::Radon);
         result.color = accent;
         result.position = player.GetPosition();
         result.direction = player.Forward();
@@ -571,7 +552,7 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
         const HeroAbilityState& state = slot == HeroAbilitySlot::Active1
             ? player.GetHeroState().active1
             : (slot == HeroAbilitySlot::Active2 ? player.GetHeroState().active2 : player.GetHeroState().ultimate);
-        const Color accent = HeroAccentColor(HeroId::Orbita);
+        const Color accent = VisualTheme::HeroAccent(HeroId::Orbita);
         result.color = accent;
         result.position = player.GetPosition();
         result.direction = player.Forward();
@@ -783,7 +764,7 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
         const HeroAbilityState& state = slot == HeroAbilitySlot::Active1
             ? player.GetHeroState().active1
             : (slot == HeroAbilitySlot::Active2 ? player.GetHeroState().active2 : player.GetHeroState().ultimate);
-        const Color accent = HeroAccentColor(HeroId::Brom);
+        const Color accent = VisualTheme::HeroAccent(HeroId::Brom);
         result.color = accent;
         result.position = player.GetPosition();
         result.direction = player.Forward();
@@ -824,19 +805,19 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
                     pickupPos, Vector3 { 0.0f, 0.0f, 1.0f }, accent, 0.18f, 0.18f, WorldEffectKind::Burst, false });
             }
 
-            const int turretCount = std::min(5, player.GetInventory().GetResource(ResourceType::Gold) / kBromTurretGoldCost);
-            if (absorbed == 0 && turretCount == 0)
+            const int droneCount = std::min(5, player.GetInventory().GetResource(ResourceType::Gold) / kBromKamikazeGoldCost);
+            if (absorbed == 0 && droneCount == 0)
             {
-                result.message = "Бром: для Сборки обороны нужны ресурсы рядом или в инвентаре.";
+                result.message = "Бром: для Роя камикадзе нужны ресурсы рядом или в инвентаре.";
                 result.messageSeconds = 2.2f;
                 result.playDeniedSound = true;
                 return result;
             }
 
             int spawned = 0;
-            for (int i = 0; i < turretCount; ++i)
+            for (int i = 0; i < droneCount; ++i)
             {
-                if (!player.GetInventory().SpendResource(ResourceType::Gold, kBromTurretGoldCost))
+                if (!player.GetInventory().SpendResource(ResourceType::Gold, kBromKamikazeGoldCost))
                 {
                     continue;
                 }
@@ -858,7 +839,7 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
                 bromTurretDrones_.push_back(drone);
                 result.worldEffects.push_back(HeroWorldEffectResult {
                     drone.position, Vector3 { 0.0f, 0.0f, 1.0f }, accent, 0.36f, 0.34f, WorldEffectKind::Burst, false });
-                result.floatingTexts.push_back(HeroFloatingTextResult { "временная турель", drone.position, accent });
+                result.floatingTexts.push_back(HeroFloatingTextResult { "временный дрон-камикадзе", drone.position, accent });
                 ++spawned;
             }
 
@@ -874,11 +855,11 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
             player.StartHeroAbilityCooldown(HeroAbilitySlot::Ultimate, kBromUltimateCooldownSeconds, kBromUltimateDeviceLifetime);
             result.worldEffects.push_back(HeroWorldEffectResult {
                 player.GetPosition(), player.Forward(), accent, 2.2f, 0.65f, WorldEffectKind::Ring, true });
-            result.message = "Бром запустил Сборку обороны: устройств "
+            result.message = "Бром запустил Рой камикадзе: дронов "
                 + std::to_string(spawned) + ", время 1.5 минуты.";
             result.messageSeconds = 3.0f;
             result.eventMessages.push_back(HeroEventMessageResult {
-                "Ульта Брома собрала защиту из ресурсов. Поглощено рядом: " + std::to_string(absorbed) + ".",
+                "Ульта Брома собрала ударный рой из ресурсов. Поглощено рядом: " + std::to_string(absorbed) + ".",
                 accent,
                 3.2f });
             result.success = true;
@@ -942,14 +923,14 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
                 }));
             if (activeCount >= 1)
             {
-                result.message = "Бром: одновременно может работать только один дрон-турель.";
+                result.message = "Бром: одновременно может работать только один дрон-камикадзе.";
                 result.messageSeconds = 2.0f;
                 result.playDeniedSound = true;
                 return result;
             }
-            if (!player.GetInventory().SpendResource(ResourceType::Gold, kBromTurretGoldCost))
+            if (!player.GetInventory().SpendResource(ResourceType::Gold, kBromKamikazeGoldCost))
             {
-                result.message = "Бром: для дрона-турели нужно 12 золота.";
+                result.message = "Бром: для дрона-камикадзе нужно 12 золота.";
                 result.messageSeconds = 2.0f;
                 result.playDeniedSound = true;
                 return result;
@@ -970,11 +951,11 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
             SetHeroAnimation(player, HeroAnimationState::Ability2, 0.34f);
             result.worldEffects.push_back(HeroWorldEffectResult {
                 drone.position, Vector3 { 0.0f, 0.0f, 1.0f }, accent, 0.30f, 0.34f, WorldEffectKind::Burst, false });
-            result.floatingTexts.push_back(HeroFloatingTextResult { "дрон-турель", drone.position, accent });
-            result.message = "Бром собрал дрона-турель за 12 золота.";
+            result.floatingTexts.push_back(HeroFloatingTextResult { "дрон-камикадзе", drone.position, accent });
+            result.message = "Бром собрал дрона-камикадзе за 12 золота.";
             result.messageSeconds = 2.2f;
             result.eventMessages.push_back(HeroEventMessageResult {
-                "Дрон-турель Брома стреляет только по игрокам и не атакует Кор.", accent, 2.8f });
+                "Дрон-камикадзе Брома преследует врага и взрывает непрочные блоки.", accent, 2.8f });
         }
 
         player.StartHeroAbilityCooldown(slot, ability.cooldownSeconds, ability.durationSeconds);
@@ -1009,7 +990,7 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
         {
             return result;
         }
-        const Color accent = HeroAccentColor(HeroId::Konvoy);
+        const Color accent = VisualTheme::HeroAccent(HeroId::Konvoy);
         result.color = accent;
         result.position = player.GetPosition();
         result.direction = player.Forward();
@@ -1191,7 +1172,7 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
         const HeroAbilityDefinition& ability = slot == HeroAbilitySlot::Active1
             ? hero.active1
             : (slot == HeroAbilitySlot::Active2 ? hero.active2 : hero.ultimate);
-        const Color accent = HeroAccentColor(HeroId::Svidetel);
+        const Color accent = VisualTheme::HeroAccent(HeroId::Svidetel);
         result.color = accent;
         result.position = player.GetPosition();
         result.direction = player.Forward();
@@ -1345,7 +1326,7 @@ Game::HeroAbilityActionResult Game::ApplyHeroAbilityAction(Player& player, HeroA
     const HeroAbilityDefinition& ability = slot == HeroAbilitySlot::Active1
         ? hero.active1
         : (slot == HeroAbilitySlot::Active2 ? hero.active2 : hero.ultimate);
-    result.color = HeroAccentColor(HeroId::Likho);
+    result.color = VisualTheme::HeroAccent(HeroId::Likho);
     result.position = player.GetPosition();
     result.direction = player.Forward();
 
@@ -1463,14 +1444,7 @@ void Game::PresentHeroAbilityResult(const HeroAbilityActionResult& result)
     }
     if (result.hasWorldEffect)
     {
-        if (result.directedWorldEffect)
-        {
-            AddWorldEffect(result.position, result.direction, result.color, result.radius, result.seconds, result.effectKind);
-        }
-        else
-        {
-            AddWorldEffect(result.position, result.color, result.radius, result.seconds);
-        }
+        EmitAbilityParticles(result.position, result.direction, result.color, result.radius, result.effectKind);
     }
     if (result.hasFloatingText)
     {
@@ -1478,14 +1452,7 @@ void Game::PresentHeroAbilityResult(const HeroAbilityActionResult& result)
     }
     for (const HeroWorldEffectResult& effect : result.worldEffects)
     {
-        if (effect.directed)
-        {
-            AddWorldEffect(effect.position, effect.direction, effect.color, effect.radius, effect.seconds, effect.kind);
-        }
-        else
-        {
-            AddWorldEffect(effect.position, effect.color, effect.radius, effect.seconds);
-        }
+        EmitAbilityParticles(effect.position, effect.direction, effect.color, effect.radius, effect.kind);
     }
     for (const HeroFloatingTextResult& text : result.floatingTexts)
     {
@@ -1567,9 +1534,9 @@ bool Game::TryRadonCoreSacrifice(EnergyCore& core)
         player.KillWithRespawn(kRadonSacrificeRespawnSeconds);
         const Vector3 corePosition = world_.GridToWorld(core.GetBlockPosition());
         EmitRadonCoreWave(corePosition, player.GetTeamId(), player.GetId(), 7.2f, 0.0f, 9.4f);
-        AddWorldEffect(corePosition, player.Forward(), HeroAccentColor(HeroId::Radon), 1.8f, 1.05f, WorldEffectKind::Sacrifice);
-        AddEventMessage("Радон принял разрушение Кора на себя. Кор оставлен на 20 HP.", HeroAccentColor(HeroId::Radon), 5.0f);
-        AddKillFeed("Радон спас Кор ценой жизни", HeroAccentColor(HeroId::Radon), 6.0f);
+        EmitAbilityParticles(corePosition, player.Forward(), VisualTheme::HeroAccent(HeroId::Radon), 1.8f, WorldEffectKind::Sacrifice);
+        AddEventMessage("Радон принял разрушение Кора на себя. Кор оставлен на 20 HP.", VisualTheme::HeroAccent(HeroId::Radon), 5.0f);
+        AddKillFeed("Радон спас Кор ценой жизни", VisualTheme::HeroAccent(HeroId::Radon), 6.0f);
         return true;
     }
     return false;
@@ -1599,10 +1566,10 @@ void Game::EmitRadonCoreWave(Vector3 position, int ownerTeamId, int ownerPlayerI
         const Vector3 away = Normalize2D(Vector3 { target.GetPosition().x - position.x, 0.0f, target.GetPosition().z - position.z });
         const float scaledForce = force * (0.55f + fraction * 0.45f) * BiomeKnockbackMultiplier();
         target.ApplyKnockback(Vector3 { away.x * scaledForce, 1.05f + fraction * 0.75f, away.z * scaledForce });
-        AddFloatingText(damage > 0.0f ? "нестабильно" : "волна", target.GetPosition(), HeroAccentColor(HeroId::Radon));
+        AddFloatingText(damage > 0.0f ? "нестабильно" : "волна", target.GetPosition(), VisualTheme::HeroAccent(HeroId::Radon));
     }
 
-    AddWorldEffect(position, Vector3 { 0.0f, 0.0f, 1.0f }, HeroAccentColor(HeroId::Radon), radius, 0.70f, WorldEffectKind::Ring);
+    EmitAbilityParticles(position, Vector3 { 0.0f, 0.0f, 1.0f }, VisualTheme::HeroAccent(HeroId::Radon), radius, WorldEffectKind::Ring);
     AddCameraShake(0.28f, 0.28f);
 }
 
@@ -2069,7 +2036,7 @@ void Game::ApplyBromBlockBreakPassive(Player& player, const Block& block, Vector
 
     player.GetInventory().AddResource(reward, amount);
     player.AddHeroUltimateCharge(BromUltimateChargeForResource(reward, amount));
-    const Color accent = HeroAccentColor(HeroId::Brom);
+    const Color accent = VisualTheme::HeroAccent(HeroId::Brom);
     AddFloatingText("+трофей " + std::to_string(amount) + " " + ToString(reward), position, accent);
     if (IsLocallyPredicted(player.GetControlKind()))
     {

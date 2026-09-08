@@ -7,7 +7,7 @@
 // "host" server the GUI Host tab starts in the background. windows.h clashes
 // with raylib (Rectangle/DrawText/CloseWindow macros), so every platform header
 // lives in ServerProcess.cpp and callers only see this small abstraction.
-// See docs/NETWORK_PREP_PLAN.md.
+// See docs/P2P_IMPLEMENTATION.md.
 
 struct ServerProcessHandle
 {

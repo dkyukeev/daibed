@@ -194,6 +194,17 @@ Vector3 World::GridToWorld(const GridPos& pos) const
     };
 }
 
+std::optional<float> World::BlockCollisionTop(const GridPos& pos) const
+{
+    if (!IsSolid(pos)) return std::nullopt;
+    std::array<LocalCollisionBox, 2> boxes {};
+    const int count = CollisionBoxesFor(*GetBlock(pos), boxes);
+    float top = -std::numeric_limits<float>::infinity();
+    for (int index = 0; index < count; ++index)
+        top = std::max(top, static_cast<float>(pos.y) + boxes[index].max.y);
+    return count > 0 ? std::optional<float>(top) : std::nullopt;
+}
+
 bool World::CollidesWithAABB(Vector3 center, Vector3 halfExtents) const
 {
     const int minX = static_cast<int>(std::floor(center.x - halfExtents.x - 0.5f));

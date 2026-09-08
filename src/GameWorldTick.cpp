@@ -4,6 +4,7 @@
 #include "Navigation/NavigationWorldView.h"
 #include "Navigation/VoxelPathfinder.h"
 #include "VecConvert.h"
+#include "VisualTheme.h"
 
 #include "raylib.h"
 
@@ -37,7 +38,11 @@ constexpr float kOrbitaMomentumSpeed = 7.2f;
 constexpr int kBromVacuumCapacity = 24;
 constexpr float kBromVacuumStepHeight = 1.08f;
 constexpr float kBromVacuumDropHeight = 1.15f;
-constexpr float kBromTurretAttackRange = 16.0f;
+constexpr float kBromKamikazeAwarenessRange = 34.0f;
+constexpr float kBromKamikazeSpeed = 9.2f;
+constexpr float kBromKamikazeImpactRange = 1.15f;
+constexpr float kBromKamikazeExplosionRadius = 2.35f;
+constexpr int kBromKamikazeDamage = 34;
 constexpr float kKonvoyHandcuffRadius = 6.0f;
 constexpr float kKonvoyDomeVisualRadius = 6.0f;
 constexpr Vector3 kPlayerCollisionHalfExtents { 0.36f, 0.95f, 0.36f };
@@ -88,26 +93,6 @@ const char* ProjectileImpactLabel(ProjectileKind kind, bool fireZone)
         return fireZone ? "коктейль Молотова" : "снаряд";
     }
     return "снаряд";
-}
-
-Color HeroAccentColor(HeroId id)
-{
-    switch (id)
-    {
-    case HeroId::Radon:
-        return Color { 92, 164, 255, 255 };
-    case HeroId::Orbita:
-        return Color { 255, 96, 82, 255 };
-    case HeroId::Brom:
-        return Color { 96, 202, 118, 255 };
-    case HeroId::Konvoy:
-        return Color { 92, 210, 255, 255 };
-    case HeroId::Likho:
-        return Color { 104, 238, 92, 255 };
-    case HeroId::Svidetel:
-        return Color { 180, 104, 255, 255 };
-    }
-    return WHITE;
 }
 
 float PointSegmentDistanceSquared(Vector3 point, Vector3 start, Vector3 end)
@@ -389,7 +374,12 @@ void Game::UpdatePickups(float dt)
                 }
                 pickup.collected = true;
                 const bool localCamera = HasLocalCamera(ControlKindForPlayer(player));
-                AddWorldEffect(ToVector3(pickup.position), localCamera ? Color { 255, 245, 170, 255 } : Color { 180, 210, 255, 255 }, 0.22f, 0.28f);
+                const Vector3 pickupPosition = ToVector3(pickup.position);
+                EmitPickupParticles(
+                    pickupPosition,
+                    PickupTargetFor(player),
+                    VisualTheme::ResourcePickup(pickup.type),
+                    pickup.amount);
                 AddFloatingText("+" + std::to_string(pickup.amount) + " " + ToString(pickup.type), ToVector3(pickup.position), localCamera ? Color { 255, 236, 135, 255 } : Fade(WHITE, 0.85f));
                 if (IsLocallyPredicted(ControlKindForPlayer(player)))
                 {
@@ -506,7 +496,14 @@ void Game::UpdateDroppedItems(float dt)
                         player.AddHeroUltimateCharge(BromUltimateChargeForResource(*resource, dropped.stack.count));
                     }
                     dropped.collected = true;
-                    AddWorldEffect(ToVector3(dropped.position), Color { 255, 245, 170, 255 }, 0.18f, 0.22f);
+                    const Color pickupColor = resource.has_value()
+                        ? VisualTheme::ResourcePickup(*resource)
+                        : VisualTheme::Palette::Objective;
+                    EmitPickupParticles(
+                        ToVector3(dropped.position),
+                        PickupTargetFor(player),
+                        pickupColor,
+                        dropped.stack.count);
                     if (HasLocalCamera(ControlKindForPlayer(player)))
                     {
                         SetMessage(std::string("Подобрано: ") + ItemDisplayName(dropped.stack.type) + ".");
@@ -572,7 +569,9 @@ void Game::UpdateBlockHazards(float dt)
         {
             const int damage = block->type == BlockType::LavaBlock ? 12 : 7;
             player.Damage(damage);
-            AddWorldEffect(player.GetPosition(), block->type == BlockType::LavaBlock ? Color { 255, 88, 42, 255 } : Color { 255, 118, 118, 255 }, 0.20f, 0.20f);
+            EmitImpactParticles(player.GetPosition(), Vector3 { 0.0f, 1.0f, 0.0f },
+                block->type == BlockType::LavaBlock ? Color { 255, 88, 42, 255 } : Color { 255, 118, 118, 255 },
+                block->type == BlockType::LavaBlock ? ParticleMaterial::Energy : ParticleMaterial::Metal, 0.65f);
             AddFloatingText(block->type == BlockType::LavaBlock ? "burn" : "spike", player.GetPosition(), block->type == BlockType::LavaBlock ? Color { 255, 128, 72, 255 } : Color { 255, 118, 118, 255 });
             if (HasLocalCamera(ControlKindForPlayer(player)))
             {
@@ -586,7 +585,7 @@ void Game::UpdateBlockHazards(float dt)
             if (!inBaseSafeZone)
             {
                 player.Damage(5);
-                AddWorldEffect(player.GetPosition(), Color { 255, 88, 42, 255 }, 0.18f, 0.18f);
+                EmitHazardParticles(player.GetPosition(), Color { 255, 88, 42, 255 }, 0.42f);
                 AddFloatingText("heat", player.GetPosition(), Color { 255, 128, 72, 255 });
                 if (HasLocalCamera(ControlKindForPlayer(player)))
                 {
@@ -623,7 +622,9 @@ void Game::UpdateExplosives(float dt)
         const Vector3 pos = explosive.position;
         if (explosive.timer > 0.0f)
         {
-            AddWorldEffect(pos, explosive.timer < 0.8f ? Color { 255, 118, 70, 255 } : Color { 255, 224, 122, 255 }, 0.10f, 0.12f);
+            EmitDeviceParticles(pos,
+                explosive.timer < 0.8f ? Color { 255, 118, 70, 255 } : Color { 255, 224, 122, 255 },
+                explosive.timer < 0.8f ? 0.72f : 0.35f, false);
             continue;
         }
 
@@ -644,6 +645,15 @@ void Game::UpdateExplosives(float dt)
 
 void Game::UpdateProjectiles(float dt)
 {
+    for (WoolBreachMark& mark : woolBreachMarks_)
+    {
+        mark.lifetime -= dt;
+    }
+    woolBreachMarks_.erase(
+        std::remove_if(woolBreachMarks_.begin(), woolBreachMarks_.end(),
+            [](const WoolBreachMark& mark) { return mark.lifetime <= 0.0f; }),
+        woolBreachMarks_.end());
+
     for (EnergyProjectile& projectile : projectiles_)
     {
         projectile.lifetime -= dt;
@@ -688,6 +698,49 @@ void Game::UpdateProjectiles(float dt)
             if (!world_.IsAir(sampleBlock))
             {
                 projectile.position = sample;
+                const Block* impactedBlock = world_.GetBlock(sampleBlock);
+                const BlockType impactedBlockType = impactedBlock != nullptr
+                    ? impactedBlock->type
+                    : BlockType::StoneBlock;
+                bool presentedBlockImpact = false;
+                if (projectile.kind == ProjectileKind::Arrow
+                    && projectile.arrowVariant == ArrowVariant::Breacher
+                    && impactedBlock != nullptr
+                    && impactedBlock->type == BlockType::WoolBlock)
+                {
+                    const auto existing = std::find_if(
+                        woolBreachMarks_.begin(), woolBreachMarks_.end(),
+                        [&projectile, &sampleBlock](const WoolBreachMark& mark)
+                        {
+                            return mark.position == sampleBlock
+                                && mark.ownerTeamId == projectile.ownerTeamId;
+                    });
+                    if (existing != woolBreachMarks_.end())
+                    {
+                        const bool brokeWool = BreakWorldBlock(sampleBlock, projectile.ownerTeamId,
+                            BlockDeltaReason::Projectile, projectile.ownerId);
+                        woolBreachMarks_.erase(existing);
+                        AddFloatingText("ШЕРСТЬ ПРОБИТА", sample, Color { 255, 196, 92, 255 });
+                        if (brokeWool)
+                        {
+                            EmitBlockBreakParticles(
+                                sample, projectile.velocity, Color { 255, 202, 92, 255 }, impactedBlockType);
+                        }
+                    }
+                    else
+                    {
+                        woolBreachMarks_.push_back(WoolBreachMark {
+                            sampleBlock, projectile.ownerTeamId, 60.0f });
+                        AddFloatingText("НАДРЕЗ 1/2", sample, Color { 255, 226, 126, 255 });
+                        EmitImpactParticles(
+                            sample,
+                            projectile.velocity,
+                            Color { 255, 202, 92, 255 },
+                            ParticleMaterialFromBlock(impactedBlockType),
+                            1.0f);
+                    }
+                    presentedBlockImpact = true;
+                }
                 if (projectile.explosionRadius > 0.0f)
                 {
                     const ExplosionBlockPolicy policy = projectile.kind == ProjectileKind::Fireball
@@ -696,6 +749,15 @@ void Game::UpdateProjectiles(float dt)
                     DetonateAt(sample, projectile.ownerTeamId, projectile.ownerId,
                         projectile.explosionRadius, projectile.damage, projectile.fireZone,
                         projectile.blueFire, policy);
+                }
+                else if (!presentedBlockImpact && impactedBlock != nullptr)
+                {
+                    EmitImpactParticles(
+                        sample,
+                        projectile.velocity,
+                        VisualTheme::SurfaceDust(impactedBlockType),
+                        ParticleMaterialFromBlock(impactedBlockType),
+                        projectile.critical ? 1.18f : 0.85f);
                 }
                 consumed = true;
             }
@@ -732,6 +794,8 @@ void Game::UpdateProjectiles(float dt)
                         projectile.kind == ProjectileKind::Arrow ? "стрелой"
                         : (projectile.kind == ProjectileKind::Blaster ? "болтом бластера"
                             : (projectile.fireZone ? "коктейлем Молотова" : "снарядом")));
+                    const bool targetShielded = player.HasShield();
+                    const bool targetArmored = player.GetInventory().GetArmorLevel() > 0;
                     player.Damage(projectile.damage);
                     const bool projectileKilledTarget = player.GetHealth() <= 0;
                     for (Player& owner : players_)
@@ -782,9 +846,20 @@ void Game::UpdateProjectiles(float dt)
                     }
                     else
                     {
-                        AddWorldEffect(projectile.position, projectile.kind == ProjectileKind::Blaster
-                            ? Color { 98, 245, 255, 255 }
-                            : Color { 112, 232, 255, 255 }, 0.26f, 0.25f);
+                        EmitImpactParticles(
+                            projectile.position,
+                            projectile.velocity,
+                            targetShielded
+                                ? VisualTheme::Palette::Shield
+                                : (targetArmored
+                                    ? Color { 196, 210, 224, 255 }
+                                    : (projectile.kind == ProjectileKind::Blaster
+                                        ? Color { 98, 245, 255, 255 }
+                                        : Color { 255, 224, 122, 255 })),
+                            targetShielded
+                                ? ParticleMaterial::Energy
+                                : (targetArmored ? ParticleMaterial::Metal : ParticleMaterial::Character),
+                            projectile.critical ? 1.25f : 1.0f);
                         audio_.PlayHit();
                     }
                     // Owner-private replicated hit feedback for BOTH shooter and
@@ -821,15 +896,13 @@ void Game::UpdateProjectiles(float dt)
         }
         else
         {
-            AddWorldEffect(
+            EmitProjectileCueParticles(
                 projectile.position,
                 projectile.velocity,
                 projectile.fireZone
                     ? (projectile.blueFire ? Color { 92, 164, 255, 255 } : Color { 255, 118, 70, 255 })
                     : (projectile.kind == ProjectileKind::Blaster ? Color { 98, 245, 255, 255 } : Color { 112, 232, 255, 255 }),
-                projectile.radius,
-                0.12f,
-                projectile.fireZone ? WorldEffectKind::Trail : WorldEffectKind::Burst);
+                projectile.kind == ProjectileKind::Blaster ? 0.72f : 0.48f);
         }
     }
 
@@ -890,12 +963,19 @@ void Game::UpdateHazardZones(float dt)
         }
         if (burn.timer <= 0.0f)
         {
-            BreakWorldBlock(burn.position, burn.ownerTeamId, BlockDeltaReason::FireBurn);
-            AddWorldEffect(world_.GridToWorld(burn.position), Color { 255, 118, 70, 255 }, 0.24f, 0.30f);
+            const Vector3 breakPosition = world_.GridToWorld(burn.position);
+            if (BreakWorldBlock(burn.position, burn.ownerTeamId, BlockDeltaReason::FireBurn))
+            {
+                EmitBlockBreakParticles(
+                    breakPosition,
+                    Vector3 { 0.0f, 0.7f, 0.0f },
+                    VisualTheme::SurfaceDust(burn.blockType),
+                    burn.blockType);
+            }
         }
         else
         {
-            AddWorldEffect(world_.GridToWorld(burn.position), Color { 255, 118, 70, 255 }, 0.10f, 0.12f);
+            EmitHazardParticles(world_.GridToWorld(burn.position), Color { 255, 118, 70, 255 }, 0.30f);
         }
     }
     molotovBlockBurns_.erase(
@@ -908,12 +988,12 @@ void Game::UpdateHazardZones(float dt)
         zone.lifetime -= dt;
         zone.tickTimer -= dt;
         const Color fireColor = zone.blueFire ? Color { 92, 164, 255, 255 } : Color { 255, 88, 42, 255 };
-        AddWorldEffect(zone.position, Vector3 { 0.0f, 0.0f, 1.0f }, fireColor, zone.radius, 0.18f, WorldEffectKind::FireZone);
         if (zone.tickTimer > 0.0f)
         {
             continue;
         }
         zone.tickTimer = 0.55f;
+        EmitHazardParticles(zone.position, fireColor, zone.radius);
 
         for (Player& player : players_)
         {
@@ -941,7 +1021,8 @@ void Game::UpdateHazardZones(float dt)
                     burn->lifetime = 2.2f;
                     burn->blueFire = zone.blueFire;
                 }
-                AddWorldEffect(player.GetPosition(), zone.blueFire ? Color { 92, 164, 255, 255 } : Color { 255, 118, 70, 255 }, 0.22f, 0.18f);
+                EmitHazardParticles(player.GetPosition(),
+                    zone.blueFire ? Color { 92, 164, 255, 255 } : Color { 255, 118, 70, 255 }, 0.48f);
             }
         }
     }
@@ -1005,7 +1086,7 @@ void Game::UpdateHeroPassives(float dt)
                 heroState.orbitaPulseTimer = std::max(heroState.orbitaPulseTimer, 0.85f);
                 if (!wasCharged && HasLocalCamera(ControlKindForPlayer(player)))
                 {
-                    AddFloatingText("разгон", Vector3 { player.GetPosition().x, player.GetPosition().y + 1.25f, player.GetPosition().z }, HeroAccentColor(HeroId::Orbita));
+                    AddFloatingText("разгон", Vector3 { player.GetPosition().x, player.GetPosition().y + 1.25f, player.GetPosition().z }, VisualTheme::HeroAccent(HeroId::Orbita));
                 }
             }
 
@@ -1045,7 +1126,7 @@ void Game::UpdateHeroPassives(float dt)
                         PlayHeroVoiceForPlayer(player, HeroVoiceEvent::UltimateRevealed, HeroVoiceEvent::Ultimate);
                         if (HasLocalCamera(ControlKindForPlayer(player)))
                         {
-                            AddEventMessage("Кор раскрыл маскировку Лихо", HeroAccentColor(HeroId::Likho), 2.0f);
+                            AddEventMessage("Кор раскрыл маскировку Лихо", VisualTheme::HeroAccent(HeroId::Likho), 2.0f);
                         }
                     }
                     break;
@@ -1057,7 +1138,7 @@ void Game::UpdateHeroPassives(float dt)
                 player.AddHeroUltimateCharge(8.0f);
                 if (HasLocalCamera(ControlKindForPlayer(player)))
                 {
-                    AddFloatingText("побег", player.GetPosition(), HeroAccentColor(HeroId::Likho));
+                    AddFloatingText("побег", player.GetPosition(), VisualTheme::HeroAccent(HeroId::Likho));
                 }
             }
             heroState.likhoInsideEnemyBase = insideEnemyBase;
@@ -1137,8 +1218,14 @@ void Game::UpdateHeroTemporaryBlocks(float dt)
         if (temporary.timer <= 0.0f)
         {
             const Vector3 center = world_.GridToWorld(temporary.position);
-            RemoveWorldBlock(temporary.position, BlockDeltaReason::TemporaryExpire);
-            AddWorldEffect(center, HeroAccentColor(HeroId::Orbita), 0.18f, 0.22f);
+            if (RemoveWorldBlock(temporary.position, BlockDeltaReason::TemporaryExpire))
+            {
+                EmitBlockBreakParticles(
+                    center,
+                    Vector3 { 0.0f, 0.7f, 0.0f },
+                    VisualTheme::HeroAccent(HeroId::Orbita),
+                    BlockType::EnergyGlassBlock);
+            }
         }
     }
 
@@ -1173,7 +1260,8 @@ bool Game::DamageHeroDeviceAlongSegment(
     };
     const auto hitFeedback = [this](Vector3 position, HeroId hero)
     {
-        AddWorldEffect(position, HeroAccentColor(hero), 0.28f, 0.24f);
+        EmitImpactParticles(position, Vector3 { 0.0f, 0.35f, 1.0f },
+            VisualTheme::HeroAccent(hero), ParticleMaterial::Metal, 0.85f);
         audio_.PlayHit();
     };
 
@@ -1240,7 +1328,7 @@ bool Game::DamageHeroDeviceAlongSegment(
 
 void Game::UpdateBromDevices(float dt)
 {
-    const Color bromColor = HeroAccentColor(HeroId::Brom);
+    const Color bromColor = VisualTheme::HeroAccent(HeroId::Brom);
     const auto horizontalDistanceSq = [](Vector3 a, Vector3 b)
     {
         const float dx = a.x - b.x;
@@ -1426,7 +1514,7 @@ void Game::UpdateBromDevices(float dt)
             bot.lifetime -= dt;
             if (bot.lifetime <= 0.0f)
             {
-                AddWorldEffect(bot.position, bromColor, 0.24f, 0.24f);
+                EmitDeviceParticles(bot.position, bromColor, 1.0f, false);
                 continue;
             }
         }
@@ -1435,7 +1523,7 @@ void Game::UpdateBromDevices(float dt)
         if (bot.pulseTimer <= 0.0f)
         {
             bot.pulseTimer = 0.45f;
-            AddWorldEffect(bot.position, bromColor, 0.12f, 0.16f);
+            EmitDeviceParticles(bot.position, bromColor, 0.32f, false);
         }
 
         const int cargoUnits = BromCargoUnits(bot.cargo);
@@ -1482,7 +1570,7 @@ void Game::UpdateBromDevices(float dt)
                         }
                     }
                     AddFloatingText("командный сундук +" + std::to_string(delivered), basePosition, bromColor);
-                    AddWorldEffect(basePosition, Vector3 { 0.0f, 0.0f, 1.0f }, bromColor, 0.82f, 0.42f, WorldEffectKind::CorePulse);
+                    EmitDeviceParticles(basePosition, bromColor, 1.15f, true);
                     AddEventMessage("Пылесос Брома сложил +" + std::to_string(delivered) + " в командный сундук на базе.", bromColor, 2.6f);
                     audio_.PlayPickup();
                 }
@@ -1580,7 +1668,13 @@ void Game::UpdateBromDevices(float dt)
         {
             bot.cargo[ResourceIndex(bestPickup->type)] += bestPickup->amount;
             AddFloatingText("пылесос +" + std::to_string(bestPickup->amount), ToVector3(bestPickup->position), bromColor);
-            AddWorldEffect(ToVector3(bestPickup->position), bromColor, 0.18f, 0.18f);
+            Vector3 vacuumTarget = bot.position;
+            vacuumTarget.y += 0.42f;
+            EmitPickupParticles(
+                ToVector3(bestPickup->position),
+                vacuumTarget,
+                bromColor,
+                bestPickup->amount);
             bestPickup->collected = true;
             bot.lockedPickupIndex = -1;
             bot.targetLockTimer = 0.0f;
@@ -1610,7 +1704,7 @@ void Game::UpdateBromDevices(float dt)
             drone.lifetime -= dt;
             if (drone.lifetime <= 0.0f)
             {
-                AddWorldEffect(drone.position, bromColor, 0.28f, 0.24f);
+                EmitDeviceParticles(drone.position, bromColor, 1.15f, false);
                 continue;
             }
         }
@@ -1623,11 +1717,10 @@ void Game::UpdateBromDevices(float dt)
         if (drone.pulseTimer <= 0.0f)
         {
             drone.pulseTimer = 0.38f;
-            AddWorldEffect(drone.position, bromColor, 0.16f, 0.14f);
+            EmitDeviceParticles(drone.position, bromColor, 0.38f, false);
         }
         Player* target = nullptr;
         float bestScore = std::numeric_limits<float>::max();
-        constexpr float awarenessRange = 34.0f;
         const Team* ownerTeam = FindTeam(drone.ownerTeamId);
         const Vector3 defensePoint = ownerTeam != nullptr
             ? world_.GridToWorld(ownerTeam->coreBlock)
@@ -1641,7 +1734,7 @@ void Game::UpdateBromDevices(float dt)
 
             const Vector3 aimPoint { player.GetPosition().x, player.GetPosition().y + 0.65f, player.GetPosition().z };
             const float distanceSq = DistanceSquared(drone.position, aimPoint);
-            if (distanceSq > awarenessRange * awarenessRange)
+            if (distanceSq > kBromKamikazeAwarenessRange * kBromKamikazeAwarenessRange)
             {
                 continue;
             }
@@ -1705,127 +1798,46 @@ void Game::UpdateBromDevices(float dt)
             targetPoint.z - drone.position.z
         };
         const float targetDistance = Length(toTarget);
-        const std::optional<RaycastHit> currentWall = world_.Raycast(drone.position, toTarget, targetDistance);
-        const bool hasLineOfSight = !currentWall.has_value() || currentWall->distance >= targetDistance - 0.35f;
-
-        Vector3 tacticalPosition = drone.position;
-        bool shouldMove = false;
-        if (!hasLineOfSight || targetDistance > 13.5f)
+        const std::optional<RaycastHit> kamikazeWall = world_.Raycast(
+            drone.position, toTarget, targetDistance);
+        const bool fragileWallImpact = kamikazeWall.has_value()
+            && kamikazeWall->distance <= kBromKamikazeImpactRange
+            && (kamikazeWall->blockData.type == BlockType::WoolBlock
+                || kamikazeWall->blockData.type == BlockType::WoodBlock
+                || kamikazeWall->blockData.type == BlockType::TeamBlock);
+        if (targetDistance <= kBromKamikazeImpactRange || fragileWallImpact)
         {
-            float bestPositionScore = std::numeric_limits<float>::max();
-            for (int index = 0; index < 12; ++index)
-            {
-                const float angle = static_cast<float>(index) * 0.5235987756f
-                    + static_cast<float>(drone.ownerPlayerId) * 0.31f;
-                const Vector3 candidate {
-                    targetPoint.x + std::cos(angle) * 9.5f,
-                    targetPoint.y + 1.8f + static_cast<float>(index % 3) * 0.35f,
-                    targetPoint.z + std::sin(angle) * 9.5f
-                };
-                if (world_.CollidesWithAABB(candidate, Vector3 { 0.32f, 0.28f, 0.32f }))
-                {
-                    continue;
-                }
-                const Vector3 candidateRay {
-                    targetPoint.x - candidate.x, targetPoint.y - candidate.y, targetPoint.z - candidate.z };
-                const float candidateDistance = Length(candidateRay);
-                const std::optional<RaycastHit> candidateWall = world_.Raycast(candidate, candidateRay, candidateDistance);
-                if (candidateWall.has_value() && candidateWall->distance < candidateDistance - 0.35f)
-                {
-                    continue;
-                }
-                const float score = DistanceSquared(drone.position, candidate)
-                    + DistanceSquared(candidate, defensePoint) * 0.04f;
-                if (score < bestPositionScore)
-                {
-                    bestPositionScore = score;
-                    tacticalPosition = candidate;
-                    shouldMove = true;
-                }
-            }
-        }
-        else if (targetDistance < 5.5f)
-        {
-            const Vector3 away = Normalize(Vector3 {
-                drone.position.x - targetPoint.x, 0.25f, drone.position.z - targetPoint.z });
-            tacticalPosition = Vector3 {
-                drone.position.x + away.x * 4.0f,
-                drone.position.y + 0.7f,
-                drone.position.z + away.z * 4.0f
-            };
-            shouldMove = true;
-        }
-        else
-        {
-            const Vector3 orbitSide = Normalize(Vector3 { -toTarget.z, 0.0f, toTarget.x });
-            tacticalPosition = Vector3 {
-                drone.position.x + orbitSide.x * 1.8f,
-                targetPoint.y + 1.7f,
-                drone.position.z + orbitSide.z * 1.8f
-            };
-            shouldMove = true;
-        }
-        if (shouldMove)
-        {
-            moveFlyingTowards(drone, tacticalPosition, 6.4f);
-        }
-
-        const Vector3 updatedRay {
-            targetPoint.x - drone.position.x,
-            targetPoint.y - drone.position.y,
-            targetPoint.z - drone.position.z
-        };
-        const float updatedDistance = Length(updatedRay);
-        const std::optional<RaycastHit> updatedWall = world_.Raycast(drone.position, updatedRay, updatedDistance);
-        if (drone.fireCooldown > 0.0f
-            || updatedDistance > kBromTurretAttackRange
-            || (updatedWall.has_value() && updatedWall->distance < updatedDistance - 0.35f))
-        {
+            const Vector3 impact = fragileWallImpact
+                ? world_.GridToWorld(kamikazeWall->block)
+                : targetPoint;
+            drone.lastShotTarget = targetPoint;
+            drone.shotFlashTimer = 0.28f;
+            DetonateAt(impact, drone.ownerTeamId, drone.ownerPlayerId,
+                kBromKamikazeExplosionRadius, kBromKamikazeDamage,
+                false, false, ExplosionBlockPolicy::PreserveFortified);
+            AddFloatingText("ДРОН-КАМИКАДЗЕ", impact, bromColor);
+            drone.health = 0;
             continue;
         }
 
-        const float projectileTravelTime = updatedDistance / kBlasterTuning.baseSpeed;
-        const Vector3 targetVelocity = target->GetVelocity();
-        const Vector3 predictedTarget {
-            targetPoint.x + targetVelocity.x * projectileTravelTime,
-            targetPoint.y + targetVelocity.y * projectileTravelTime,
-            targetPoint.z + targetVelocity.z * projectileTravelTime
+        const Vector3 targetVelocityKamikaze = target->GetVelocity();
+        const float leadSeconds = std::min(
+            0.35f, targetDistance / kBromKamikazeSpeed * 0.35f);
+        const Vector3 intercept {
+            targetPoint.x + targetVelocityKamikaze.x * leadSeconds,
+            targetPoint.y + targetVelocityKamikaze.y * leadSeconds,
+            targetPoint.z + targetVelocityKamikaze.z * leadSeconds
         };
-        const Vector3 direction = Normalize(Vector3 {
-            predictedTarget.x - drone.position.x,
-            predictedTarget.y - drone.position.y,
-            predictedTarget.z - drone.position.z
+        const Vector3 kamikazeDirection = Normalize(Vector3 {
+            intercept.x - drone.position.x,
+            intercept.y - drone.position.y,
+            intercept.z - drone.position.z
         });
-        const int targetHealthBefore = target->GetHealth();
-        NoteDamageCredit(target->GetId(), drone.ownerPlayerId, "турелью Брома");
-        target->Damage(6);
-        if (targetHealthBefore > 0 && target->GetHealth() <= 0 && drone.ownerPlayerId >= 0)
-        {
-            ++GetPlayerScore(drone.ownerPlayerId).kills;
-            if (drone.ownerPlayerId == localPlayerId_)
-            {
-                ++stats_.kills;
-            }
-
-            std::string ownerName = "Бром";
-            for (const Player& player : players_)
-            {
-                if (player.GetId() == drone.ownerPlayerId)
-                {
-                    ownerName = player.GetName();
-                    break;
-                }
-            }
-            AddKillFeed(ownerName + " добил дроном " + target->GetName(), bromColor, 5.2f);
-        }
-        target->ApplyKnockback(Vector3 { direction.x * 3.2f, 0.58f, direction.z * 3.2f });
-        AddWorldEffect(drone.position, direction, bromColor, 0.28f, 0.24f, WorldEffectKind::Trail);
-        AddWorldEffect(target->GetPosition(), bromColor, 0.18f, 0.18f);
-        AddFloatingText("дрон -6", target->GetPosition(), bromColor);
-        drone.lastShotTarget = predictedTarget;
-        drone.shotFlashTimer = 0.28f;
-        drone.fireCooldown = 1.15f;
-        audio_.PlayHit();
+        moveFlyingTowards(drone, intercept, kBromKamikazeSpeed);
+        drone.lastShotTarget = intercept;
+        drone.shotFlashTimer = 0.12f;
+        EmitProjectileCueParticles(drone.position, kamikazeDirection, bromColor, 0.55f);
+        continue;
     }
 
     bromTurretDrones_.erase(
@@ -1841,7 +1853,7 @@ void Game::UpdateBromDevices(float dt)
 
 void Game::UpdateKonvoyDevices(float dt)
 {
-    const Color konvoyColor = HeroAccentColor(HeroId::Konvoy);
+    const Color konvoyColor = VisualTheme::HeroAccent(HeroId::Konvoy);
     const auto playerById = [this](int playerId) -> Player*
     {
         for (Player& player : players_)
@@ -1900,7 +1912,6 @@ void Game::UpdateKonvoyDevices(float dt)
                 mark = std::prev(konvoyIntruderMarks_.end());
             }
             mark->markedTimer = std::max(0.0f, mark->markedTimer - dt);
-            mark->pulseTimer = std::max(0.0f, mark->pulseTimer - dt);
             if (dangerZone)
             {
                 mark->exposure = std::min(3.0f, mark->exposure + dt);
@@ -1915,11 +1926,6 @@ void Game::UpdateKonvoyDevices(float dt)
             {
                 mark->exposure = std::max(0.0f, mark->exposure - dt * 0.5f);
             }
-            if (mark->markedTimer > 0.0f && mark->pulseTimer <= 0.0f)
-            {
-                mark->pulseTimer = 1.0f;
-                AddWorldEffect(target.GetPosition(), konvoyColor, 0.18f, 0.18f);
-            }
         }
     }
 
@@ -1929,7 +1935,7 @@ void Game::UpdateKonvoyDevices(float dt)
         trap.flashTimer = std::max(0.0f, trap.flashTimer - dt);
         if (trap.lifetime <= 0.0f)
         {
-            AddWorldEffect(trap.position, konvoyColor, 0.20f, 0.22f);
+            EmitTrapParticles(trap.position, konvoyColor, 0.45f, false);
             continue;
         }
 
@@ -1964,7 +1970,7 @@ void Game::UpdateKonvoyDevices(float dt)
                 markedIntruder ? 0.46f : 0.55f,
                 markedIntruder ? 0.42f : 0.50f,
                 markedIntruder ? 0.52f : 0.62f);
-            AddWorldEffect(trap.position, Vector3 { 0.0f, 0.0f, 1.0f }, konvoyColor, 1.15f, 0.48f, WorldEffectKind::Ring);
+            EmitTrapParticles(trap.position, konvoyColor, 1.15f, true);
             AddFloatingText("капкан", target.GetPosition(), konvoyColor);
             AddEventMessage("Капкан Конвоя сработал на цели " + target.GetName() + ".", konvoyColor, 2.4f);
             if (Player* owner = playerById(trap.ownerPlayerId))
@@ -2012,7 +2018,7 @@ void Game::UpdateKonvoyDevices(float dt)
         if (tether.accumulatedOwnerDamage > 30)
         {
             tether.lifetime = 0.0f;
-            AddWorldEffect(target->GetPosition(), konvoyColor, 0.35f, 0.25f);
+            EmitTrapParticles(target->GetPosition(), konvoyColor, 0.65f, true);
             AddFloatingText("CHAIN BROKEN", target->GetPosition(), konvoyColor);
             continue;
         }
@@ -2039,7 +2045,7 @@ void Game::UpdateKonvoyDevices(float dt)
                 corrected.z = ownerPosition.z - towardOwner.z * (kKonvoyHandcuffRadius - 0.15f);
                 target->Teleport(corrected, false);
             }
-            AddWorldEffect(target->GetPosition(), konvoyColor, 0.14f, 0.14f);
+            EmitAbilityParticles(target->GetPosition(), towardOwner, konvoyColor, 0.42f, WorldEffectKind::Pull);
         }
     }
 
@@ -2060,7 +2066,7 @@ void Game::UpdateKonvoyDevices(float dt)
         if (dome.lifetime > 0.0f && dome.flashTimer <= 0.0f)
         {
             dome.flashTimer = 1.0f;
-            AddWorldEffect(dome.position, Vector3 { 0.0f, 0.0f, 1.0f }, konvoyColor, kKonvoyDomeVisualRadius, 0.16f, WorldEffectKind::Ring);
+            EmitTrapParticles(dome.position, konvoyColor, kKonvoyDomeVisualRadius, true);
         }
         if (dome.lifetime <= 0.0f)
         {
@@ -2188,7 +2194,7 @@ void Game::UpdateLikhoBleeds(float dt)
             const int damage = 2 + std::min(3, bleed.stacks);
             NoteDamageCredit(target.GetId(), bleed.ownerPlayerId, "кровотечением Лихо");
             target.Damage(damage);
-            AddFloatingText("кровотечение -" + std::to_string(damage), target.GetPosition(), HeroAccentColor(HeroId::Likho));
+            AddFloatingText("кровотечение -" + std::to_string(damage), target.GetPosition(), VisualTheme::HeroAccent(HeroId::Likho));
             break;
         }
     }
@@ -2258,7 +2264,7 @@ void Game::UpdateSvidetelEffects(float dt)
                 {
                     phased.suffocationTimer = 0.5f;
                     player.Damage(6);
-                    AddFloatingText("SUFFOCATION -6", player.GetPosition(), HeroAccentColor(HeroId::Svidetel));
+                    AddFloatingText("SUFFOCATION -6", player.GetPosition(), VisualTheme::HeroAccent(HeroId::Svidetel));
                 }
                 break;
             }
@@ -2266,8 +2272,14 @@ void Game::UpdateSvidetelEffects(float dt)
         }
         if (!occupied)
         {
-            PlaceWorldBlock(phased.position, phased.block, true, BlockDeltaReason::PhaseRestore);
-            AddWorldEffect(center, HeroAccentColor(HeroId::Svidetel), 0.28f, 0.35f);
+            if (PlaceWorldBlock(phased.position, phased.block, true, BlockDeltaReason::PhaseRestore))
+            {
+                EmitBlockPlaceParticles(
+                    center,
+                    Vector3 { 0.0f, 0.0f, 1.0f },
+                    VisualTheme::SurfaceDust(phased.block.type),
+                    phased.block.type);
+            }
             phased.timer = -1.0f;
         }
     }
@@ -2348,7 +2360,7 @@ void Game::UpdateSvidetelEffects(float dt)
             projectile.airDragPerTick = kProjectilePhysicsTuning.arrowAirDragPerTick;
             projectile.affectedByDrag = true;
             projectiles_.push_back(projectile);
-            AddWorldEffect(origin, direction, HeroAccentColor(HeroId::Svidetel), 0.38f, 0.22f, WorldEffectKind::Trail);
+            EmitProjectileCueParticles(origin, direction, VisualTheme::HeroAccent(HeroId::Svidetel), 0.72f);
         }
     }
     svidetelEchoes_.erase(
@@ -2435,6 +2447,10 @@ void Game::UpdatePassiveRegeneration(float dt)
         }
 
         player.Heal(5);
+        if (HasLocalCamera(ControlKindForPlayer(player)))
+        {
+            EmitHealParticles(player.GetPosition(), Color { 128, 238, 166, 255 }, 0.35f);
+        }
     }
 }
 
@@ -2462,7 +2478,7 @@ void Game::UpdateBaseHealing(float dt)
         player.Heal(3 + team->healAuraLevel * 2);
         if (HasLocalCamera(ControlKindForPlayer(player)))
         {
-            AddWorldEffect(player.GetPosition(), Color { 128, 238, 166, 255 }, 0.18f, 0.18f);
+            EmitHealParticles(player.GetPosition(), Color { 128, 238, 166, 255 }, 0.55f);
         }
     }
 }
@@ -2516,6 +2532,20 @@ void Game::UpdateFeedback(float dt)
                 return event.age >= event.lifetime;
             }),
         eventMessages_.end());
+
+    for (EventMessage& event : chatMessages_)
+    {
+        event.age += dt;
+    }
+    chatMessages_.erase(
+        std::remove_if(
+            chatMessages_.begin(),
+            chatMessages_.end(),
+            [](const EventMessage& event)
+            {
+                return event.age >= event.lifetime;
+            }),
+        chatMessages_.end());
 
     for (KillFeedEntry& entry : killFeed_)
     {

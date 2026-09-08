@@ -1,5 +1,6 @@
 #include "Network/NetworkTransport.h"
 #include "Network/NetworkProtocol.h"
+#include "Network/DatagramBackend.h"
 
 #include <algorithm>
 #include <array>
@@ -13,35 +14,9 @@
 // Real UDP transport. The whole socket implementation is gated behind
 // DAIBED_HAVE_NETWORK (CMake option DAIBED_ENABLE_NETWORK). When the option is
 // off, every entry point compiles to a safe stub so the rest of the game builds
-// and links unchanged. See docs/NETWORK_PREP_PLAN.md.
+// and links unchanged. See docs/P2P_IMPLEMENTATION.md.
 
 #if defined(DAIBED_HAVE_NETWORK) && DAIBED_HAVE_NETWORK
-
-#if defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <winsock2.h>
-#include <ws2tcpip.h>
-// Some SDKs declare this control code in <mstcpip.h> rather than <winsock2.h>.
-#ifndef SIO_UDP_CONNRESET
-#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
-#endif
-using socket_t = SOCKET;
-static constexpr socket_t kInvalidSocket = INVALID_SOCKET;
-#else
-#include <arpa/inet.h>
-#include <cerrno>
-#include <fcntl.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
-using socket_t = int;
-static constexpr socket_t kInvalidSocket = -1;
-#endif
-
-#include <cstring>
 #include <string>
 #include <vector>
 
@@ -55,10 +30,9 @@ constexpr float kReliableRetryIntervalSeconds = 0.12f;
 constexpr int kReliableMaxAttempts = 12;
 constexpr float kSnapshotSendIntervalSeconds = 1.0f / 20.0f;
 constexpr float kFullResyncRetryIntervalSeconds = 0.20f;
-constexpr std::size_t kMaxSnapshotPacketBytes = 4096;
 // --- Transport-level packet fragmentation (audit finding: >MTU datagrams) ---
 // Any encoded packet larger than kMaxDatagramBytes (full snapshot baselines,
-// resyncs, delta-overflow fallbacks) is split into PacketFragment datagrams of
+// resyncs, and large deltas) is split into PacketFragment datagrams of
 // kFragmentChunkBytes each instead of one huge UDP datagram: a single >1500 B
 // datagram IP-fragments (loss of ANY fragment loses the whole packet, and some
 // middleboxes drop IP fragments outright), and >64 KB would not send at all.
@@ -68,8 +42,10 @@ constexpr std::size_t kMaxSnapshotPacketBytes = 4096;
 constexpr std::size_t kMaxDatagramBytes = 1200;
 constexpr std::size_t kFragmentChunkBytes = 1024;
 constexpr std::size_t kMaxAssembledPacketBytes = 512 * 1024;
+constexpr std::size_t kMaxSnapshotPacketBytes = kMaxAssembledPacketBytes;
 constexpr std::size_t kMaxFragmentAssemblies = 8;
 constexpr double kFragmentAssemblyTimeoutSeconds = 3.0;
+constexpr int kReconnectReservationSeconds = 120;
 
 // --- Test-only datagram loss injection (network debugging) ------------------
 // DAIBED_NET_DROP_PCT=<0..95> makes every endpoint drop that percentage of
@@ -107,6 +83,46 @@ bool DropDatagramForTesting()
     }
     static std::mt19937 rng { 0xDA1BEDu };
     return static_cast<int>(rng() % 100u) < pct;
+}
+
+std::mt19937_64 MakeCredentialRng()
+{
+    std::random_device source;
+    std::seed_seq seed {
+        source(), source(), source(), source(), source(), source(), source(), source()
+    };
+    return std::mt19937_64(seed);
+}
+
+template <typename Identity>
+Identity GenerateIdentity(std::mt19937_64& rng)
+{
+    Identity identity;
+    do
+    {
+        identity.high = rng();
+        identity.low = rng();
+    }
+    while (!identity.IsValid());
+    return identity;
+}
+
+bool MatchesReservation(const SessionCredentials& presented,
+                        const SessionCredentials& reserved)
+{
+    return presented.CanReconnect()
+        && presented.sessionId == reserved.sessionId
+        && presented.playerSessionId == reserved.playerSessionId
+        && presented.reconnectToken == reserved.reconnectToken;
+}
+
+bool AuthenticatedIdentityMatches(AuthenticatedPeerIdentity expected,
+                                  AuthenticatedPeerIdentity presented)
+{
+    // UDP has no provider identity and continues to rely on the rotating
+    // reconnect bearer. Once a session has an authenticated provider identity,
+    // it may never downgrade to an unauthenticated or different peer.
+    return !expected.IsValid() || expected == presented;
 }
 
 // Reassembles PacketFragment datagrams back into the original oversized packet.
@@ -201,11 +217,6 @@ struct FragmentAssembler
     }
 };
 
-std::uint64_t EndpointKey(const sockaddr_in& addr)
-{
-    return (static_cast<std::uint64_t>(addr.sin_addr.s_addr) << 16)
-        | static_cast<std::uint64_t>(addr.sin_port);
-}
 constexpr std::size_t kCommandBackupCount = 3;
 constexpr std::size_t kMaxSentSnapshotHistory = 32;
 constexpr std::size_t kMaxClientSnapshotHistory = 32;
@@ -215,136 +226,6 @@ double SecondsSince(Clock::time_point start)
     return std::chrono::duration<double>(Clock::now() - start).count();
 }
 
-// Process-wide socket init refcount (WSAStartup on Windows; no-op elsewhere).
-int g_netInitCount = 0;
-
-bool NetInit(std::string& err)
-{
-#if defined(_WIN32)
-    if (g_netInitCount == 0)
-    {
-        WSADATA data;
-        const int rc = WSAStartup(MAKEWORD(2, 2), &data);
-        if (rc != 0)
-        {
-            err = "WSAStartup failed (" + std::to_string(rc) + ")";
-            return false;
-        }
-    }
-#else
-    (void)err;
-#endif
-    ++g_netInitCount;
-    return true;
-}
-
-void NetShutdown()
-{
-    if (g_netInitCount > 0)
-    {
-        --g_netInitCount;
-#if defined(_WIN32)
-        if (g_netInitCount == 0)
-        {
-            WSACleanup();
-        }
-#endif
-    }
-}
-
-int LastSocketError()
-{
-#if defined(_WIN32)
-    return WSAGetLastError();
-#else
-    return errno;
-#endif
-}
-
-bool WouldBlock(int error)
-{
-#if defined(_WIN32)
-    return error == WSAEWOULDBLOCK;
-#else
-    return error == EWOULDBLOCK || error == EAGAIN;
-#endif
-}
-
-void CloseSocket(socket_t sock)
-{
-    if (sock != kInvalidSocket)
-    {
-#if defined(_WIN32)
-        closesocket(sock);
-#else
-        ::close(sock);
-#endif
-    }
-}
-
-bool SetNonBlocking(socket_t sock)
-{
-#if defined(_WIN32)
-    u_long mode = 1;
-    return ioctlsocket(sock, FIONBIO, &mode) == 0;
-#else
-    const int flags = fcntl(sock, F_GETFL, 0);
-    return flags != -1 && fcntl(sock, F_SETFL, flags | O_NONBLOCK) != -1;
-#endif
-}
-
-// On Windows a UDP send to a closed port makes the NEXT recvfrom fail with
-// WSAECONNRESET (an ICMP port-unreachable echo). Disable that so a dead peer
-// never trips the receive loop.
-void SuppressConnReset(socket_t sock)
-{
-#if defined(_WIN32)
-    BOOL behavior = FALSE;
-    DWORD bytes = 0;
-    WSAIoctl(sock, SIO_UDP_CONNRESET, &behavior, sizeof(behavior), nullptr, 0, &bytes, nullptr, nullptr);
-#else
-    (void)sock;
-#endif
-}
-
-// Resolve a numeric IPv4 (or "localhost") without touching DNS; fall back to
-// getaddrinfo only for real hostnames.
-bool ResolveIPv4(const std::string& host, std::uint16_t port, sockaddr_in& out, std::string& err)
-{
-    std::memset(&out, 0, sizeof(out));
-    out.sin_family = AF_INET;
-    out.sin_port = htons(port);
-
-    const std::string node = host == "localhost" ? std::string("127.0.0.1") : host;
-    if (inet_pton(AF_INET, node.c_str(), &out.sin_addr) == 1)
-    {
-        return true;
-    }
-
-    addrinfo hints;
-    std::memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_DGRAM;
-    addrinfo* result = nullptr;
-    if (getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0 || result == nullptr)
-    {
-        err = "could not resolve host \"" + host + "\"";
-        if (result != nullptr)
-        {
-            freeaddrinfo(result);
-        }
-        return false;
-    }
-    out.sin_addr = reinterpret_cast<sockaddr_in*>(result->ai_addr)->sin_addr;
-    freeaddrinfo(result);
-    return true;
-}
-
-bool SameEndpoint(const sockaddr_in& a, const sockaddr_in& b)
-{
-    return a.sin_addr.s_addr == b.sin_addr.s_addr && a.sin_port == b.sin_port;
-}
-
 int PositiveOrDefault(int value, int fallback)
 {
     return value > 0 ? value : fallback;
@@ -352,15 +233,40 @@ int PositiveOrDefault(int value, int fallback)
 
 std::string SanitizeLobbyName(std::string value, int clientId)
 {
+    value.erase(std::remove_if(value.begin(), value.end(), [](unsigned char ch)
+    {
+        return ch < 0x20 || ch == 0x7F;
+    }), value.end());
+    while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.erase(value.begin());
+    while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) value.pop_back();
     if (value.empty())
     {
-        value = "Player " + std::to_string(clientId);
+        value = "Игрок";
     }
-    if (value.size() > 32)
+    // Display names are labels only. The stable session/reconnect credentials
+    // carry identity, while this suffix makes duplicate chosen names harmless.
+    const std::string suffix = " #" + std::to_string(clientId);
+    const std::size_t maxBaseBytes = 64u > suffix.size() ? 64u - suffix.size() : 1u;
+    if (value.size() > maxBaseBytes)
     {
-        value.resize(32);
+        value.resize(maxBaseBytes);
+        std::size_t lead = value.size() - 1;
+        while (lead > 0
+            && (static_cast<unsigned char>(value[lead]) & 0xC0u) == 0x80u)
+        {
+            --lead;
+        }
+        const unsigned char leadByte = static_cast<unsigned char>(value[lead]);
+        const std::size_t sequenceBytes = (leadByte & 0x80u) == 0 ? 1u
+            : ((leadByte & 0xE0u) == 0xC0u ? 2u
+            : ((leadByte & 0xF0u) == 0xE0u ? 3u
+            : ((leadByte & 0xF8u) == 0xF0u ? 4u : 1u)));
+        if (lead + sequenceBytes > value.size())
+        {
+            value.resize(lead);
+        }
     }
-    return value;
+    return value + suffix;
 }
 
 LobbyUpdate DefaultLobbyUpdateForClient(int clientId, const ServerConfig& config)
@@ -471,9 +377,11 @@ struct ServerTransport::Impl
         int clientId = -1;
         int playerId = -1;     // -1 until the game assigns a match player
         bool ackSent = false;  // ConnectAck sent (i.e. lobby entry confirmed)
+        SessionCredentials credentials;
+        AuthenticatedPeerIdentity authenticatedIdentity;
         std::uint32_t lastProcessedCommandTick = 0;
         LobbyUpdate lobby;
-        sockaddr_in addr {};
+        DatagramPeer peer;
         Clock::time_point lastSeen;
         Clock::time_point lastSnapshotSent;
         MatchSnapshot snapshotBaseline;
@@ -504,12 +412,18 @@ struct ServerTransport::Impl
         int playerId = -1;
         std::string playerName;
         LobbyUpdate lobby;
+        SessionCredentials credentials;
+        AuthenticatedPeerIdentity authenticatedIdentity;
+        Clock::time_point expiresAt;
     };
 
-    socket_t sock = kInvalidSocket;
-    bool inited = false;
+    NetworkBackend backendKind = NetworkBackend::SystemUdp;
+    std::unique_ptr<IDatagramBackend> backend =
+        CreateDatagramBackend(NetworkBackend::SystemUdp);
     std::string lastError;
     ServerConfig config;
+    SessionId sessionId;
+    std::mt19937_64 credentialRng = MakeCredentialRng();
     std::uint16_t boundPort = 0;
     int nextClientId = 1;
     std::uint32_t sequence = 0;
@@ -535,24 +449,22 @@ struct ServerTransport::Impl
     std::vector<ReconnectedClient> reconnected;
     FragmentAssembler fragments;
 
-    void SendTo(const sockaddr_in& addr, const std::vector<std::uint8_t>& bytes)
+    void SendTo(DatagramPeer peer, const std::vector<std::uint8_t>& bytes)
     {
         if (bytes.size() > kMaxDatagramBytes)
         {
-            SendFragmented(addr, bytes);
+            SendFragmented(peer, bytes);
             return;
         }
         if (!DropDatagramForTesting())
         {
-            sendto(sock, reinterpret_cast<const char*>(bytes.data()),
-                   static_cast<int>(bytes.size()), 0,
-                   reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
+            backend->Send(peer, bytes.data(), bytes.size());
         }
         ++packetsSent;
         bytesSent += bytes.size();
     }
 
-    void SendFragmented(const sockaddr_in& addr, const std::vector<std::uint8_t>& bytes)
+    void SendFragmented(DatagramPeer peer, const std::vector<std::uint8_t>& bytes)
     {
         PacketHeader original;
         if (DecodeHeader(bytes.data(), bytes.size(), original) != DecodeStatus::Ok)
@@ -568,7 +480,7 @@ struct ServerTransport::Impl
             const std::size_t len = total - offset < kFragmentChunkBytes
                 ? total - offset
                 : kFragmentChunkBytes;
-            SendTo(addr, EncodePacketFragment(
+            SendTo(peer, EncodePacketFragment(
                 sequence++, original.sequence, i, count,
                 static_cast<std::uint32_t>(total), bytes.data() + offset, len));
         }
@@ -587,7 +499,7 @@ struct ServerTransport::Impl
                     }),
                 client.reliable.end());
         }
-        SendTo(client.addr, bytes);
+        SendTo(client.peer, bytes);
         ClientChannel::ReliablePacket packet;
         packet.sequence = seq;
         packet.type = type;
@@ -679,7 +591,7 @@ struct ServerTransport::Impl
                     client.reliable.erase(client.reliable.begin() + static_cast<std::ptrdiff_t>(i));
                     continue;
                 }
-                SendTo(client.addr, packet.bytes);
+                SendTo(client.peer, packet.bytes);
                 packet.lastSent = now;
                 ++packet.attempts;
                 ++i;
@@ -687,11 +599,11 @@ struct ServerTransport::Impl
         }
     }
 
-    ClientChannel* FindByEndpoint(const sockaddr_in& addr)
+    ClientChannel* FindByEndpoint(DatagramPeer peer)
     {
         for (ClientChannel& c : clients)
         {
-            if (SameEndpoint(c.addr, addr))
+            if (c.peer == peer)
             {
                 return &c;
             }
@@ -710,6 +622,23 @@ struct ServerTransport::Impl
         return nullptr;
     }
 
+    ClientChannel* FindByCredentials(const SessionCredentials& credentials,
+                                     AuthenticatedPeerIdentity identity)
+    {
+        if (!credentials.CanReconnect())
+        {
+            return nullptr;
+        }
+        const auto found = std::find_if(
+            clients.begin(), clients.end(),
+            [&credentials, identity](const ClientChannel& channel)
+            {
+                return MatchesReservation(credentials, channel.credentials)
+                    && AuthenticatedIdentityMatches(channel.authenticatedIdentity, identity);
+            });
+        return found != clients.end() ? &*found : nullptr;
+    }
+
     bool IsHost(int clientId) const
     {
         return clientId >= 0 && clientId == hostClientId;
@@ -717,7 +646,7 @@ struct ServerTransport::Impl
 
     void ReserveSlotForReconnect(const ClientChannel& client)
     {
-        if (!matchJoinLocked || client.playerId < 0 || client.lobby.playerName.empty())
+        if (!matchJoinLocked || client.playerId < 0 || !client.credentials.CanReconnect())
         {
             return;
         }
@@ -726,7 +655,8 @@ struct ServerTransport::Impl
                 [&client](const SlotReservation& reservation)
                 {
                     return reservation.playerId == client.playerId
-                        || reservation.playerName == client.lobby.playerName;
+                        || reservation.credentials.playerSessionId
+                            == client.credentials.playerSessionId;
                 }),
             reservations.end());
 
@@ -734,6 +664,10 @@ struct ServerTransport::Impl
         reservation.playerId = client.playerId;
         reservation.playerName = client.lobby.playerName;
         reservation.lobby = client.lobby;
+        reservation.credentials = client.credentials;
+        reservation.authenticatedIdentity = client.authenticatedIdentity;
+        reservation.expiresAt = Clock::now()
+            + std::chrono::seconds(kReconnectReservationSeconds);
         reservation.lobby.ready = true;
         reservation.lobby.startRequested = false;
         reservations.push_back(reservation);
@@ -745,16 +679,29 @@ struct ServerTransport::Impl
         ReserveSlotForReconnect(client);
     }
 
-    SlotReservation* FindReservationByName(const std::string& playerName)
+    void RemoveExpiredReservations()
     {
-        for (SlotReservation& reservation : reservations)
-        {
-            if (reservation.playerName == playerName)
+        const Clock::time_point now = Clock::now();
+        reservations.erase(
+            std::remove_if(reservations.begin(), reservations.end(),
+                [now](const SlotReservation& reservation)
+                {
+                    return reservation.expiresAt <= now;
+                }),
+            reservations.end());
+    }
+
+    SlotReservation* FindReservation(const SessionCredentials& credentials,
+                                     AuthenticatedPeerIdentity identity)
+    {
+        const auto found = std::find_if(
+            reservations.begin(), reservations.end(),
+            [&credentials, identity](const SlotReservation& reservation)
             {
-                return &reservation;
-            }
-        }
-        return nullptr;
+                return MatchesReservation(credentials, reservation.credentials)
+                    && AuthenticatedIdentityMatches(reservation.authenticatedIdentity, identity);
+            });
+        return found != reservations.end() ? &*found : nullptr;
     }
 
     void PromoteHostIfNeeded()
@@ -781,52 +728,18 @@ bool ServerTransport::Start(const ServerConfig& config)
 {
     Close();
     impl_->config = config;
-    if (!NetInit(impl_->lastError))
+    if (impl_->backendKind != config.networkBackend)
     {
+        impl_->backend = CreateDatagramBackend(config.networkBackend);
+        impl_->backendKind = config.networkBackend;
+    }
+    if (!impl_->backend->Listen(config.listenAddress, config.port))
+    {
+        impl_->lastError = impl_->backend->LastError();
         return false;
     }
-    impl_->inited = true;
-
-    impl_->sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (impl_->sock == kInvalidSocket)
-    {
-        impl_->lastError = "socket() failed (" + std::to_string(LastSocketError()) + ")";
-        Close();
-        return false;
-    }
-    SuppressConnReset(impl_->sock);
-    if (!SetNonBlocking(impl_->sock))
-    {
-        impl_->lastError = "could not set non-blocking";
-        Close();
-        return false;
-    }
-
-    sockaddr_in addr;
-    if (!ResolveIPv4(config.listenAddress, config.port, addr, impl_->lastError))
-    {
-        Close();
-        return false;
-    }
-    if (bind(impl_->sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0)
-    {
-        impl_->lastError = "bind(" + config.listenAddress + ":" + std::to_string(config.port)
-            + ") failed (" + std::to_string(LastSocketError()) + ")";
-        Close();
-        return false;
-    }
-
-    // Read back the actually-bound port (handles config.port == 0 => ephemeral).
-    sockaddr_in bound;
-    socklen_t boundLen = sizeof(bound);
-    if (getsockname(impl_->sock, reinterpret_cast<sockaddr*>(&bound), &boundLen) == 0)
-    {
-        impl_->boundPort = ntohs(bound.sin_port);
-    }
-    else
-    {
-        impl_->boundPort = config.port;
-    }
+    impl_->boundPort = impl_->backend->BoundPort();
+    impl_->sessionId = GenerateIdentity<SessionId>(impl_->credentialRng);
     impl_->lastError.clear();
     impl_->lobbyRevision = 0;
     impl_->staleCommandsDropped = 0;
@@ -840,21 +753,18 @@ bool ServerTransport::Start(const ServerConfig& config)
     return true;
 }
 
-bool ServerTransport::IsOpen() const { return impl_->sock != kInvalidSocket; }
+bool ServerTransport::IsOpen() const { return impl_->backend->IsOpen(); }
 
 void ServerTransport::Close()
 {
-    if (impl_->sock != kInvalidSocket)
-    {
-        CloseSocket(impl_->sock);
-        impl_->sock = kInvalidSocket;
-    }
+    impl_->backend->Close();
     impl_->clients.clear();
     impl_->reservations.clear();
     impl_->commands.clear();
     impl_->disconnected.clear();
     impl_->reconnected.clear();
     impl_->boundPort = 0;
+    impl_->sessionId = {};
     impl_->lobbyRevision = 0;
     impl_->staleCommandsDropped = 0;
     impl_->fullSnapshotsSent = 0;
@@ -865,34 +775,28 @@ void ServerTransport::Close()
     impl_->hostClientId = -1;
     impl_->lobbyStatusOverride.clear();
     impl_->matchJoinLocked = false;
-    if (impl_->inited)
-    {
-        NetShutdown();
-        impl_->inited = false;
-    }
 }
 
 const std::string& ServerTransport::LastError() const { return impl_->lastError; }
 
 void ServerTransport::Poll()
 {
-    if (impl_->sock == kInvalidSocket)
+    if (!impl_->backend->IsOpen())
     {
         return;
     }
     std::vector<std::uint8_t> buffer(65536);
     for (;;)
     {
-        sockaddr_in from;
-        socklen_t fromLen = sizeof(from);
-        int n = recvfrom(impl_->sock, reinterpret_cast<char*>(buffer.data()),
-                         static_cast<int>(buffer.size()), 0,
-                         reinterpret_cast<sockaddr*>(&from), &fromLen);
-        if (n <= 0)
+        DatagramPeer from;
+        std::size_t n = 0;
+        const DatagramReceiveResult receive =
+            impl_->backend->Receive(from, buffer.data(), buffer.size(), n);
+        if (receive != DatagramReceiveResult::Received)
         {
-            if (n < 0 && !WouldBlock(LastSocketError()))
+            if (receive == DatagramReceiveResult::Error)
             {
-                // Non-fatal: a stray ICMP/closed-peer error; stop draining now.
+                impl_->lastError = impl_->backend->LastError();
             }
             break;
         }
@@ -923,7 +827,7 @@ void ServerTransport::Poll()
                 continue;
             }
             std::vector<std::uint8_t> assembled;
-            if (!impl_->fragments.Accept(EndpointKey(from), fragmentId, fragmentIndex,
+            if (!impl_->fragments.Accept(from.value, fragmentId, fragmentIndex,
                                          fragmentCount, totalSize, chunk, assembled))
             {
                 continue; // incomplete (or rejected) — wait for more chunks
@@ -933,35 +837,72 @@ void ServerTransport::Poll()
                 buffer.resize(assembled.size());
             }
             std::copy(assembled.begin(), assembled.end(), buffer.begin());
-            n = static_cast<int>(assembled.size());
+            n = assembled.size();
             if (DecodeHeader(buffer.data(), static_cast<std::size_t>(n), header) != DecodeStatus::Ok)
             {
                 continue;
             }
         }
 
+        const AuthenticatedPeerIdentity incomingIdentity =
+            impl_->backend->AuthenticatedIdentity(from);
         Impl::ClientChannel* client = impl_->FindByEndpoint(from);
+        const bool endpointIdentityMismatch = client != nullptr
+            && !AuthenticatedIdentityMatches(client->authenticatedIdentity, incomingIdentity);
+        if (endpointIdentityMismatch)
+        {
+            client = nullptr;
+        }
         switch (header.type)
         {
         case MessageType::Connect:
         {
             PacketHeader cHeader;
-            std::string token;
-            if (DecodeConnect(buffer.data(), static_cast<std::size_t>(n), cHeader, token) != DecodeStatus::Ok)
+            ConnectRequest request;
+            if (DecodeConnect(buffer.data(), static_cast<std::size_t>(n), cHeader, request)
+                != DecodeStatus::Ok)
             {
                 break; // malformed connect — ignore
             }
             // Password / token check (task 2). Empty server password accepts any.
-            if (!impl_->config.ValidatePassword(token))
+            if (!impl_->config.ValidatePassword(request.password))
             {
                 impl_->SendTo(from, EncodeConnectDenied(impl_->sequence++, "bad password"));
                 break; // never register a denied client
             }
+            if (endpointIdentityMismatch)
+            {
+                impl_->SendTo(from, EncodeConnectDenied(
+                    impl_->sequence++, "authenticated peer identity changed"));
+                break;
+            }
             if (client == nullptr)
             {
-                if (impl_->matchJoinLocked && impl_->reservations.empty())
+                // A NAT rebinding or provider reconnect can change the opaque
+                // endpoint before the old channel times out. Possession of the
+                // current bearer credentials authorizes moving that live
+                // channel; rotate the token so the presented value is one-use.
+                client = impl_->FindByCredentials(request.resume, incomingIdentity);
+                if (client != nullptr)
                 {
-                    impl_->SendTo(from, EncodeConnectDenied(impl_->sequence++, "match already started"));
+                    client->peer = from;
+                    client->lastSeen = Clock::now();
+                    client->credentials.reconnectToken =
+                        GenerateIdentity<ReconnectToken>(impl_->credentialRng);
+                }
+            }
+            if (client == nullptr)
+            {
+                impl_->RemoveExpiredReservations();
+                Impl::SlotReservation* reservation = impl_->matchJoinLocked
+                    ? impl_->FindReservation(request.resume, incomingIdentity)
+                    : nullptr;
+                if (impl_->matchJoinLocked && reservation == nullptr)
+                {
+                    const char* reason = request.resume.CanReconnect()
+                        ? "invalid reconnect credentials"
+                        : "match already started";
+                    impl_->SendTo(from, EncodeConnectDenied(impl_->sequence++, reason));
                     break;
                 }
                 if (!impl_->matchJoinLocked
@@ -974,12 +915,43 @@ void ServerTransport::Poll()
                 // game's job (TakePendingClients -> AssignPlayer).
                 Impl::ClientChannel channel;
                 channel.clientId = impl_->nextClientId++;
-                channel.playerId = -1;
                 channel.ackSent = true;
-                channel.lobby = DefaultLobbyUpdateForClient(channel.clientId, impl_->config);
-                channel.addr = from;
+                channel.peer = from;
+                channel.authenticatedIdentity = incomingIdentity;
                 channel.lastSeen = Clock::now();
                 channel.lastSnapshotSent = Clock::now() - std::chrono::seconds(1);
+                channel.credentials.sessionId = impl_->sessionId;
+                channel.credentials.reconnectToken =
+                    GenerateIdentity<ReconnectToken>(impl_->credentialRng);
+
+                const bool reconnecting = reservation != nullptr;
+                if (reconnecting)
+                {
+                    const Impl::SlotReservation restored = *reservation;
+                    channel.playerId = restored.playerId;
+                    channel.lobby = restored.lobby;
+                    channel.lobby.ready = true;
+                    channel.lobby.startRequested = false;
+                    channel.credentials.playerSessionId =
+                        restored.credentials.playerSessionId;
+                    impl_->reservations.erase(
+                        std::remove_if(
+                            impl_->reservations.begin(), impl_->reservations.end(),
+                            [&restored](const Impl::SlotReservation& entry)
+                            {
+                                return entry.credentials.playerSessionId
+                                    == restored.credentials.playerSessionId;
+                            }),
+                        impl_->reservations.end());
+                }
+                else
+                {
+                    channel.playerId = -1;
+                    channel.lobby = DefaultLobbyUpdateForClient(
+                        channel.clientId, impl_->config);
+                    channel.credentials.playerSessionId =
+                        GenerateIdentity<PlayerSessionId>(impl_->credentialRng);
+                }
                 impl_->clients.push_back(channel);
                 Impl::ClientChannel* accepted = &impl_->clients.back();
                 if (impl_->hostClientId < 0)
@@ -991,9 +963,25 @@ void ServerTransport::Poll()
                     *accepted,
                     MessageType::ConnectAck,
                     seq,
-                    EncodeConnectAck(seq, accepted->clientId),
+                    EncodeConnectAck(
+                        seq,
+                        ConnectAccept { accepted->clientId, accepted->credentials }),
                     true);
                 ++impl_->lobbyRevision;
+                if (reconnecting)
+                {
+                    impl_->reconnected.push_back(
+                        ReconnectedClient { accepted->clientId, accepted->playerId });
+                    const std::uint32_t lobbySeq = impl_->sequence++;
+                    impl_->QueueReliable(
+                        *accepted,
+                        MessageType::LobbySnapshot,
+                        lobbySeq,
+                        EncodeLobbySnapshot(
+                            lobbySeq,
+                            BuildLobbySnapshot(false, true, "reconnected")),
+                        true);
+                }
             }
             else
             {
@@ -1005,7 +993,9 @@ void ServerTransport::Poll()
                     *client,
                     MessageType::ConnectAck,
                     seq,
-                    EncodeConnectAck(seq, client->clientId),
+                    EncodeConnectAck(
+                        seq,
+                        ConnectAccept { client->clientId, client->credentials }),
                     true);
             }
             break;
@@ -1076,59 +1066,6 @@ void ServerTransport::Poll()
                 if (DecodeLobbyUpdate(buffer.data(), static_cast<std::size_t>(n), lobbyHeader, update)
                     == DecodeStatus::Ok)
                 {
-                    if (impl_->matchJoinLocked && client->playerId < 0)
-                    {
-                        ApplyLobbyUpdate(client->lobby, update, impl_->config, client->clientId);
-                        Impl::SlotReservation* reservation =
-                            impl_->FindReservationByName(client->lobby.playerName);
-                        if (reservation == nullptr)
-                        {
-                            impl_->SendTo(client->addr,
-                                          EncodeConnectDenied(impl_->sequence++, "match already started"));
-                            impl_->clients.erase(impl_->clients.begin() + (client - impl_->clients.data()));
-                            impl_->PromoteHostIfNeeded();
-                            ++impl_->lobbyRevision;
-                            break;
-                        }
-
-                        const int reservedPlayerId = reservation->playerId;
-                        LobbyUpdate reservedLobby = reservation->lobby;
-                        impl_->reservations.erase(
-                            std::remove_if(impl_->reservations.begin(), impl_->reservations.end(),
-                                [reservedPlayerId](const Impl::SlotReservation& entry)
-                                {
-                                    return entry.playerId == reservedPlayerId;
-                                }),
-                            impl_->reservations.end());
-                        client = impl_->FindByEndpoint(from);
-                        if (client == nullptr)
-                        {
-                            break;
-                        }
-                        client->playerId = reservedPlayerId;
-                        client->lobby = reservedLobby;
-                        client->lobby.ready = true;
-                        client->lobby.startRequested = false;
-                        client->lastProcessedCommandTick = 0;
-                        client->lastSeen = Clock::now();
-                        impl_->reconnected.push_back(
-                            ReconnectedClient { client->clientId, client->playerId });
-                        client->hasSnapshotBaseline = false;
-                        client->needsFullSnapshot = true;
-                        client->fullSnapshotAcked = false;
-                        client->sentSnapshotHistory.clear();
-                        ++impl_->lobbyRevision;
-                        const std::uint32_t seq = impl_->sequence++;
-                        impl_->QueueReliable(
-                            *client,
-                            MessageType::LobbySnapshot,
-                            seq,
-                            EncodeLobbySnapshot(
-                                seq,
-                                BuildLobbySnapshot(false, true, "reconnected")),
-                            true);
-                        break;
-                    }
                     if (update.startRequested && !impl_->IsHost(client->clientId))
                     {
                         update.startRequested = false;
@@ -1354,7 +1291,7 @@ LobbySnapshot ServerTransport::BuildLobbySnapshot(
 
 void ServerTransport::BroadcastLobbySnapshot(const LobbySnapshot& snapshot)
 {
-    if (impl_->sock == kInvalidSocket)
+    if (!impl_->backend->IsOpen())
     {
         return;
     }
@@ -1372,7 +1309,7 @@ void ServerTransport::BroadcastLobbySnapshot(const LobbySnapshot& snapshot)
 
 void ServerTransport::SendLobbySnapshotToClient(int clientId, const LobbySnapshot& snapshot)
 {
-    if (impl_->sock == kInvalidSocket)
+    if (!impl_->backend->IsOpen())
     {
         return;
     }
@@ -1391,7 +1328,7 @@ void ServerTransport::SendLobbySnapshotToClient(int clientId, const LobbySnapsho
 
 void ServerTransport::SendSnapshotToClient(int clientId, const MatchSnapshot& snapshot)
 {
-    if (impl_->sock == kInvalidSocket)
+    if (!impl_->backend->IsOpen())
     {
         return;
     }
@@ -1454,7 +1391,7 @@ void ServerTransport::SendSnapshotToClient(int clientId, const MatchSnapshot& sn
             impl_->lastFullSnapshotBytes = fullBytes.size();
             return;
         }
-        impl_->SendTo(client->addr, bytes);
+        impl_->SendTo(client->peer, bytes);
         client->sentSnapshotHistory.push_back(
             Impl::ClientChannel::SentSnapshot { seq, perClientSnapshot });
         while (client->sentSnapshotHistory.size() > kMaxSentSnapshotHistory)
@@ -1469,7 +1406,7 @@ void ServerTransport::SendSnapshotToClient(int clientId, const MatchSnapshot& sn
 
 void ServerTransport::BroadcastSnapshot(const MatchSnapshot& snapshot)
 {
-    if (impl_->sock == kInvalidSocket)
+    if (!impl_->backend->IsOpen())
     {
         return;
     }
@@ -1484,7 +1421,7 @@ void ServerTransport::BroadcastSnapshot(const MatchSnapshot& snapshot)
 
 bool ServerTransport::NeedsSnapshotForClient(int clientId) const
 {
-    if (impl_->sock == kInvalidSocket)
+    if (!impl_->backend->IsOpen())
     {
         return false;
     }
@@ -1561,11 +1498,17 @@ std::vector<int> ServerTransport::ConnectedClients() const
 // ============================ ClientTransport ==============================
 struct ClientTransport::Impl
 {
-    socket_t sock = kInvalidSocket;
-    bool inited = false;
+    explicit Impl(NetworkBackend selectedBackend)
+        : backendKind(selectedBackend), backend(CreateDatagramBackend(selectedBackend))
+    {
+    }
+
+    NetworkBackend backendKind = NetworkBackend::SystemUdp;
+    std::unique_ptr<IDatagramBackend> backend;
     std::string lastError;
-    sockaddr_in serverAddr {};
-    std::string token;
+    DatagramPeer serverPeer;
+    ConnectRequest connectRequest;
+    SessionCredentials credentials;
     bool connected = false;
     bool inMatch = false;
     bool timedOut = false;
@@ -1620,9 +1563,26 @@ struct ClientTransport::Impl
     MatchSnapshot latestSnapshot;
     LobbySnapshot latestLobbySnapshot;
 
+    void RefreshMatchAssignment()
+    {
+        if (!hasLobbySnapshot || !latestLobbySnapshot.matchStarted || lobbyClientId < 0)
+        {
+            return;
+        }
+        for (const LobbyPlayerState& player : latestLobbySnapshot.players)
+        {
+            if (player.clientId == lobbyClientId && player.assignedPlayerId >= 0)
+            {
+                assignedPlayerId = player.assignedPlayerId;
+                inMatch = true;
+                return;
+            }
+        }
+    }
+
     void SendBytes(const std::vector<std::uint8_t>& bytes)
     {
-        if (sock == kInvalidSocket)
+        if (!backend->IsOpen())
         {
             return;
         }
@@ -1650,15 +1610,13 @@ struct ClientTransport::Impl
         }
         if (!DropDatagramForTesting())
         {
-            sendto(sock, reinterpret_cast<const char*>(bytes.data()),
-                   static_cast<int>(bytes.size()), 0,
-                   reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr));
+            backend->Send(serverPeer, bytes.data(), bytes.size());
         }
         ++packetsSent;
         bytesSent += bytes.size();
     }
 
-    void NoteReceived(int byteCount)
+    void NoteReceived(std::size_t byteCount)
     {
         ++packetsReceived;
         bytesReceived += static_cast<std::uint64_t>(byteCount);
@@ -1755,51 +1713,24 @@ struct ClientTransport::Impl
     }
 };
 
-ClientTransport::ClientTransport() : impl_(std::make_unique<Impl>()) {}
+ClientTransport::ClientTransport(NetworkBackend backend)
+    : impl_(std::make_unique<Impl>(backend))
+{
+}
 ClientTransport::~ClientTransport() { Close(); }
 
 bool ClientTransport::Open(const std::string& host, std::uint16_t port, const std::string& token,
-                           float timeoutSeconds)
+                           float timeoutSeconds,
+                           const SessionCredentials& resumeCredentials)
 {
+    const SessionCredentials resume = resumeCredentials;
     Close();
-    impl_->token = token;
-    if (!NetInit(impl_->lastError))
+    impl_->connectRequest.password = token;
+    impl_->connectRequest.resume = resume;
+    impl_->credentials = resume;
+    if (!impl_->backend->OpenClient(host, port, impl_->serverPeer))
     {
-        return false;
-    }
-    impl_->inited = true;
-
-    if (!ResolveIPv4(host, port, impl_->serverAddr, impl_->lastError))
-    {
-        Close();
-        return false;
-    }
-
-    impl_->sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (impl_->sock == kInvalidSocket)
-    {
-        impl_->lastError = "socket() failed (" + std::to_string(LastSocketError()) + ")";
-        Close();
-        return false;
-    }
-    SuppressConnReset(impl_->sock);
-    if (!SetNonBlocking(impl_->sock))
-    {
-        impl_->lastError = "could not set non-blocking";
-        Close();
-        return false;
-    }
-
-    // Bind an ephemeral local port so we can receive replies.
-    sockaddr_in local;
-    std::memset(&local, 0, sizeof(local));
-    local.sin_family = AF_INET;
-    local.sin_addr.s_addr = htonl(INADDR_ANY);
-    local.sin_port = 0;
-    if (bind(impl_->sock, reinterpret_cast<sockaddr*>(&local), sizeof(local)) != 0)
-    {
-        impl_->lastError = "client bind failed (" + std::to_string(LastSocketError()) + ")";
-        Close();
+        impl_->lastError = impl_->backend->LastError();
         return false;
     }
 
@@ -1847,16 +1778,18 @@ bool ClientTransport::Open(const std::string& host, std::uint16_t port, const st
     // Say hello with the join token. Delivery is best-effort; Poll() re-sends it
     // until we get a ConnectAck or ConnectDenied. A dead server just never
     // replies and IsConnected() stays false.
-    const std::vector<std::uint8_t> hello = EncodeConnect(impl_->sequence++, impl_->token);
+    const std::vector<std::uint8_t> hello =
+        EncodeConnect(impl_->sequence++, impl_->connectRequest);
     impl_->SendBytes(hello);
     impl_->lastError.clear();
     return true;
 }
 
 bool ClientTransport::Connect(const std::string& host, std::uint16_t port, const std::string& token,
-                              float timeoutSeconds)
+                              float timeoutSeconds,
+                              const SessionCredentials& resumeCredentials)
 {
-    if (!Open(host, port, token, timeoutSeconds))
+    if (!Open(host, port, token, timeoutSeconds, resumeCredentials))
     {
         return false;
     }
@@ -1878,15 +1811,11 @@ bool ClientTransport::Connect(const std::string& host, std::uint16_t port, const
     return impl_->connected;
 }
 
-bool ClientTransport::IsOpen() const { return impl_->sock != kInvalidSocket; }
+bool ClientTransport::IsOpen() const { return impl_->backend->IsOpen(); }
 
 void ClientTransport::Close()
 {
-    if (impl_->sock != kInvalidSocket)
-    {
-        CloseSocket(impl_->sock);
-        impl_->sock = kInvalidSocket;
-    }
+    impl_->backend->Close();
     impl_->connected = false;
     impl_->inMatch = false;
     impl_->hasSnapshot = false;
@@ -1908,34 +1837,40 @@ void ClientTransport::Close()
     impl_->hasLobbyUpdate = false;
     impl_->assignedPlayerId = -1;
     impl_->lobbyClientId = -1;
-    if (impl_->inited)
-    {
-        NetShutdown();
-        impl_->inited = false;
-    }
 }
 
 const std::string& ClientTransport::LastError() const { return impl_->lastError; }
 
 void ClientTransport::Poll()
 {
-    if (impl_->sock == kInvalidSocket)
+    if (!impl_->backend->IsOpen())
     {
+        if (!impl_->connected && !impl_->denied)
+        {
+            impl_->timedOut = true;
+            if (!impl_->backend->LastError().empty())
+            {
+                impl_->lastError = impl_->backend->LastError();
+            }
+        }
         return;
     }
     std::vector<std::uint8_t> buffer(65536);
     for (;;)
     {
-        sockaddr_in from;
-        socklen_t fromLen = sizeof(from);
-        int n = recvfrom(impl_->sock, reinterpret_cast<char*>(buffer.data()),
-                         static_cast<int>(buffer.size()), 0,
-                         reinterpret_cast<sockaddr*>(&from), &fromLen);
-        if (n <= 0)
+        DatagramPeer from;
+        std::size_t n = 0;
+        const DatagramReceiveResult receive =
+            impl_->backend->Receive(from, buffer.data(), buffer.size(), n);
+        if (receive != DatagramReceiveResult::Received)
         {
+            if (receive == DatagramReceiveResult::Error)
+            {
+                impl_->lastError = impl_->backend->LastError();
+            }
             break;
         }
-        if (!SameEndpoint(from, impl_->serverAddr))
+        if (from != impl_->serverPeer)
         {
             continue; // only trust packets from our server
         }
@@ -1976,7 +1911,7 @@ void ClientTransport::Poll()
                 buffer.resize(assembled.size());
             }
             std::copy(assembled.begin(), assembled.end(), buffer.begin());
-            n = static_cast<int>(assembled.size());
+            n = assembled.size();
             if (DecodeHeader(buffer.data(), static_cast<std::size_t>(n), header) != DecodeStatus::Ok)
             {
                 continue;
@@ -1987,14 +1922,17 @@ void ClientTransport::Poll()
         case MessageType::ConnectAck:
         {
             PacketHeader ackHeader;
-            int clientId = -1;
-            if (DecodeConnectAck(buffer.data(), static_cast<std::size_t>(n), ackHeader, clientId)
+            ConnectAccept accept;
+            if (DecodeConnectAck(buffer.data(), static_cast<std::size_t>(n), ackHeader, accept)
                 == DecodeStatus::Ok)
             {
                 impl_->SendAck(ackHeader);
                 impl_->connected = true;
                 impl_->timedOut = false;
-                impl_->lobbyClientId = clientId;
+                impl_->lobbyClientId = accept.clientId;
+                impl_->credentials = accept.credentials;
+                impl_->connectRequest.resume = accept.credentials;
+                impl_->RefreshMatchAssignment();
             }
             break;
         }
@@ -2017,18 +1955,7 @@ void ClientTransport::Poll()
                 impl_->hasLobbySnapshot = true;
                 impl_->connected = true;
                 impl_->timedOut = false;
-                if (impl_->latestLobbySnapshot.matchStarted)
-                {
-                    for (const LobbyPlayerState& player : impl_->latestLobbySnapshot.players)
-                    {
-                        if (player.clientId == impl_->lobbyClientId && player.assignedPlayerId >= 0)
-                        {
-                            impl_->assignedPlayerId = player.assignedPlayerId;
-                            impl_->inMatch = true;
-                            break;
-                        }
-                    }
-                }
+                impl_->RefreshMatchAssignment();
             }
             break;
         }
@@ -2171,9 +2098,11 @@ void ClientTransport::Poll()
 
     // Keep retrying the handshake until accepted or denied (covers a lost
     // Connect/ConnectAck on best-effort UDP).
-    if (!impl_->connected && !impl_->denied && SecondsSince(impl_->lastHello) > 0.15)
+    if (!impl_->connected && !impl_->denied && !impl_->timedOut
+        && SecondsSince(impl_->lastHello) > 0.15)
     {
-        const std::vector<std::uint8_t> hello = EncodeConnect(impl_->sequence++, impl_->token);
+        const std::vector<std::uint8_t> hello =
+            EncodeConnect(impl_->sequence++, impl_->connectRequest);
         impl_->SendBytes(hello);
         impl_->lastHello = Clock::now();
     }
@@ -2217,11 +2146,20 @@ void ClientTransport::Poll()
         impl_->inMatch = false;
         impl_->timedOut = true;
     }
+    else if (!impl_->connected && !impl_->denied && !impl_->timedOut
+             && SecondsSince(impl_->openTime) > impl_->timeoutSeconds)
+    {
+        impl_->timedOut = true;
+        if (impl_->lastError.empty())
+        {
+            impl_->lastError = "connect timed out";
+        }
+    }
 }
 
 void ClientTransport::SendCommand(const PlayerCommand& command)
 {
-    if (impl_->sock == kInvalidSocket)
+    if (!impl_->backend->IsOpen())
     {
         return;
     }
@@ -2250,7 +2188,7 @@ void ClientTransport::SendCommand(const PlayerCommand& command)
 
 void ClientTransport::SendLobbyUpdate(const LobbyUpdate& update)
 {
-    if (impl_->sock == kInvalidSocket || !impl_->connected)
+    if (!impl_->backend->IsOpen() || !impl_->connected)
     {
         return;
     }
@@ -2268,7 +2206,7 @@ void ClientTransport::SendLobbyUpdate(const LobbyUpdate& update)
 
 void ClientTransport::Disconnect()
 {
-    if (impl_->sock != kInvalidSocket)
+    if (impl_->backend->IsOpen())
     {
         const std::vector<std::uint8_t> bye = EncodeControl(MessageType::Disconnect, impl_->sequence++, 0);
         impl_->SendBytes(bye);
@@ -2281,6 +2219,7 @@ bool ClientTransport::TimedOut() const { return impl_->timedOut; }
 bool ClientTransport::WasDenied() const { return impl_->denied; }
 const std::string& ClientTransport::DenyReason() const { return impl_->denyReason; }
 int ClientTransport::LobbyClientId() const { return impl_->lobbyClientId; }
+const SessionCredentials& ClientTransport::Credentials() const { return impl_->credentials; }
 int ClientTransport::AssignedPlayerId() const { return impl_->assignedPlayerId; }
 bool ClientTransport::InMatch() const { return impl_->inMatch; }
 bool ClientTransport::HasLobbySnapshot() const { return impl_->hasLobbySnapshot; }
@@ -2354,6 +2293,10 @@ MatchSnapshot MakeServerSnapshot(std::uint32_t tick)
 
 int RunLocalhostNetSmoke(const ServerConfig& config)
 {
+    const bool inProcess = config.networkBackend == NetworkBackend::InProcessP2P;
+    const char* label = inProcess ? "datagram-backend-smoke" : "localhost-net-smoke";
+    const char* okMarker = inProcess ? "DATAGRAM_BACKEND_SMOKE_OK" : "LOCALHOST_NET_SMOKE_OK";
+    const char* failMarker = inProcess ? "DATAGRAM_BACKEND_SMOKE_FAIL" : "LOCALHOST_NET_SMOKE_FAIL";
     ServerTransport server;
     // Bind to loopback on an ephemeral port so the smoke never collides with a
     // port already in use (the client connects to the actually-bound port).
@@ -2363,19 +2306,19 @@ int RunLocalhostNetSmoke(const ServerConfig& config)
     serverCfg.minPlayersToStart = 1;
     if (!server.Start(serverCfg))
     {
-        std::cout << "localhost-net-smoke: server start failed: " << server.LastError() << '\n';
-        std::cout << "LOCALHOST_NET_SMOKE_FAIL" << std::endl;
+        std::cout << label << ": server start failed: " << server.LastError() << '\n';
+        std::cout << failMarker << std::endl;
         return 8;
     }
     const std::uint16_t port = server.BoundPort();
-    std::cout << "localhost-net-smoke: server listening on 127.0.0.1:" << port
-              << " (headless, no window)\n";
+    std::cout << label << ": backend=" << ToString(serverCfg.networkBackend)
+              << " listening at 127.0.0.1:" << port << " (headless, no window)\n";
 
-    ClientTransport client;
+    ClientTransport client(serverCfg.networkBackend);
     if (!client.Open("127.0.0.1", port, "", 3.0f))
     {
-        std::cout << "localhost-net-smoke: client open failed: " << client.LastError() << '\n';
-        std::cout << "LOCALHOST_NET_SMOKE_FAIL" << std::endl;
+        std::cout << label << ": client open failed: " << client.LastError() << '\n';
+        std::cout << failMarker << std::endl;
         server.Close();
         return 8;
     }
@@ -2456,7 +2399,7 @@ int RunLocalhostNetSmoke(const ServerConfig& config)
     const bool snapshotValid = gotSnapshot && snap.tick > 0 && !snap.players.empty();
     const int assignedPlayer = client.AssignedPlayerId();
 
-    std::cout << "localhost-net-smoke: connected=" << (connected ? "yes" : "no")
+    std::cout << label << ": connected=" << (connected ? "yes" : "no")
               << " assignedPlayer=" << assignedPlayer
               << " gotSnapshot=" << (gotSnapshot ? "yes" : "no")
               << " snapTick=" << snap.tick << " snapPlayers=" << snap.players.size()
@@ -2472,12 +2415,13 @@ int RunLocalhostNetSmoke(const ServerConfig& config)
 
     // Bad connect: a port with no server must fail gracefully (no crash). Use a
     // short timeout so the smoke stays fast.
-    ClientTransport deadClient;
+    ClientTransport deadClient(serverCfg.networkBackend);
     const std::uint16_t deadPort = 1; // nothing serves UDP on loopback:1
     const bool deadConnected = deadClient.Connect("127.0.0.1", deadPort, "", 0.4f);
-    const bool badConnectHandled = !deadConnected && deadClient.TimedOut();
+    const bool badConnectHandled = !deadConnected
+        && (inProcess ? !deadClient.IsOpen() : deadClient.TimedOut());
     deadClient.Close();
-    std::cout << "localhost-net-smoke: badConnect(port=" << deadPort << ") connected="
+    std::cout << label << ": badConnect(port=" << deadPort << ") connected="
               << (deadConnected ? "yes" : "no")
               << " timedOut=" << (deadClient.TimedOut() ? "yes" : "no")
               << " handled=" << (badConnectHandled ? "ok" : "FAIL") << '\n';
@@ -2486,11 +2430,191 @@ int RunLocalhostNetSmoke(const ServerConfig& config)
     server.Close();
 
     const bool ok = connected && snapshotValid && serverSawCommand && badConnectHandled;
-    std::cout << (ok ? "LOCALHOST_NET_SMOKE_OK" : "LOCALHOST_NET_SMOKE_FAIL") << std::endl;
+    std::cout << (ok ? okMarker : failMarker) << std::endl;
     return ok ? 0 : 8;
+}
+
+int RunDatagramBackendSmoke()
+{
+    std::unique_ptr<IDatagramBackend> listener =
+        CreateDatagramBackend(NetworkBackend::InProcessP2P);
+    std::unique_ptr<IDatagramBackend> duplicate =
+        CreateDatagramBackend(NetworkBackend::InProcessP2P);
+    std::unique_ptr<IDatagramBackend> client =
+        CreateDatagramBackend(NetworkBackend::InProcessP2P);
+    std::unique_ptr<IDatagramBackend> missing =
+        CreateDatagramBackend(NetworkBackend::InProcessP2P);
+    std::unique_ptr<IDatagramBackend> unsupported =
+        CreateDatagramBackend(static_cast<NetworkBackend>(255));
+
+    const bool listened = listener->Listen("p2p-contract", 0);
+    const std::uint16_t contractPort = listener->BoundPort();
+    const bool duplicateRejected = listened
+        && !duplicate->Listen("p2p-contract", contractPort);
+    DatagramPeer ignoredPeer;
+    const bool missingRejected = !missing->OpenClient(
+        "p2p-contract", static_cast<std::uint16_t>(contractPort + 1), ignoredPeer);
+    const bool unsupportedRejected = !unsupported->Listen("p2p-contract", 0)
+        && unsupported->LastError() == "unsupported network backend";
+    DatagramPeer serverPeer;
+    const bool clientOpened = listened
+        && client->OpenClient("p2p-contract", contractPort, serverPeer);
+    const std::array<std::uint8_t, 4> payload { 0xDA, 0x1B, 0xED, 0x26 };
+    const bool sent = clientOpened
+        && client->Send(serverPeer, payload.data(), payload.size());
+    DatagramPeer clientPeer;
+    std::array<std::uint8_t, 16> received {};
+    std::size_t receivedBytes = 0;
+    const bool delivered = sent
+        && listener->Receive(
+            clientPeer, received.data(), received.size(), receivedBytes)
+            == DatagramReceiveResult::Received
+        && receivedBytes == payload.size()
+        && std::equal(payload.begin(), payload.end(), received.begin());
+    const AuthenticatedPeerIdentity clientIdentity =
+        listener->AuthenticatedIdentity(clientPeer);
+    const AuthenticatedPeerIdentity serverIdentity =
+        client->AuthenticatedIdentity(serverPeer);
+    const bool identitiesAuthenticated = delivered
+        && clientIdentity.IsValid()
+        && serverIdentity.IsValid()
+        && clientIdentity != serverIdentity;
+    client->Close();
+    const bool closedPeerRejected = delivered
+        && !listener->Send(clientPeer, payload.data(), payload.size());
+    listener->Close();
+
+    const bool contractOk = listened && duplicateRejected && missingRejected
+        && unsupportedRejected
+        && clientOpened && delivered && identitiesAuthenticated && closedPeerRejected;
+    std::cout << "datagram-backend-smoke: contract duplicate="
+              << (duplicateRejected ? "rejected" : "FAIL")
+              << " missing=" << (missingRejected ? "rejected" : "FAIL")
+              << " unsupported=" << (unsupportedRejected ? "rejected" : "FAIL")
+              << " delivery=" << (delivered ? "ok" : "FAIL")
+              << " identity=" << (identitiesAuthenticated ? "authenticated" : "FAIL")
+              << " closedPeer=" << (closedPeerRejected ? "rejected" : "FAIL") << '\n';
+    if (!contractOk)
+    {
+        std::cout << "DATAGRAM_BACKEND_SMOKE_FAIL" << std::endl;
+        return 8;
+    }
+
+    // Provider identity is an independent reconnect factor. A different P2P
+    // user who somehow obtains all bearer credentials must not be able to
+    // claim the reserved match slot; the original provider identity can.
+    ServerConfig identityConfig;
+    identityConfig.networkBackend = NetworkBackend::InProcessP2P;
+    identityConfig.listenAddress = "identity-contract";
+    identityConfig.port = 0;
+    identityConfig.minPlayersToStart = 1;
+    ServerTransport identityServer;
+    ClientTransport legitimate(NetworkBackend::InProcessP2P);
+    ClientTransport impostor(NetworkBackend::InProcessP2P);
+    bool identityBindingOk = identityServer.Start(identityConfig)
+        && legitimate.Open(
+            "identity-contract", identityServer.BoundPort(), "", 1.0f);
+    for (int attempt = 0; identityBindingOk && attempt < 200
+         && !legitimate.IsConnected(); ++attempt)
+    {
+        identityServer.Poll();
+        legitimate.Poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    identityBindingOk = identityBindingOk && legitimate.IsConnected();
+    if (identityBindingOk)
+    {
+        const std::vector<int> pending = identityServer.TakePendingClients();
+        identityBindingOk = pending.size() == 1;
+        if (identityBindingOk)
+        {
+            identityServer.AssignPlayer(pending.front(), 7);
+            identityServer.SetMatchJoinLocked(true);
+        }
+    }
+
+    const SessionCredentials stolenCredentials = legitimate.Credentials();
+    if (identityBindingOk)
+    {
+        legitimate.Disconnect();
+        for (int attempt = 0; attempt < 50 && identityServer.ClientCount() != 0; ++attempt)
+        {
+            identityServer.Poll();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        identityBindingOk = identityServer.ClientCount() == 0;
+    }
+    if (identityBindingOk)
+    {
+        identityBindingOk = impostor.Open(
+            "identity-contract", identityServer.BoundPort(), "", 1.0f,
+            stolenCredentials);
+    }
+    for (int attempt = 0; identityBindingOk && attempt < 200
+         && !impostor.WasDenied(); ++attempt)
+    {
+        identityServer.Poll();
+        impostor.Poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const bool stolenIdentityDenied = identityBindingOk
+        && impostor.WasDenied()
+        && impostor.DenyReason() == "invalid reconnect credentials";
+    impostor.Close();
+
+    bool originalIdentityReconnected = false;
+    bool originalConnected = false;
+    std::string originalDenyReason;
+    std::size_t reconnectEventCount = 0;
+    if (stolenIdentityDenied)
+    {
+        identityBindingOk = legitimate.Open(
+            "identity-contract", identityServer.BoundPort(), "", 1.0f,
+            stolenCredentials);
+        for (int attempt = 0; identityBindingOk && attempt < 200
+             && !legitimate.IsConnected(); ++attempt)
+        {
+            identityServer.Poll();
+            legitimate.Poll();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        const std::vector<ReconnectedClient> reconnected =
+            identityServer.TakeReconnectedClients();
+        reconnectEventCount = reconnected.size();
+        originalConnected = legitimate.IsConnected();
+        originalDenyReason = legitimate.WasDenied() ? legitimate.DenyReason() : std::string();
+        originalIdentityReconnected = identityBindingOk
+            && legitimate.IsConnected()
+            && reconnected.size() == 1
+            && reconnected.front().playerId == 7;
+    }
+    legitimate.Close();
+    identityServer.Close();
+    identityBindingOk = stolenIdentityDenied && originalIdentityReconnected;
+    std::cout << "datagram-backend-smoke: reconnectIdentity stolen="
+              << (stolenIdentityDenied ? "denied" : "FAIL")
+              << " original=" << (originalIdentityReconnected ? "accepted" : "FAIL")
+              << " connected=" << (originalConnected ? "yes" : "no")
+              << " events=" << reconnectEventCount
+              << " denied=" << (originalDenyReason.empty() ? "no" : originalDenyReason)
+              << '\n';
+    if (!identityBindingOk)
+    {
+        std::cout << "DATAGRAM_BACKEND_SMOKE_FAIL" << std::endl;
+        return 8;
+    }
+
+    ServerConfig config;
+    config.networkBackend = NetworkBackend::InProcessP2P;
+    return RunLocalhostNetSmoke(config);
 }
 #else // DAIBED_DIAGNOSTICS == 0
 int RunLocalhostNetSmoke(const ServerConfig&)
+{
+    std::cout << "diagnostics are disabled in this build (DAIBED_DIAGNOSTICS=OFF)" << std::endl;
+    return 100;
+}
+int RunDatagramBackendSmoke()
 {
     std::cout << "diagnostics are disabled in this build (DAIBED_DIAGNOSTICS=OFF)" << std::endl;
     return 100;
@@ -2558,13 +2682,18 @@ struct ClientTransport::Impl
 {
     std::string lastError = kDisabled;
     std::string denyReason;
+    SessionCredentials credentials;
     MatchSnapshot empty;
     LobbySnapshot emptyLobby;
 };
-ClientTransport::ClientTransport() : impl_(std::make_unique<Impl>()) {}
+ClientTransport::ClientTransport(NetworkBackend) : impl_(std::make_unique<Impl>()) {}
 ClientTransport::~ClientTransport() = default;
-bool ClientTransport::Open(const std::string&, std::uint16_t, const std::string&, float) { return false; }
-bool ClientTransport::Connect(const std::string&, std::uint16_t, const std::string&, float) { return false; }
+bool ClientTransport::Open(
+    const std::string&, std::uint16_t, const std::string&, float,
+    const SessionCredentials&) { return false; }
+bool ClientTransport::Connect(
+    const std::string&, std::uint16_t, const std::string&, float,
+    const SessionCredentials&) { return false; }
 bool ClientTransport::IsOpen() const { return false; }
 void ClientTransport::Close() {}
 const std::string& ClientTransport::LastError() const { return impl_->lastError; }
@@ -2577,6 +2706,7 @@ bool ClientTransport::TimedOut() const { return false; }
 bool ClientTransport::WasDenied() const { return false; }
 const std::string& ClientTransport::DenyReason() const { return impl_->denyReason; }
 int ClientTransport::LobbyClientId() const { return -1; }
+const SessionCredentials& ClientTransport::Credentials() const { return impl_->credentials; }
 int ClientTransport::AssignedPlayerId() const { return -1; }
 bool ClientTransport::InMatch() const { return false; }
 bool ClientTransport::HasLobbySnapshot() const { return false; }
@@ -2604,6 +2734,13 @@ int RunLocalhostNetSmoke(const ServerConfig&)
 {
     std::cout << "localhost-net-smoke: " << kDisabled << " — skipped\n";
     std::cout << "LOCALHOST_NET_SMOKE_SKIPPED" << std::endl;
+    return 0;
+}
+
+int RunDatagramBackendSmoke()
+{
+    std::cout << "datagram-backend-smoke: " << kDisabled << " - skipped\n";
+    std::cout << "DATAGRAM_BACKEND_SMOKE_SKIPPED" << std::endl;
     return 0;
 }
 

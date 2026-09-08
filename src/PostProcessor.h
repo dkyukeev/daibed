@@ -1,10 +1,12 @@
 #pragma once
 
 #include "raylib.h"
+#include "ShaderSettings.h"
 
 class PostProcessor
 {
 public:
+    void SetSettings(const ShaderSettings& settings) { settings_ = settings; settings_.Clamp(); }
     bool Initialize();
     void Shutdown();
     bool BeginFrame(float renderScale);
@@ -12,6 +14,7 @@ public:
         bool effectsEnabled,
         bool bloomEnabled,
         int effectsQuality,
+        int bloomQuality,
         float damageFlash,
         float scopeBlend,
         bool reducedFlashes);
@@ -20,6 +23,9 @@ private:
     bool EnsureTarget(float renderScale);
     bool EnsureBloomTargets(float scale);
 
+    ShaderSettings settings_;
+    int exposureLocation_ = -1;
+    int saturationLocation_ = -1;
     RenderTexture2D target_ {};
     RenderTexture2D bloomTarget_ {};
     RenderTexture2D bloomScratchTarget_ {};

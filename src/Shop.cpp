@@ -30,15 +30,14 @@ const std::vector<ShopItem>& Items()
         ShopItem { 101, "Бой", "Уровень клинка", "урон, дальность и отбрасывание", ResourceType::Iron, 10, ResourceType::Iron, 0, false, 3 },
         ShopItem { 102, "Бой", "Уровень кирки", "быстрее ломает блоки и Кор", ResourceType::Iron, 10, ResourceType::Iron, 0, false, 3 },
         ShopItem { 103, "Бой", "Уровень брони", "уменьшает урон в ближнем бою", ResourceType::Iron, 40, ResourceType::Iron, 0, false, 3 },
-        ShopItem { 104, "Бой", "Энергострелы", "8 тактических выстрелов", ResourceType::Gold, 2, ResourceType::Iron, 0, false, 0 },
         ShopItem { 105, "Бой", "Фаербол", "снаряд для разрушения мостов", ResourceType::Iron, 40, ResourceType::Iron, 0, false, 0 },
         ShopItem { 106, "Бой", "Боевой топор", "широкий тяжелый удар в ближнем бою", ResourceType::Gold, 5, ResourceType::Iron, 0, false, 0 },
         ShopItem { 107, "Бой", "Копье", "длинная дистанция в ближнем бою", ResourceType::Gold, 4, ResourceType::Crystal, 1, true, 0 },
         ShopItem { 108, "Бой", "Лук", "натяжение ЛКМ, расходует стрелы", ResourceType::Gold, 12, ResourceType::Iron, 0, false, 0 },
         ShopItem { 109, "Бой", "Улучшение лука", "I: Сила I · II: Сила I/Отдача I · III: Сила II/Отдача II", ResourceType::Gold, 5, ResourceType::Crystal, 1, true, 3 },
-        ShopItem { 401, "Бластер", "Бластер", "заряжаемый дальнобойный бластер", ResourceType::Gold, 8, ResourceType::Crystal, 2, true, 0 },
-        ShopItem { 402, "Бластер", "Ускоренная зарядка", "ветка скорострельности, уровни I-III", ResourceType::Gold, 5, ResourceType::Crystal, 1, true, 3 },
-        ShopItem { 403, "Бластер", "Усиленный выстрел", "ветка урона, уровни I-III", ResourceType::Gold, 6, ResourceType::Crystal, 1, true, 3 },
+        ShopItem { 401, "Дальний бой", "Бластер / снайперка", "Свидетель получает снайперскую винтовку; остальные — заряжаемый бластер", ResourceType::Gold, 8, ResourceType::Crystal, 2, true, 0 },
+        ShopItem { 402, "Дальний бой", "Ускоренная зарядка", "ветка скорострельности, уровни I-III", ResourceType::Gold, 5, ResourceType::Crystal, 1, true, 3 },
+        ShopItem { 403, "Дальний бой", "Усиленный выстрел", "ветка урона, уровни I-III", ResourceType::Gold, 6, ResourceType::Crystal, 1, true, 3 },
         ShopItem { 201, "Утилиты", "Рывок мобильности", "18 с скорости и усиленного прыжка", ResourceType::Crystal, 1, ResourceType::Iron, 0, false, 0 },
         ShopItem { 202, "Утилиты", "Импульс щита", "12 с защиты от входящего урона", ResourceType::Crystal, 3, ResourceType::Iron, 0, false, 0 },
         ShopItem { 203, "Утилиты", "Аптечка", "мгновенный заряд лечения", ResourceType::Gold, 2, ResourceType::Iron, 0, false, 0 },
@@ -391,6 +390,7 @@ bool Shop::Purchase(Player& player, Team& team, int choice, std::string& message
         return true;
 
     case 401:
+    {
         if (inventory.HasItem(ItemType::Blaster) || inventory.HasItem(ItemType::SniperRifle))
         {
             message = "Бластер уже куплен.";
@@ -401,9 +401,15 @@ bool Shop::Purchase(Player& player, Team& team, int choice, std::string& message
             message = "Недостаточно ресурсов для бластера.";
             return false;
         }
-        inventory.AddItem(ItemType::Blaster, 1);
-        message = "Куплен бластер. Удерживайте ЛКМ для заряда, ПКМ — точное прицеливание.";
+        const ItemType rangedWeapon = player.GetHeroId() == HeroId::Svidetel
+            ? ItemType::SniperRifle
+            : ItemType::Blaster;
+        inventory.AddItem(rangedWeapon, 1);
+        message = rangedWeapon == ItemType::SniperRifle
+            ? "Снайперская винтовка Свидетеля куплена. ЛКМ — зарядка, ПКМ — прицел."
+            : "Куплен бластер. Удерживайте ЛКМ для заряда, ПКМ — точное прицеливание.";
         return true;
+    }
 
     case 402:
         if (!inventory.HasItem(ItemType::Blaster) && !inventory.HasItem(ItemType::SniperRifle))

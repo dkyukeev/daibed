@@ -95,7 +95,7 @@ constexpr int kInventorySlotCount = kHotbarSlotCount + kMainInventorySlotCount;
 
 // A dropped inventory stack in the world. Raylib-free (Vec3) so it can be owned
 // by MatchSimulation; the renderer/physics convert at the Game boundary. (Moved
-// here from Feedback.h.) See docs/NETWORK_PREP_PLAN.md.
+// here from Feedback.h.) See docs/MULTIPLAYER_TARGET_ARCHITECTURE.md.
 struct DroppedItem
 {
     ItemStack stack;

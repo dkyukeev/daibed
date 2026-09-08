@@ -1,12 +1,13 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 // Discrete, event-style player action carried alongside the per-tick movement
 // intent (economy / inventory). Unlike the held/pressed combat flags these are
 // rare one-shot requests, so they ride on a monotonic sequence number and the
 // server applies each (player, actionSeq) exactly once — duplicates and resends
-// are harmless. See docs/NETWORK_PREP_PLAN.md (Phase A).
+// are harmless. See docs/MULTIPLAYER_TARGET_ARCHITECTURE.md.
 enum class PlayerActionType : int
 {
     None = 0,
@@ -70,7 +71,7 @@ inline bool DecodePackedPlayerActionParam(int packed, int& op, int& slot, int& a
 // Humans and (later) bots produce these; the authoritative simulation consumes
 // them. Movement is expressed as local axes and look as yaw/pitch so the same
 // command is meaningful regardless of camera/renderer state on the receiving
-// side. See docs/NETWORK_PREP_PLAN.md.
+// side. See docs/MULTIPLAYER_TARGET_ARCHITECTURE.md.
 struct PlayerCommand
 {
     std::uint32_t controlledPlayerId = 0;
@@ -90,6 +91,8 @@ struct PlayerCommand
     bool sneak = false;
 
     int selectedSlot = 0; // active hotbar slot index
+    int woolVariant = -1; // selected dye inside the combined wool hotbar stack.
+    int arrowVariant = 0; // selected infinite-quiver arrow family.
 
     // --- Attack / break (left mouse) ------------------------------------
     bool attackPressed = false;
@@ -125,6 +128,11 @@ struct PlayerCommand
     int actionType = static_cast<int>(PlayerActionType::None);
     int actionParamA = 0;
     int actionParamB = 0;
+
+    // Discrete player chat message. chatSeq is client-monotonic so command
+    // batching/retries cannot duplicate a line on the authoritative server.
+    std::uint32_t chatSeq = 0;
+    std::string chatMessage;
 
     // --- Lag compensation (server-side hitbox rewind) -------------------
     // The authoritative server tick this client was actually SEEING enemies at

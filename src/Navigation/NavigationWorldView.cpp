@@ -236,7 +236,8 @@ Vector3 NavigationWorldView::SupportCenter(
     float bodyCenterAboveSupport) const
 {
     const Vector3 center = world_.GridToWorld(support);
-    return Vector3 { center.x, center.y + bodyCenterAboveSupport, center.z };
+    const float top = world_.BlockCollisionTop(support).value_or(center.y + 0.5f);
+    return Vector3 { center.x, top + bodyCenterAboveSupport - 0.5f, center.z };
 }
 
 std::optional<GridPos> NavigationWorldView::FindSupport(

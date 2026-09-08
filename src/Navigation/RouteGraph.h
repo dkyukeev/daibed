@@ -3,6 +3,7 @@
 #include "CreativeMap.h"
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -50,7 +51,8 @@ public:
         GridPos goal,
         int teamId,
         const GridPos* recentlyFailedPosition = nullptr,
-        float failurePenalty = 0.0f) const;
+        float failurePenalty = 0.0f,
+        const std::function<bool(const CreativeRouteNode&)>& canReachEntry = {}) const;
 
 private:
     struct Link
@@ -62,7 +64,8 @@ private:
     };
 
     bool IsAccessible(int nodeIndex, int teamId) const noexcept;
-    int FindNearestNode(GridPos pos, int teamId) const noexcept;
+    int FindNearestNode(GridPos pos, int teamId,
+        const std::function<bool(const CreativeRouteNode&)>& canReach = {}) const;
 
     std::vector<CreativeRouteNode> nodes_;
     std::vector<std::vector<Link>> adjacency_;

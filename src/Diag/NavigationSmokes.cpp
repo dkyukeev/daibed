@@ -272,6 +272,58 @@ int Game::RunNavigationSmoke()
             + " path=" + PathFingerprint(result.path));
     }
 
+    // Imported Castle lanes mix full blocks and lower slabs at the same
+    // voxel elevation. Execute the plan through real player collision.
+    {
+        world_.Clear();
+        networkActionState_.clear();
+        players_.clear();
+        for (int x = 0; x <= 6; ++x)
+            world_.PlaceBlock(GridPos { x, 0, 0 },
+                x < 3 ? GroundBlock() : Block { BlockType::StoneBrickSlabBlock, -1, false });
+        Player bot(930, "lower-slab-lane", 0, Vector3 { 0.0f, 1.50f, 0.0f }, false);
+        bot.SetControlKind(PlayerControlKind::BotAuthoritative);
+        players_.push_back(bot);
+        NavigationProfile profile = PlannerProfile();
+        GoalReachPosition goal(GridPos { 5, 0, 0 });
+        const NavigationSearchResult result = Search(world_, GridPos { 0, 0, 0 }, goal, profile);
+        PathExecutor executor;
+        executor.SetPath(result.path);
+        bool finished = false;
+        for (std::uint32_t tick = 1; tick <= 480 && !finished; ++tick)
+        {
+            NavigationWorldView view(world_, 0);
+            const PathExecutionUpdate update = executor.Update(players_.front(), view, profile, kTick, tick);
+            PlayerCommand command;
+            command.controlledPlayerId = 930;
+            command.tick = tick;
+            if (update.proposal.active) command = update.proposal.command;
+            ApplyPlayerCommand(players_.front(), command, kTick);
+            players_.front().UpdateTimers(kTick);
+            finished = update.pathFinished || executor.Status() == MovementExecutionStatus::Succeeded;
+            if (update.needsRepath) break;
+        }
+        const Vector3 position = players_.front().GetPosition();
+        const bool passed = result.Succeeded() && finished && position.x > 4.5f;
+        check("castle-lower-slab-lane", passed, passed ? "" :
+            "x=" + std::to_string(position.x) + " y=" + std::to_string(position.y)
+            + " path=" + PathFingerprint(result.path));
+    }
+
+    {
+        World world;
+        world.PlaceBlock(GridPos { 0, 0, 0 }, Block { BlockType::StoneBrickSlabBlock, -1, false });
+        world.PlaceBlock(GridPos { 1, 1, 0 }, GroundBlock());
+        GoalReachPosition goal(GridPos { 1, 1, 0 });
+        NavigationProfile profile = PlannerProfile();
+        const NavigationSearchResult ordinary = Search(world, GridPos { 0, 0, 0 }, goal, profile);
+        profile.jumpSpeed = 10.0f;
+        const NavigationSearchResult boosted = Search(world, GridPos { 0, 0, 0 }, goal, profile);
+        const bool passed = !ordinary.Succeeded() && boosted.Succeeded();
+        check("castle-slab-jump-height", passed, passed ? "" :
+            "a voxel step from a lower slab ignored the real 1.5-block collision rise");
+    }
+
     // A one-block climb is a controlled adjacent hop and must execute through
     // the same authoritative command path without overshooting its landing.
     {
@@ -791,11 +843,13 @@ int Game::RunNavigationSmoke()
         NavigationProfile profile = PlannerProfile();
         NavigationWorldView view(world);
         bool abandoned = false;
+        NavigationFailedTransition failure;
         for (std::uint32_t tick = 1; tick <= 420 && !abandoned; ++tick)
         {
             const NavigationControllerUpdate update = controller.Update(
                 actor, view, profile, kTick, tick);
             abandoned = update.routeAbandoned;
+            if (abandoned) failure = { update.failedMovementFrom, update.failedMovementTo, update.failedMovementType };
         }
         const bool passed = abandoned
             && !controller.HasGoal()
@@ -805,6 +859,17 @@ int Game::RunNavigationSmoke()
             "abandoned=" + std::to_string(abandoned ? 1 : 0)
             + " failures=" + std::to_string(controller.Metrics().movementFailures)
             + " paths=" + std::to_string(controller.Metrics().pathRequests));
+        controller.SetGoal(std::make_shared<GoalReachPosition>(GridPos { 8, 0, 0 }), 923);
+        controller.Update(actor, view, profile, kTick, 421);
+        const NavigationPath alternative = controller.DebugSnapshot().path;
+        const bool repeatsFailure = std::any_of(alternative.movements.begin(), alternative.movements.end(),
+            [&failure](const PlannedMovement& movement)
+            {
+                return movement.from == failure.from && movement.to == failure.to && movement.type == failure.type;
+            });
+        check("failed-transition-survives-goal-change", abandoned && !alternative.movements.empty() && !repeatsFailure,
+            "new objective immediately rediscovered an action already proven to fail");
+
     }
 
     {
@@ -1270,6 +1335,12 @@ int Game::RunNavigationSmoke()
         const CreativeRouteNode* reroutedBranch = rerouted.nodeIndices.size() > 1
             ? graph.Node(rerouted.nodeIndices[1]) : nullptr;
 
+        const RouteCorridor connectors = graph.FindCorridor(GridPos { -5, 0, 0 }, GridPos { 65, 0, 0 }, 0);
+        const RouteCorridor sameNode = graph.FindCorridor(GridPos { -5, 0, 0 }, GridPos { 5, 0, 0 }, 0);
+        check("route-cost-includes-connectors", connectors.valid && sameNode.valid
+            && std::fabs(connectors.cost - 70.0f) < 0.001f && std::fabs(sameNode.cost - 10.0f) < 0.001f,
+            "strategic route cost omitted travel between objectives and graph portals");
+
         RouteGraph invalid;
         const bool acceptedInvalid = invalid.Build(nodes,
             { CreativeRouteEdge { "start", "missing", 1.0f, true, "bad" } }, &errors);
@@ -1280,6 +1351,355 @@ int Game::RunNavigationSmoke()
             && reroutedBranch != nullptr && reroutedBranch->id == "flank"
             && !acceptedInvalid && invalid.Empty();
         check("route-graph", passed, passed ? "" : "branch, determinism, or validation failed");
+    }
+
+    {
+        World world;
+        AddPlatform(world, 0, 3, 0, 10);
+        AddPlatform(world, 8, 10, 0, 2);
+        RouteGraph graph;
+        graph.Build({
+            { "island", GridPos { 8, 0, 0 }, -1, "bridge_land" },
+            { "entrance", GridPos { 0, 0, 8 }, -1, "bridge_start" }
+        }, { { "entrance", "island", 1.0f, true, "bridge" } });
+        NavigationProfile profile = PlannerProfile();
+        profile.canPlaceBlocks = false;
+        profile.canBreakBlocks = false;
+        profile.maxGapJumpBlocks = 0;
+        const GridPos start { 3, 0, 0 };
+        const auto reachable = [&](const CreativeRouteNode& node) {
+            const auto result = Search(world, start, GoalReachPosition(node.pos), profile);
+            return result.status == NavigationSearchStatus::Success
+                || result.status == NavigationSearchStatus::AlreadySatisfied;
+        };
+        const RouteCorridor corridor = graph.FindCorridor(start, GridPos { 8, 0, 0 }, 0,
+            nullptr, 0.0f, reachable);
+        check("route-entry-on-current-island", corridor.valid && corridor.nodeIndices.size() == 2
+            && graph.Node(corridor.nodeIndices.front())->id == "entrance"
+            && corridor.segments.front().IsBridge(),
+            "nearest portal across void bypassed the reachable network entrance");
+        const RouteCorridor blocked = graph.FindCorridor(start, GridPos { 8, 0, 0 }, 0,
+            nullptr, 0.0f, [](const CreativeRouteNode&) { return false; });
+        check("route-entry-unreachable", !blocked.valid,
+            "entry rejection silently fell back to geometric proximity");
+    }
+
+    // Exercise Game's handoff, not just the pathfinder: a failed entry must
+    // never hand raw long-distance movement back to legacy steering.
+    {
+        world_.Clear();
+        players_.clear();
+        botMemories_.clear();
+        botMemoryIndexByPlayerId_.clear();
+        botNavigationControllers_.clear();
+        botNavigationIntents_.clear();
+        AddPlatform(world_, 0, 5, -2, 2);
+        AddPlatform(world_, 40, 44, -2, 2);
+        routeGraph_.Build({ { "far", GridPos { 40, 1, 0 }, -1, "lane" } }, {});
+        Player bot(933, "entry-recovery", 0, Vector3 { 1, 1.402f, 0 }, false);
+        bot.SetControlKind(PlayerControlKind::BotAuthoritative);
+        players_.push_back(bot);
+        BotMemory& memory = GetBotMemory(players_.front());
+        memory.intent = BotIntent::PressureCore;
+        memory.role = BotRole::Rusher;
+        const Vector3 objective { 40, 1.4f, 0 };
+        Vector3 approach = ChooseBotRouteCorridorWaypoint(players_.front(), objective);
+        check("entry-partial-approach", memory.routeEntryPending
+            && approach.x > 2.0f && approach.x <= 5.0f,
+            "failed graph entry did not retain the reachable part of the approach");
+        const auto entryFailures = navigationMetrics_.corridorFailures;
+        memory.routeCorridorReplanCooldown = 0.0f;
+        const Vector3 retainedApproach = ChooseBotRouteCorridorWaypoint(players_.front(), objective);
+        check("entry-approach-commitment", navigationMetrics_.corridorFailures == entryFailures
+            && retainedApproach.x == approach.x && retainedApproach.z == approach.z,
+            "entry search replaced an unfinished approach when its retry cooldown expired");
+        bool owned = true;
+        for (int tick = 0; tick < 240; ++tick)
+        {
+            memory.routeCorridorReplanCooldown = std::max(0.0f, memory.routeCorridorReplanCooldown - kTick);
+            approach = ChooseBotRouteCorridorWaypoint(players_.front(), objective);
+            PlayerCommand command;
+            bool satisfied = false;
+            owned = UpdateActionNavigation(players_.front(), memory, approach, nullptr, nullptr,
+                kTick, command, satisfied) && owned;
+            ApplyPlayerCommand(players_.front(), command, kTick);
+            players_.front().UpdateTimers(kTick);
+        }
+        check("entry-recovery-owns-movement", owned && memory.routeEntryPending
+            && players_.front().GetPosition().x <= 5.4f && players_.front().GetPosition().y > 1.0f,
+            "entry failure or arrival re-enabled blind steering off the island");
+        world_.AddBridge(GridPos { 5, 0, 0 }, GridPos { 40, 0, 0 }, 0);
+        memory.routeCorridorReplanCooldown = 0.0f;
+        ChooseBotRouteCorridorWaypoint(players_.front(), objective);
+        check("entry-recovery-rejoins-route", !memory.routeEntryPending && memory.hasRouteCorridorObjective,
+            "new physical connection did not release entry recovery");
+
+        routeGraph_.Clear();
+        world_.Clear();
+        world_.PlaceBlock(GridPos {}, GroundBlock());
+        players_.front().SetPosition(Vec3 { 0, 1.402f, 0 });
+        players_.front().SetVelocity(Vec3 {});
+        memory.routeEntryPending = false;
+        memory.usingRouteCorridor = false;
+        botNavigationControllers_.clear();
+        botNavigationIntents_.clear();
+        PlayerCommand waiting;
+        bool satisfied = false;
+        const bool firstOwned = UpdateActionNavigation(players_.front(), memory, objective, nullptr, nullptr,
+            kTick, waiting, satisfied);
+        const bool cooldownOwned = UpdateActionNavigation(players_.front(), memory, objective, nullptr, nullptr,
+            kTick, waiting, satisfied);
+        check("failed-search-cooldown-owns-movement", firstOwned && cooldownOwned && waiting.sneak
+            && waiting.moveForward == 0.0f && waiting.moveStrafe == 0.0f,
+            "failed local search transferred movement to the legacy fallback");
+        AddPlatform(world_, 0, 3, -1, 1);
+        memory.routeEntryPending = true;
+        memory.usingRouteCorridor = true;
+        UpdateActionNavigation(players_.front(), memory, Vector3 { 0, 1.4f, 0 }, nullptr, nullptr,
+            kTick, waiting, satisfied);
+        const bool initiallySatisfied = satisfied;
+        UpdateActionNavigation(players_.front(), memory, Vector3 { 3, 1.4f, 0 }, nullptr, nullptr,
+            kTick, waiting, satisfied);
+        check("adjacent-recovery-goals-are-distinct", initiallySatisfied && !satisfied
+            && waiting.moveForward > 0.0f,
+            "two recovery waypoints in one coarse bucket retained the completed goal");
+        auto& help = teamCoordBuses_[0];
+        help.Clear();
+        const float now = matchSimulation_.MatchTimeSeconds();
+        help.PublishBridgeRequest(1, BotIntent::PressureCore, Vector3 { 3, 1.4f, 0 }, 1, now);
+        help.TryClaimBridgeRequest(933, players_.front().GetPosition(), 8, now, false);
+        memory.assignedBridgeAssist = true;
+        memory.routeEntryPending = false;
+        memory.usingRouteCorridor = false;
+        EnergyCore remoteCore(1, GridPos { 80, 1, 0 }, 126);
+        bool helped = false;
+        bool attackedCore = false;
+        for (int tick = 0; tick < 240 && !helped; ++tick)
+        {
+            UpdateActionNavigation(players_.front(), memory, Vector3 { 3, 1.4f, 0 }, nullptr, &remoteCore,
+                kTick, waiting, satisfied);
+            attackedCore = attackedCore || waiting.attackHeld;
+            ApplyPlayerCommand(players_.front(), waiting, kTick);
+            players_.front().UpdateTimers(kTick);
+            helped = satisfied && help.bridgeRequestorId < 0;
+        }
+        check("bridge-helper-reaches-request", helped && !attackedCore && players_.front().GetPosition().x < 4.0f,
+            "helper pursued the enemy Core instead of completing its assigned local request");
+        help.Clear();
+        world_.Clear();
+        networkActionState_.clear();
+        botNavigationControllers_.clear();
+        botNavigationIntents_.clear();
+        AddPlatform(world_, -2, 0, -1, 1);
+        AddPlatform(world_, 8, 10, -1, 1);
+        players_.front().SetPosition(Vec3 { 0, 1.402f, 0 });
+        players_.front().SetVelocity(Vec3 {});
+        players_.front().GetInventory().AddBlock(BlockType::WoolBlock, 8);
+        memory.intent = BotIntent::SecureResources;
+        help.PublishBridgeRequest(1, BotIntent::SecureResources, Vector3 { 8, 1.4f, 0 }, -1, now);
+        help.TryClaimBridgeRequest(933, players_.front().GetPosition(), 8, now, false);
+        helped = false;
+        for (std::uint32_t tick = 1; tick <= 2400 && !helped; ++tick)
+        {
+            UpdateActionNavigation(players_.front(), memory, Vector3 { 8, 1.4f, 0 }, nullptr, nullptr,
+                kTick, waiting, satisfied);
+            waiting.tick = tick;
+            ApplyPlayerCommand(players_.front(), waiting, kTick);
+            ApplyNetworkPlayerActions(players_.front(), waiting, kTick);
+            players_.front().UpdateTimers(kTick);
+            helped = satisfied && help.bridgeRequestorId < 0;
+        }
+        check("bridge-helper-builds-to-request", helped
+            && players_.front().GetInventory().GetBlockCount(BlockType::WoolBlock) < 8
+            && players_.front().GetPosition().x > 7.0f,
+            "x=" + std::to_string(players_.front().GetPosition().x)
+                + " y=" + std::to_string(players_.front().GetPosition().y));
+        help.Clear();
+    }
+
+    // Team-level nomination must evaluate actual geometry before the per-bot
+    // update order can claim a request.
+    {
+        world_.Clear();
+        players_.clear();
+        botMemories_.clear();
+        botMemoryIndexByPlayerId_.clear();
+        for (auto& bus : teamCoordBuses_) bus.Clear();
+        AddPlatform(world_, -2, 0, -1, 1);
+        AddPlatform(world_, 8, 12, -1, 1);
+        players_.emplace_back(940, "stranded", 0, Vector3 { 8, 1.402f, 0 }, false);
+        players_.emplace_back(941, "across-gap", 0, Vector3 { 0, 1.402f, 0 }, false);
+        players_.emplace_back(942, "reachable", 0, Vector3 { 12, 1.402f, 0 }, false);
+        for (auto& player : players_)
+        {
+            player.SetControlKind(PlayerControlKind::BotAuthoritative);
+            player.GetInventory().AddBlock(BlockType::WoolBlock, 4);
+            auto& memory = GetBotMemory(player);
+            memory.role = BotRole::Rusher;
+            memory.intent = BotIntent::SecureResources;
+        }
+        auto& bus = teamCoordBuses_[0];
+        const float now = matchSimulation_.MatchTimeSeconds();
+        bus.PublishBridgeRequest(940, BotIntent::SecureResources, players_[0].GetPosition(), -1, now);
+        UpdateBotBridgeCoordination();
+        const int chosen = bus.preferredBridgeHelperId;
+        std::reverse(players_.begin(), players_.end());
+        bus.bridgeHelperRecheckAt = now;
+        UpdateBotBridgeCoordination();
+        check("bridge-helper-production-selection", chosen == 942 && bus.preferredBridgeHelperId == 942,
+            "team coordination chose the first candidate across a gap instead of the reachable ally");
+        bus.Clear();
+    }
+
+    // A helper must supply actual items, and the recipient must be able to
+    // use them through authoritative placement commands to leave its island.
+    {
+        world_.Clear();
+        players_.clear();
+        botMemories_.clear();
+        botMemoryIndexByPlayerId_.clear();
+        botNavigationControllers_.clear();
+        botNavigationIntents_.clear();
+        networkActionState_.clear();
+        economyActionSeq_.clear();
+        matchSimulation_.DroppedItems().clear();
+        for (auto& bus : teamCoordBuses_) bus.Clear();
+        AddPlatform(world_, -2, 1, -1, 1);
+        AddPlatform(world_, 9, 11, -1, 1);
+        players_.emplace_back(950, "supplier", 0, Vector3 { 0, 1.402f, 0 }, false);
+        players_.emplace_back(951, "recipient", 0, Vector3 { 0.3f, 1.402f, 0 }, false);
+        for (auto& player : players_)
+        {
+            player.SetControlKind(PlayerControlKind::BotAuthoritative);
+            GetBotMemory(player);
+            PlayerCommand idle;
+            for (int tick = 0; tick < 6; ++tick) ApplyPlayerCommand(player, idle, kTick);
+        }
+        auto& helper = players_[0];
+        auto& recipient = players_[1];
+        helper.GetInventory().AddBlock(BlockType::WoolBlock, 20);
+        auto& helperMemory = GetBotMemory(helper);
+        helperMemory.assignedBridgeAssist = true;
+        helperMemory.intent = BotIntent::SecureResources;
+        helperMemory.role = BotRole::Rusher;
+        auto& recipientMemory = GetBotMemory(recipient);
+        recipientMemory.intent = BotIntent::SecureResources;
+        recipientMemory.role = BotRole::Rusher;
+        recipientMemory.hasObjectiveTarget = true;
+        recipientMemory.objectiveTarget = Vector3 { 9, 1.4f, 0 };
+        auto& bus = teamCoordBuses_[0];
+        const float now = matchSimulation_.MatchTimeSeconds();
+        bus.PublishBridgeRequest(recipient.GetId(), BotIntent::SecureResources, recipient.GetPosition(), -1, now);
+        bus.TryClaimBridgeRequest(helper.GetId(), helper.GetPosition(), 20, now, false);
+        PlayerCommand handoff;
+        bool satisfied = false;
+        UpdateActionNavigation(helper, helperMemory, recipient.GetPosition(), nullptr, nullptr, kTick, handoff, satisfied);
+        ApplyPlayerCommand(helper, handoff, kTick);
+        const auto delivered = ApplyPlayerEconomyCommand(helper, handoff);
+        const auto duplicate = ApplyPlayerEconomyCommand(helper, handoff);
+        for (int tick = 0; tick < 120; ++tick) UpdateDroppedItems(kTick);
+        check("bridge-helper-supplies-real-blocks", satisfied && delivered.success && !duplicate.handled
+            && helper.GetInventory().GetBlocks() == 4 && recipient.GetInventory().GetBlocks() == 16,
+            "donor=" + std::to_string(helper.GetInventory().GetBlocks())
+                + " recipient=" + std::to_string(recipient.GetInventory().GetBlocks()));
+        helper.SetPosition(Vec3 { -1.5f, 1.402f, 0 });
+        helper.SetVelocity(Vec3 {});
+        const auto observation = bus.bridgeHelpFollowups;
+        bool resumed = false;
+        for (std::uint32_t tick = 1; tick <= 2400 && !resumed; ++tick)
+        {
+            PlayerCommand command;
+            UpdateActionNavigation(recipient, recipientMemory, recipientMemory.objectiveTarget,
+                nullptr, nullptr, kTick, command, satisfied);
+            command.tick = tick;
+            ApplyPlayerCommand(recipient, command, kTick);
+            ApplyNetworkPlayerActions(recipient, command, kTick);
+            recipient.UpdateTimers(kTick);
+            resumed = satisfied && recipient.GetPosition().x > 7.0f && recipient.IsOnGround()
+                && !world_.IsAir(GridPos { 8, 0, 0 });
+        }
+        check("bridge-recipient-resumes-after-supply", resumed && observation.size() == 1
+            && recipient.GetInventory().GetBlocks() < 16
+            && AssessBotHelpOutcome(observation.front(), recipient.GetPosition(), recipientMemory.objectiveTarget,
+                recipient.IsAlive(), recipient.IsOnGround(), recipientMemory.routeEntryPending, now + 10)
+                    == BotHelpOutcome::Progress,
+            "x=" + std::to_string(recipient.GetPosition().x) + " blocks=" + std::to_string(recipient.GetInventory().GetBlocks()));
+        helper.SetPosition(Vec3 { 0, 1.402f, 0 });
+        recipient.SetPosition(Vec3 { 0.3f, 1.402f, 0 });
+        helper.SetVelocity(Vec3 {});
+        recipient.SetVelocity(Vec3 {});
+        while (recipient.GetInventory().SpendBlock(BlockType::WoolBlock)) {}
+        for (auto& player : players_)
+        {
+            PlayerCommand idle;
+            for (int tick = 0; tick < 6; ++tick) ApplyPlayerCommand(player, idle, kTick);
+        }
+        const auto trySupply = [&]() {
+            bus.Clear();
+            bus.PublishBridgeRequest(recipient.GetId(), BotIntent::SecureResources, recipient.GetPosition(), -1, now);
+            bus.TryClaimBridgeRequest(helper.GetId(), helper.GetPosition(), helper.GetInventory().GetBlocks(), now, false);
+            PlayerCommand command;
+            UpdateActionNavigation(helper, helperMemory, recipient.GetPosition(), nullptr, nullptr, kTick, command, satisfied);
+            return satisfied && command.actionType == static_cast<int>(PlayerActionType::None);
+        };
+        check("bridge-supply-preserves-emergency-stock", trySupply() && helper.GetInventory().GetBlocks() == 4,
+            "helper gave away its emergency reserve");
+        helper.GetInventory().AddBlock(BlockType::WoolBlock, 16);
+        recipient.GetInventory().AddBlock(BlockType::WoolBlock, 4);
+        check("bridge-supply-skips-restocked-recipient", trySupply() && helper.GetInventory().GetBlocks() == 20,
+            "helper supplied a teammate that had already restocked");
+        bus.Clear();
+    }
+
+    {
+        world_.Clear();
+        players_.clear();
+        botMemories_.clear();
+        botMemoryIndexByPlayerId_.clear();
+        botNavigationControllers_.clear();
+        botNavigationIntents_.clear();
+        networkActionState_.clear();
+        for (auto& bus : teamCoordBuses_) bus.Clear();
+        AddPlatform(world_, -2, 0, -1, 1);
+        AddPlatform(world_, 9, 44, -1, 1);
+        routeGraph_.Build({ { "entry", GridPos { 9, 0, 0 }, -1, "lane" },
+            { "goal", GridPos { 40, 0, 0 }, -1, "lane" } },
+            { { "entry", "goal", 1.0f, true, "walk" } });
+        players_.emplace_back(960, "restocked-entry", 0, Vector3 { 0, 1.402f, 0 }, false);
+        auto& bot = players_.front();
+        bot.SetControlKind(PlayerControlKind::BotAuthoritative);
+        auto& memory = GetBotMemory(bot);
+        memory.role = BotRole::Rusher;
+        memory.intent = BotIntent::PressureCore;
+        const Vector3 objective { 40, 1.4f, 0 };
+        ChooseBotRouteCorridorWaypoint(bot, objective);
+        check("entry-without-stock-waits", memory.routeEntryPending && memory.routeEntryTarget.x < 1,
+            "empty-handed bot accepted an entrance across an unbuilt span");
+        bot.GetInventory().AddBlock(BlockType::WoolBlock, 4);
+        memory.routeCorridorReplanCooldown = 0;
+        const auto insufficient = ChooseBotRouteCorridorWaypoint(bot, objective);
+        check("entry-repair-requires-full-stocked-path", insufficient.x < 1 && !memory.routeEntryRepair,
+            "insufficient stock admitted a partial bridge to the entrance");
+        bot.GetInventory().AddBlock(BlockType::WoolBlock, 12);
+        memory.routeCorridorReplanCooldown = 0;
+        const Vector3 repair = ChooseBotRouteCorridorWaypoint(bot, objective);
+        const bool planned = repair.x > 8;
+        bool rejoined = false;
+        for (std::uint32_t tick = 1; planned && tick <= 2400 && !rejoined; ++tick)
+        {
+            memory.routeCorridorReplanCooldown = std::max(0.0f, memory.routeCorridorReplanCooldown - kTick);
+            const Vector3 waypoint = ChooseBotRouteCorridorWaypoint(bot, objective);
+            PlayerCommand command;
+            bool satisfied = false;
+            UpdateActionNavigation(bot, memory, waypoint, nullptr, nullptr, kTick, command, satisfied);
+            command.tick = tick;
+            ApplyPlayerCommand(bot, command, kTick);
+            ApplyNetworkPlayerActions(bot, command, kTick);
+            bot.UpdateTimers(kTick);
+            rejoined = !memory.routeEntryPending && bot.IsOnGround() && bot.GetPosition().x > 8;
+        }
+        check("restocked-entry-repair-execution", planned && rejoined && bot.GetInventory().GetBlocks() < 16,
+            "target=" + std::to_string(repair.x) + " x=" + std::to_string(bot.GetPosition().x));
     }
 
     // A bounded search must make useful progress even when the only valid
@@ -1334,6 +1754,107 @@ int Game::RunNavigationSmoke()
                     Block { block.type, block.teamId, block.breakable, block.variant }, true);
             }
         }
+        if (loaded)
+        {
+            // Model a builder that exhausted its stack halfway across the
+            // authored span. The nearer landing is still across the void.
+            World partialBridgeWorld;
+            for (const auto& [pos, block] : castleWorld.GetBlocks())
+                partialBridgeWorld.PlaceBlock(pos, block, true);
+            partialBridgeWorld.AddBridge(GridPos { 79, 52, -17 }, GridPos { 60, 52, -17 }, 52);
+            partialBridgeWorld.AddBridge(GridPos { 60, 52, -17 }, GridPos { 60, 52, -31 }, 52);
+            NavigationWorldView entryView(partialBridgeWorld, 2);
+            NavigationProfile entryProfile = PlannerProfile();
+            entryProfile.canPlaceBlocks = false;
+            entryProfile.canBridge = false;
+            entryProfile.canBreakBlocks = false;
+            NavigationSearchLimits entryLimits;
+            entryLimits.maxExpansions = 3200;
+            entryLimits.maxActions = 64;
+            entryLimits.maxSearchRadius = 48;
+            entryLimits.allowPartial = false;
+            int attempts = 0;
+            std::string outcomes;
+            const auto entryCheck = [&](const CreativeRouteNode& node) {
+                if (attempts++ >= 4) return false;
+                const auto support = entryView.FindSupport(castleWorld.GridToWorld(node.pos), 12, 2);
+                if (!support) return false;
+                const auto result = VoxelPathfinder {}.FindPath(
+                    NavigationState { GridPos { 60, 52, -31 }, 0, 0 },
+                    GoalWithinRadius(*support, 0.8f), entryView, entryProfile, entryLimits);
+                outcomes += node.id + ":" + ToString(result.status) + " ";
+                return result.status == NavigationSearchStatus::Success
+                    || result.status == NavigationSearchStatus::AlreadySatisfied;
+            };
+            const auto entry = graph.FindCorridor(GridPos { 60, 52, -31 }, GridPos { 78, 53, 4 }, 2,
+                nullptr, 0.0f, entryCheck);
+            check("castle-stranded-entry", entry.valid, outcomes);
+
+            NavigationWorldView roofView(castleWorld, 2);
+            NavigationProfile roofProfile = entryProfile;
+            roofProfile.maxSafeDropBlocks = 8;
+            NavigationSearchLimits roofLimits = entryLimits;
+            roofLimits.maxExpansions = 3200;
+            const auto roofExit = VoxelPathfinder {}.FindPath(
+                NavigationState { GridPos { 86, 60, -10 }, 0, 0 },
+                GoalWithinRadius(GridPos { 87, 52, -10 }, 0.8f), roofView, roofProfile, roofLimits);
+            check("castle-roof-descent", roofExit.status == NavigationSearchStatus::Success,
+                ToString(roofExit.status));
+
+            world_.Clear();
+            players_.clear();
+            networkActionState_.clear();
+            for (const CreativeMapBlock& block : castle.blocks)
+                if (block.pos.x >= 70 && block.pos.x <= 94 && block.pos.z >= -24 && block.pos.z <= 0
+                    && block.pos.y >= 49 && block.pos.y <= 64)
+                    world_.PlaceBlock(block.pos, Block { block.type, block.teamId, block.breakable, block.variant }, true);
+            Player roofBot(932, "castle-roof", 2, Vector3 { 86, 61.402f, -10 }, false);
+            roofBot.SetControlKind(PlayerControlKind::BotAuthoritative);
+            players_.push_back(roofBot);
+            NavigationController roofController;
+            roofController.SetGoal(std::make_shared<GoalWithinRadius>(GridPos { 87, 52, -10 }, 0.8f), 932);
+            bool landed = false;
+            for (std::uint32_t tick = 1; tick <= 600 && !landed; ++tick)
+            {
+                NavigationWorldView view(world_, 2);
+                const auto update = roofController.Update(players_.front(), view, roofProfile, kTick, tick);
+                ApplyPlayerCommand(players_.front(), update.command, kTick);
+                players_.front().UpdateTimers(kTick);
+                landed = update.goalSatisfied && players_.front().IsOnGround();
+            }
+            check("castle-roof-descent-execution", landed,
+                "y=" + std::to_string(players_.front().GetPosition().y));
+
+            world_.Clear();
+            networkActionState_.clear();
+            players_.clear();
+            for (const CreativeMapBlock& block : castle.blocks)
+                if (block.pos.x >= -84 && block.pos.x <= -70
+                    && block.pos.z >= -22 && block.pos.z <= -4 && block.pos.y >= 49 && block.pos.y <= 59)
+                    world_.PlaceBlock(block.pos, Block { block.type, block.teamId, block.breakable, block.variant }, true);
+            Player bot(931, "castle-exit-lane", 0, Vector3 { -77.0f, 53.402f, -9.905f }, false);
+            bot.SetControlKind(PlayerControlKind::BotAuthoritative);
+            players_.push_back(bot);
+            NavigationController controller;
+            controller.SetGoal(std::make_shared<GoalReachPosition>(GridPos { -77, 52, -15 }), 931);
+            const NavigationProfile profile = PlannerProfile();
+            bool finished = false;
+            for (std::uint32_t tick = 1; tick <= 480 && !finished; ++tick)
+            {
+                NavigationWorldView view(world_, 0);
+                const NavigationControllerUpdate update = controller.Update(players_.front(), view, profile, kTick, tick);
+                PlayerCommand command = update.command;
+                command.controlledPlayerId = 931;
+                ApplyPlayerCommand(players_.front(), command, kTick);
+                players_.front().UpdateTimers(kTick);
+                finished = update.goalSatisfied;
+            }
+            const Vector3 position = players_.front().GetPosition();
+            check("castle-exit-lane-execution", finished, finished ? "" :
+                "x=" + std::to_string(position.x) + " y=" + std::to_string(position.y)
+                + " z=" + std::to_string(position.z));
+        }
+
         std::vector<std::string> physicalErrors;
         const bool physicallyValid = built && graph.ValidatePhysical(castleWorld, &physicalErrors);
         const RouteCorridor corridor = built

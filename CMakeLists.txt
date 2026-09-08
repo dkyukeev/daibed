@@ -19,8 +19,26 @@ option(DAIBED_DIAGNOSTICS "Compile the --*-smoke diagnostic self-tests" ON)
 # Real UDP socket transport (Phase 0.1R). This adds NO fetched external
 # dependency — it uses only the OS socket API (Winsock2 / BSD sockets), linking
 # the system library ws2_32 on Windows. Turn OFF to build without any socket
-# code (the transport then compiles to safe stubs). See docs/NETWORK_PREP_PLAN.md.
+# code (the transport then compiles to safe stubs). See docs/P2P_IMPLEMENTATION.md.
 option(DAIBED_ENABLE_NETWORK "Build the real UDP socket transport (system sockets only; no external download)" ON)
+set(DAIBED_LOCAL_STEAMWORKS_SDK "${CMAKE_SOURCE_DIR}/sdk")
+set(DAIBED_STEAMWORKS_DEFAULT OFF)
+if(EXISTS "${DAIBED_LOCAL_STEAMWORKS_SDK}/public/steam/steam_api.h")
+    set(DAIBED_STEAMWORKS_DEFAULT ON)
+endif()
+option(DAIBED_ENABLE_STEAMWORKS
+    "Include Steam P2P alongside UDP in the universal player release"
+    ${DAIBED_STEAMWORKS_DEFAULT})
+set(DAIBED_STEAMWORKS_SDK_ROOT "" CACHE PATH
+    "Steamworks SDK root (the directory containing public/steam/steam_api.h)")
+if(DAIBED_ENABLE_STEAMWORKS
+    AND NOT DAIBED_STEAMWORKS_SDK_ROOT
+    AND EXISTS "${DAIBED_LOCAL_STEAMWORKS_SDK}/public/steam/steam_api.h")
+    set(DAIBED_STEAMWORKS_SDK_ROOT "${DAIBED_LOCAL_STEAMWORKS_SDK}" CACHE PATH
+        "Steamworks SDK root (the directory containing public/steam/steam_api.h)" FORCE)
+endif()
+set(DAIBED_STEAM_APP_ID "480" CACHE STRING
+    "Steam App ID used by local developer builds (480 is Valve Spacewar)")
 
 if(DAIBED_USE_SYSTEM_RAYLIB)
     find_package(raylib QUIET)
@@ -53,6 +71,9 @@ add_executable(DaiBed
     src/GameAutomatch.cpp
     src/BotTuningTrainer.cpp
     src/BotAI.cpp
+    src/BotCombatAssessment.cpp
+    src/BotStrategicPolicy.cpp
+    src/Navigation/BotNavigationGoal.cpp
     src/CameraController.cpp
     src/ChunkRenderer.cpp
     src/Block.cpp
@@ -62,6 +83,7 @@ add_executable(DaiBed
     src/CreativeMap.cpp
     src/Diag/Smokes.cpp
     src/Diag/NavigationSmokes.cpp
+    src/FirstPersonMotion.cpp
     src/Game.cpp
     src/GameBotAI.cpp
     src/GameNavigation.cpp
@@ -96,6 +118,8 @@ add_executable(DaiBed
     src/ParticleSystem.cpp
     src/Platform/PreciseTimer.cpp
     src/Platform/ServerProcess.cpp
+    src/Platform/SteamLobbyService.cpp
+    src/Platform/SteamRuntime.cpp
     src/PostProcessor.cpp
     src/Renderer.cpp
     src/Resource.cpp
@@ -105,6 +129,7 @@ add_executable(DaiBed
     src/UiText.cpp
     src/World.cpp
     src/Network/Client.cpp
+    src/Network/InProcessDatagramBackend.cpp
     src/Network/LocalNetworkMock.cpp
     src/Network/LocalServerSession.cpp
     src/Network/LoopbackTransport.cpp
@@ -112,6 +137,8 @@ add_executable(DaiBed
     src/Network/Server.cpp
     src/Network/SnapshotDelta.cpp
     src/Network/SnapshotVisibility.cpp
+    src/Network/SteamDatagramBackend.cpp
+    src/Network/UdpDatagramBackend.cpp
     src/Network/UdpTransport.cpp
     src/Simulation/MatchSimulation.cpp
 )
@@ -137,6 +164,67 @@ else()
     message(STATUS "DaiBed: real UDP transport DISABLED (stub transport)")
 endif()
 
+# A universal player build contains both UDP and Steam P2P. If a local
+# Steamworks SDK is available at sdk/, Steam support is enabled automatically;
+# it may still be disabled explicitly for dependency-free CI/tooling builds.
+# Valve distributes the SDK through the partner portal, so CMake cannot fetch
+# it as a public dependency.
+if(DAIBED_ENABLE_STEAMWORKS)
+    if(NOT DAIBED_STEAMWORKS_SDK_ROOT)
+        message(FATAL_ERROR
+            "DAIBED_ENABLE_STEAMWORKS=ON requires DAIBED_STEAMWORKS_SDK_ROOT")
+    endif()
+
+    set(DAIBED_STEAM_PUBLIC_DIR "${DAIBED_STEAMWORKS_SDK_ROOT}/public")
+    if(NOT EXISTS "${DAIBED_STEAM_PUBLIC_DIR}/steam/steam_api.h")
+        message(FATAL_ERROR
+            "Steamworks header not found: ${DAIBED_STEAM_PUBLIC_DIR}/steam/steam_api.h")
+    endif()
+
+    if(WIN32)
+        if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+            set(DAIBED_STEAM_LIB
+                "${DAIBED_STEAMWORKS_SDK_ROOT}/redistributable_bin/win64/steam_api64.lib")
+            set(DAIBED_STEAM_RUNTIME
+                "${DAIBED_STEAMWORKS_SDK_ROOT}/redistributable_bin/win64/steam_api64.dll")
+        else()
+            set(DAIBED_STEAM_LIB
+                "${DAIBED_STEAMWORKS_SDK_ROOT}/redistributable_bin/steam_api.lib")
+            set(DAIBED_STEAM_RUNTIME
+                "${DAIBED_STEAMWORKS_SDK_ROOT}/redistributable_bin/steam_api.dll")
+        endif()
+    elseif(APPLE)
+        set(DAIBED_STEAM_LIB
+            "${DAIBED_STEAMWORKS_SDK_ROOT}/redistributable_bin/osx/libsteam_api.dylib")
+        set(DAIBED_STEAM_RUNTIME "${DAIBED_STEAM_LIB}")
+    else()
+        set(DAIBED_STEAM_LIB
+            "${DAIBED_STEAMWORKS_SDK_ROOT}/redistributable_bin/linux64/libsteam_api.so")
+        set(DAIBED_STEAM_RUNTIME "${DAIBED_STEAM_LIB}")
+    endif()
+
+    if(NOT EXISTS "${DAIBED_STEAM_LIB}")
+        message(FATAL_ERROR "Steamworks import/shared library not found: ${DAIBED_STEAM_LIB}")
+    endif()
+    target_include_directories(DaiBed PRIVATE "${DAIBED_STEAM_PUBLIC_DIR}")
+    target_link_libraries(DaiBed PRIVATE "${DAIBED_STEAM_LIB}")
+    target_compile_definitions(DaiBed PRIVATE DAIBED_HAVE_STEAMWORKS=1)
+    add_custom_command(TARGET DaiBed POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${DAIBED_STEAM_RUNTIME}" "$<TARGET_FILE_DIR:DaiBed>"
+        COMMENT "Copying Steamworks runtime"
+    )
+    # Local/debug launch hint. It is generated only in the build tree and is
+    # intentionally not installed into a shipping Steam depot.
+    file(GENERATE
+        OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/steam_appid.txt"
+        CONTENT "${DAIBED_STEAM_APP_ID}")
+    message(STATUS "DaiBed: Steam Networking Sockets ENABLED")
+else()
+    target_compile_definitions(DaiBed PRIVATE DAIBED_HAVE_STEAMWORKS=0)
+    message(STATUS "DaiBed: Steam Networking Sockets DISABLED (stub backend)")
+endif()
+
 if(MSVC)
     target_compile_options(DaiBed PRIVATE /W4 /permissive-)
     # A release build is launched as a game, including developer-flavoured
@@ -148,6 +236,9 @@ else()
 endif()
 
 install(TARGETS DaiBed RUNTIME DESTINATION . COMPONENT Runtime)
+if(DAIBED_ENABLE_STEAMWORKS)
+    install(FILES "${DAIBED_STEAM_RUNTIME}" DESTINATION . COMPONENT Runtime)
+endif()
 
 # A developer normally starts the executable directly from build/<config>.
 # Keep that directory self-contained as well as the installed package: running

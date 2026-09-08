@@ -7,6 +7,7 @@
 #include "Core.h"
 #include "CreativeMap.h"
 #include "Feedback.h"
+#include "FirstPersonMotion.h"
 #include "GameRules.h"
 #include "Generator.h"
 #include "HeroSystem.h"
@@ -42,6 +43,7 @@
 // stays free of the winsock-adjacent transport header; GameNetwork.cpp includes it.
 class ServerTransport;
 class ClientTransport;
+class SteamLobbyService;
 struct ReceivedCommand;
 
 enum class GameScreen
@@ -61,13 +63,6 @@ enum class MatchMode
     TwoVsTwo,
     FourTeams,
     Duel
-};
-
-enum class BotDifficulty
-{
-    Easy,
-    Normal,
-    Hard
 };
 
 enum class BotStrategyProfile
@@ -97,7 +92,7 @@ public:
     // Declared (defaulted in GameNetwork.cpp): the network-client session holds
     // a unique_ptr to the forward-declared ClientTransport, so the destructor
     // must be emitted where the complete type is visible.
-    Game() = default;
+    Game();
     ~Game();
 
     bool Initialize(bool headless = false);
@@ -186,7 +181,7 @@ public:
     bool StartNetworkClientSession(const std::string& host, std::uint16_t port,
                                    const std::string& password, double maxSeconds,
                                    const LobbyUpdate& lobbyPrefs);
-    void StopNetworkClientSession();
+    void StopNetworkClientSession(bool leaveSteamLobby = true);
     bool NetworkClientSessionActive() const;
     // Headless server (a second Game) + this windowed client in one process:
     // renders frames and asserts the client world is in sync. CLI: --client-gui-smoke.
@@ -211,13 +206,18 @@ public:
     int RunCreativeSmoke();
     // Saves ui_*.png shots of the menu screens (windowed). CLI: --ui-screenshot.
     int RunUiScreenshotDiag();
+    // Windowed review frame for semantic pickup and landing particles.
+    // CLI: --particle-review.
+    int RunParticleReviewDiag();
     // Real-loop frame-time tracer (menu + match); prints slow frames with an
     // input/update/render split. CLI: --frame-profile.
     int RunFrameProfileDiag();
     // Creative-map review: loads a .dbmap via the creative test-play flow,
     // asserts slab/stair auto-step + ladder climbing, saves map_review_*.png
     // (windowed). CLI: --map-review [--map <path>].
-    int RunMapReviewDiag(const std::string& mapPath);
+    int RunMapReviewDiag(
+        const std::string& mapPath,
+        std::optional<ArenaBiome> lightingBiomeOverride = std::nullopt);
     // Phase B: network-controlled ranged attacks use PlayerCommand aim, not the
     // server camera. CLI: --network-ranged-smoke.
     int RunNetworkRangedSmoke();
@@ -506,6 +506,7 @@ private:
         float dt,
         PlayerCommand& command,
         bool& goalSatisfied);
+    void UpdateBotBridgeCoordination();
     void UpdateMatchSimulation(float dt);
     // One fixed simulation step with optional profiling timing around it.
     void StepSimulationProfiled(float dt);
@@ -657,6 +658,17 @@ private:
     void StartGuiHostAndConnect();
     void StartGuiConnect();
     void StopLocalServer();
+    bool StartIntegratedListenServer(const ServerConfig& config, std::string& error);
+    void PumpIntegratedListenServer(float dt);
+    void StopIntegratedListenServer();
+    bool IntegratedListenServerRunning() const;
+    bool EnsureSteamLobbyService(std::string& error);
+    void UpdateSteamLobbyService();
+    void StopSteamLobbyService();
+    bool OpenSteamInviteDialog();
+    bool SteamLobbyReady() const;
+    bool HandleSteamFriendPickerInput();
+    void RenderSteamFriendPicker() const;
     void RenderGameHints(const Player& localPlayer) const;
     void RenderOnboarding(const Player& localPlayer) const;
     void RenderMinimap(const Player& localPlayer) const;
@@ -818,8 +830,22 @@ private:
 
     void SetMessage(std::string message, float seconds = 3.0f);
     void AddEventMessage(std::string message, Color color = WHITE, float seconds = 2.4f);
-    void AddWorldEffect(Vector3 position, Color color, float radius = 0.35f, float seconds = 0.35f);
-    void AddWorldEffect(Vector3 position, Vector3 direction, Color color, float radius, float seconds, WorldEffectKind kind);
+    void AddChatMessage(std::string message, Color color = WHITE, float seconds = 6.0f);
+    bool HandleChatInput();
+    void ApplyChatCommand(Player& player, const PlayerCommand& command);
+    void EmitPickupParticles(Vector3 source, Vector3 target, Color color, int amount);
+    void EmitLandingParticles(Vector3 position, Vector3 planarVelocity, Color color, float intensity);
+    void EmitImpactParticles(Vector3 position, Vector3 direction, Color color, ParticleMaterial material, float intensity = 1.0f);
+    void EmitBlockBreakParticles(Vector3 position, Vector3 direction, Color color, BlockType blockType);
+    void EmitBlockPlaceParticles(Vector3 position, Vector3 direction, Color color, BlockType blockType);
+    void EmitAbilityParticles(Vector3 position, Vector3 direction, Color color, float radius, WorldEffectKind kind);
+    void EmitHealParticles(Vector3 position, Color color, float intensity = 1.0f);
+    void EmitTrapParticles(Vector3 position, Color color, float radius, bool triggered);
+    void EmitDeviceParticles(Vector3 position, Color color, float intensity, bool assembling);
+    void EmitCoreDestructionParticles(Vector3 position, Color color, float intensity = 1.0f);
+    void EmitRespawnParticles(Vector3 position, Color color);
+    void EmitProjectileCueParticles(Vector3 position, Vector3 direction, Color color, float intensity = 1.0f);
+    void EmitHazardParticles(Vector3 position, Color color, float radius);
     void AddFloatingText(std::string text, Vector3 position, Color color);
     void AddKillFeed(std::string text, Color color = WHITE, float seconds = 5.0f);
     bool PlayHeroVoice(HeroId hero, HeroVoiceEvent event, HeroVoiceEvent fallback = HeroVoiceEvent::Count);
@@ -947,7 +973,6 @@ private:
         int targetPlayerId = -1;
         float exposure = 0.0f;
         float markedTimer = 0.0f;
-        float pulseTimer = 0.0f;
     };
     struct BromVacuumBot
     {
@@ -1059,6 +1084,12 @@ private:
         Block block {};
         float timer = 0.0f;
         float suffocationTimer = 0.0f;
+    };
+    struct WoolBreachMark
+    {
+        GridPos position {};
+        int ownerTeamId = -1;
+        float lifetime = 60.0f;
     };
     struct MemorableMoment
     {
@@ -1291,6 +1322,7 @@ private:
     void RecordAutomatchDefenseBlockDestroyed(int ownerPlayerId, ExplosionBlockPolicy blockPolicy);
     PlayerMatchScore& GetPlayerScore(int playerId);
     const PlayerMatchScore* FindPlayerScore(int playerId) const;
+    void ApplyShaderPreset(int preset);
     void LoadSettings();
     void SaveSettings() const;
     void LoadBotTuning();
@@ -1316,6 +1348,8 @@ private:
     // Cores()/Generators()/Pickups()/DroppedItems()/Winner()/Phase()).
 
     Renderer renderer_;
+    ShaderSettings shaderSettings_;
+    int shaderPreset_ = 3; // Legacy settings are custom until a preset is selected.
     PostProcessor postProcessor_;
     InputSystem input_;
     Shop shop_;
@@ -1340,10 +1374,13 @@ private:
 
     PlayerInput currentInput_ {};
     CameraController cameraController_;
+    FirstPersonMotion firstPersonMotion_;
     // winnerTeamId is owned by matchSimulation_ (Winner()/WinnerTeamId()/SetWinner()).
     std::optional<int> suddenDeathTiebreakTeamId_;
     std::string message_;
     float messageTimer_ = 0.0f;
+    bool chatInputOpen_ = false;
+    std::string chatInput_;
     PlacementPreview placementPreview_;
     BreakProgress breakProgress_;
     CombatPreview combatPreview_;
@@ -1374,6 +1411,7 @@ private:
     std::vector<KonvoyIntruderMark> konvoyIntruderMarks_;
     std::vector<BromVacuumBot> bromVacuumBots_;
     std::vector<BromTurretDrone> bromTurretDrones_;
+    std::vector<WoolBreachMark> woolBreachMarks_;
     std::vector<KonvoyTrap> konvoyTraps_;
     std::vector<KonvoyTether> konvoyTethers_;
     std::vector<KonvoyDome> konvoyDomes_;
@@ -1387,6 +1425,7 @@ private:
     std::vector<SvidetelPhaseBlock> svidetelPhaseBlocks_;
     std::vector<FloatingText> floatingTexts_;
     std::vector<EventMessage> eventMessages_;
+    std::vector<EventMessage> chatMessages_;
     std::vector<KillFeedEntry> killFeed_;
     std::vector<PlayerMatchScore> playerScores_;
     std::vector<DamageCredit> damageCredits_;
@@ -1436,6 +1475,17 @@ private:
     std::string multiplayerStatus_;
     std::string hostPortText_ = "7777"; // Host tab port field (parsed on create).
     ServerProcessHandle localServerProcess_ {}; // Background host launched from the GUI.
+    // Steam listen-host stays in this process so client API authentication and
+    // callbacks have one owner. A separate headless Game owns authoritative
+    // state; the visible Game remains a normal snapshot-driven client.
+    std::unique_ptr<Game> integratedServerGame_;
+    std::unique_ptr<ServerTransport> integratedServerTransport_;
+    std::unique_ptr<SteamLobbyService> steamLobbyService_;
+    bool steamLobbyStartAttempted_ = false;
+    double steamLobbyRetryAfter_ = 0.0;
+    bool steamFriendPickerOpen_ = false;
+    int steamFriendPickerScroll_ = 0;
+    float integratedServerAccumulator_ = 0.0f;
     double localServerStartTime_ = 0.0;
     std::string localServerAddress_;
     int heroSelectIndex_ = 0;
@@ -1521,6 +1571,7 @@ private:
     std::string automatchMapPath_ = "generated-arena";
     bool reducedCameraShake_ = false;
     bool reducedFlashes_ = false;
+    int firstPersonMotionMode_ = static_cast<int>(FirstPersonMotionMode::Full);
     bool postProcessing_ = true;
     bool bloomEnabled_ = true;
     bool vsyncEnabled_ = true;
@@ -1549,7 +1600,9 @@ private:
     int renderScaleIndex_ = 3;
     int drawDistanceIndex_ = 2;
     int shadowQuality_ = 1;
+    int ambientOcclusionQuality_ = 1;
     int effectsQuality_ = 2;
+    int bloomQuality_ = 1;
     float masterVolume_ = 0.8f;
     float musicVolume_ = 0.65f;
     float sfxVolume_ = 0.9f;
@@ -1611,6 +1664,7 @@ private:
     // actions, keyed by playerId -> last applied PlayerCommand::actionSeq. A
     // resent command with an already-seen seq is ignored (no double purchase).
     std::unordered_map<int, std::uint32_t> economyActionSeq_;
+    std::unordered_map<int, std::uint32_t> chatMessageSeq_;
     std::vector<ActionResultSnapshot> recentActionResults_;
     std::unordered_map<int, std::uint32_t> presentedActionResultSeq_;
     std::uint32_t nextActionResultSeq_ = 0;
@@ -1630,6 +1684,9 @@ private:
     PlayerActionType pendingEconomyActionType_ = PlayerActionType::None;
     int pendingEconomyActionParamA_ = 0;
     int pendingEconomyActionParamB_ = 0;
+    std::uint32_t clientChatSeq_ = 0;
+    std::uint32_t pendingChatSeq_ = 0;
+    std::string pendingChatMessage_;
     float estimatedPingMs_ = 0.0f;
     float networkSnapshotAgeMs_ = 0.0f;
     float networkPacketLossEstimate_ = 0.0f;
@@ -1687,6 +1744,7 @@ private:
     enum class ClientSessionPhase
     {
         Inactive,
+        Connecting,     // socket/provider open; handshake advances per frame
         Lobby,          // connected, pre-match
         Match,          // in-match: the normal Update/Render pipeline runs
         FailureMessage, // timed full-screen message, then the session ends
@@ -1696,6 +1754,7 @@ private:
     enum class ClientSessionDraw
     {
         None,
+        Connecting,
         Failure,
         Reconnecting,
         Lobby,
@@ -1713,7 +1772,8 @@ private:
     Color clientSessionFailColor_ { 255, 200, 120, 255 };
     double clientSessionFailUntil_ = 0.0;
     std::string clientSessionReconnectDetail_;
-    // Fixed-step simulation loop (see docs/NETWORK_PREP_PLAN.md). The simulation
+    std::string clientSessionConnectDetail_;
+    // Fixed-step simulation loop (see docs/MULTIPLAYER_TARGET_ARCHITECTURE.md). The simulation
     // advances in fixed FixedDeltaSeconds() steps driven by an accumulator, so it
     // is decoupled from the render frame rate. renderAlpha_ is the [0,1)
     // interpolation factor toward the next tick (plumbed for future render

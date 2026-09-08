@@ -382,6 +382,7 @@ void Game::SetupMatch()
     konvoyIntruderMarks_.clear();
     bromVacuumBots_.clear();
     bromTurretDrones_.clear();
+    woolBreachMarks_.clear();
     konvoyTraps_.clear();
     konvoyTethers_.clear();
     konvoyDomes_.clear();
@@ -396,6 +397,7 @@ void Game::SetupMatch()
     matchSimulation_.ResetDroppedItems();
     floatingTexts_.clear();
     eventMessages_.clear();
+    chatMessages_.clear();
     killFeed_.clear();
     playerScores_.clear();
     damageCredits_.clear();
@@ -461,6 +463,7 @@ void Game::SetupMatch()
     generatorBoostTriggered_ = false;
     shopOpen_ = false;
     economyActionSeq_.clear();
+    chatMessageSeq_.clear();
     recentActionResults_.clear();
     presentedActionResultSeq_.clear();
     nextActionResultSeq_ = 0;
@@ -477,6 +480,11 @@ void Game::SetupMatch()
     pendingEconomyActionType_ = PlayerActionType::None;
     pendingEconomyActionParamA_ = 0;
     pendingEconomyActionParamB_ = 0;
+    clientChatSeq_ = 0;
+    pendingChatSeq_ = 0;
+    pendingChatMessage_.clear();
+    chatInputOpen_ = false;
+    chatInput_.clear();
     selectedHotbarSlot_ = 0;
     inventoryOpen_ = false;
     CloseChest();
@@ -628,11 +636,11 @@ void Game::SetupMatch()
         selectedTeamId_ = localTeam->id;
     }
 
-    const auto giveHumanLoadout = [](Player& player, HeroId heroId)
+    const auto giveHumanLoadout = [](Player& player, HeroId)
     {
         // Building materials are part of the economy: every player must collect
         // resources and buy blocks before the first bridge or Core defense.
-        player.GetInventory().AddItem(heroId == HeroId::Svidetel ? ItemType::SniperRifle : ItemType::Sword, 1);
+        player.GetInventory().AddItem(ItemType::Sword, 1);
     };
 
     if (!pendingNetworkRoster_.empty())
@@ -819,6 +827,7 @@ void Game::SetupMatch()
     if (Player* localPlayer = GetLocalPlayer())
     {
         cameraController_.Reset(localPlayer->GetYaw(), -0.14f, localPlayer->GetPosition());
+        firstPersonMotion_.Reset(localPlayer->IsOnGround());
         localWasOnGround_ = localPlayer->IsOnGround();
         localAirPeakY_ = localPlayer->GetPosition().y;
     }

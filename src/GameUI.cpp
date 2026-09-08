@@ -1,7 +1,10 @@
 #include "Game.h"
 
 #include "HeroSystem.h"
+#include "Platform/SteamLobbyService.h"
+#include "Platform/SteamRuntime.h"
 #include "UiText.h"
+#include "VisualTheme.h"
 #include "raylib.h"
 
 #include <algorithm>
@@ -284,46 +287,109 @@ bool ParseMultiplayerAddress(
     return true;
 }
 
-void AppendClipboardText(std::string& value, std::size_t maxLength, bool allowSpaces)
+std::size_t Utf8Length(const std::string& value)
+{
+    std::size_t count = 0;
+    const char* cursor = value.c_str();
+    while (*cursor != '\0')
+    {
+        int bytes = 0;
+        GetCodepointNext(cursor, &bytes);
+        cursor += std::max(1, bytes);
+        ++count;
+    }
+    return count;
+}
+
+void PopUtf8Codepoint(std::string& value)
+{
+    if (value.empty())
+    {
+        return;
+    }
+    std::size_t start = value.size() - 1;
+    while (start > 0
+        && (static_cast<unsigned char>(value[start]) & 0xC0u) == 0x80u)
+    {
+        --start;
+    }
+    value.resize(start);
+}
+
+void EraseFirstUtf8Codepoint(std::string& value)
+{
+    if (value.empty())
+    {
+        return;
+    }
+    int bytes = 0;
+    GetCodepointNext(value.c_str(), &bytes);
+    value.erase(0, static_cast<std::size_t>(std::max(1, bytes)));
+}
+
+bool AppendTextCodepoint(
+    std::string& value,
+    int codepoint,
+    std::size_t maxLength,
+    bool allowSpaces,
+    bool allowUnicode)
+{
+    if (codepoint < 32 || codepoint == 127
+        || (!allowUnicode && codepoint >= 127)
+        || (!allowSpaces && codepoint == ' ')
+        || Utf8Length(value) >= maxLength)
+    {
+        return false;
+    }
+    int bytes = 0;
+    const char* encoded = CodepointToUTF8(codepoint, &bytes);
+    if (encoded == nullptr || bytes <= 0)
+    {
+        return false;
+    }
+    value.append(encoded, static_cast<std::size_t>(bytes));
+    return true;
+}
+
+void AppendClipboardText(
+    std::string& value,
+    std::size_t maxLength,
+    bool allowSpaces,
+    bool allowUnicode)
 {
     const char* clipboard = GetClipboardText();
     if (clipboard == nullptr)
     {
         return;
     }
-    for (const char* c = clipboard; *c != '\0' && value.size() < maxLength; ++c)
+    for (const char* cursor = clipboard; *cursor != '\0';)
     {
-        const unsigned char ch = static_cast<unsigned char>(*c);
-        if (ch >= 32 && ch < 127 && (allowSpaces || !std::isspace(ch)))
-        {
-            value.push_back(static_cast<char>(ch));
-        }
+        int bytes = 0;
+        const int codepoint = GetCodepointNext(cursor, &bytes);
+        AppendTextCodepoint(value, codepoint, maxLength, allowSpaces, allowUnicode);
+        cursor += std::max(1, bytes);
     }
 }
 
-void EditAsciiTextField(std::string& value, std::size_t maxLength, bool allowSpaces)
+void EditTextField(
+    std::string& value,
+    std::size_t maxLength,
+    bool allowSpaces,
+    bool allowUnicode = false)
 {
     const bool ctrlDown = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
     if (ctrlDown && IsKeyPressed(KEY_V))
     {
-        AppendClipboardText(value, maxLength, allowSpaces);
+        AppendClipboardText(value, maxLength, allowSpaces, allowUnicode);
     }
     if (IsKeyPressed(KEY_BACKSPACE) && !value.empty())
     {
-        value.pop_back();
+        PopUtf8Codepoint(value);
     }
 
     for (int key = GetCharPressed(); key > 0; key = GetCharPressed())
     {
-        if (value.size() >= maxLength)
-        {
-            continue;
-        }
-        if (key >= 32 && key < 127
-            && (allowSpaces || !std::isspace(static_cast<unsigned char>(key))))
-        {
-            value.push_back(static_cast<char>(key));
-        }
+        AppendTextCodepoint(value, key, maxLength, allowSpaces, allowUnicode);
     }
 }
 
@@ -335,7 +401,7 @@ std::string ClipTextToWidth(std::string text, int maxWidth, int fontSize)
     }
     while (!text.empty())
     {
-        text.erase(text.begin());
+        EraseFirstUtf8Codepoint(text);
         const std::string candidate = "..." + text;
         if (MeasureText(candidate.c_str(), fontSize) <= maxWidth)
         {
@@ -356,30 +422,16 @@ constexpr Color kMenuPanel { 17, 18, 22, 240 };
 constexpr Color kMenuField { 9, 10, 13, 255 };
 constexpr Color kMenuRowIdle { 0, 0, 0, 80 };
 constexpr Color kMenuRowSel { 54, 58, 68, 255 };
-constexpr Color kAccentGold { 255, 235, 142, 255 };
-constexpr Color kAccentCyan { 112, 232, 255, 255 };
-constexpr Color kAccentGreen { 140, 235, 150, 255 };
-constexpr Color kAccentRed { 240, 120, 120, 255 };
-constexpr Color kTextBright { 236, 240, 245, 255 };
-constexpr Color kTextDim { 170, 180, 195, 255 };
+constexpr Color kAccentGold = VisualTheme::Palette::Objective;
+constexpr Color kAccentCyan = VisualTheme::Palette::Energy;
+constexpr Color kAccentGreen = VisualTheme::Palette::Healing;
+constexpr Color kAccentRed = VisualTheme::Palette::Danger;
+constexpr Color kTextBright = VisualTheme::Palette::TextBright;
+constexpr Color kTextDim = VisualTheme::Palette::TextDim;
 constexpr Color kTextFaint { 120, 130, 145, 255 };
 constexpr Color kPixelOutline { 0, 0, 0, 225 };
 constexpr Color kButtonTop { 106, 110, 122, 255 };
 constexpr Color kButtonBottom { 82, 86, 98, 255 };
-
-Color MenuHeroColor(HeroId id)
-{
-    switch (id)
-    {
-    case HeroId::Radon: return Color { 92, 164, 255, 255 };
-    case HeroId::Orbita: return Color { 255, 96, 82, 255 };
-    case HeroId::Brom: return Color { 96, 202, 118, 255 };
-    case HeroId::Konvoy: return Color { 92, 210, 255, 255 };
-    case HeroId::Likho: return Color { 104, 238, 92, 255 };
-    case HeroId::Svidetel: return Color { 180, 104, 255, 255 };
-    }
-    return WHITE;
-}
 
 enum class MenuButtonStyle { Accent, Primary, Danger, Ghost };
 
@@ -694,8 +746,9 @@ constexpr SettingsSection kSettingsSections[] {
     { "Ввод", 0 },
     { "Экран", 4 },
     { "Графика", 9 },
-    { "Звук", 14 },
-    { "Интерфейс", 18 },
+    { "Звук", 16 },
+    { "Интерфейс", 20 },
+    { "Шейдеры", 23 },
 };
 constexpr int kSettingsSectionCount = static_cast<int>(std::size(kSettingsSections));
 
@@ -1245,9 +1298,14 @@ const char* HostLayoutToken(ArenaLayout layout)
     return layout == ArenaLayout::Vertical ? "vertical" : "classic";
 }
 
-std::string JoinCommandFor(const std::string& address, const std::string& password)
+std::string JoinCommandFor(const std::string& address, const std::string& password,
+                           NetworkBackend backend)
 {
     std::string command = "DaiBed.exe --connect " + address;
+    if (backend == NetworkBackend::SteamP2P)
+    {
+        command += " --network-backend steam";
+    }
     if (!password.empty())
     {
         command += " --password " + password;
@@ -1258,11 +1316,24 @@ std::string JoinCommandFor(const std::string& address, const std::string& passwo
 
 void Game::StopLocalServer()
 {
-    if (!localServerProcess_.Valid())
+    const bool hadProcess = localServerProcess_.Valid();
+    const bool hadIntegratedServer = IntegratedListenServerRunning();
+    if (!hadProcess && !hadIntegratedServer)
     {
         return;
     }
-    StopServerProcess(localServerProcess_);
+    if (hadProcess)
+    {
+        StopServerProcess(localServerProcess_);
+    }
+    if (hadIntegratedServer)
+    {
+        StopIntegratedListenServer();
+    }
+    if (steamLobbyService_ != nullptr && steamLobbyService_->OwnsLobby())
+    {
+        steamLobbyService_->LeaveLobby();
+    }
     localServerStartTime_ = 0.0;
     multiplayerStatus_ = "Локальный сервер остановлен.";
 }
@@ -1284,10 +1355,9 @@ void Game::StartGuiHostAndConnect()
     }
 
     // If a previous host is still running, retire it before launching a new one.
-    if (localServerProcess_.Valid())
+    if (localServerProcess_.Valid() || IntegratedListenServerRunning())
     {
-        StopServerProcess(localServerProcess_);
-        localServerStartTime_ = 0.0;
+        StopLocalServer();
     }
 
     ServerConfig config = serverConfig_;
@@ -1304,9 +1374,75 @@ void Game::StartGuiHostAndConnect()
         config.serverName = "Сервер DaiBed";
     }
     serverConfig_ = config;
+    multiplayerPassword_ = config.password;
+
+    if (config.networkBackend == NetworkBackend::SteamP2P)
+    {
+        if (config.port >= 1000)
+        {
+            multiplayerStatus_ = "Steam P2P использует виртуальный порт 1..999.";
+            return;
+        }
+
+        std::string startError;
+        if (!StartIntegratedListenServer(config, startError))
+        {
+            multiplayerStatus_ = "Не удалось запустить Steam-хост: " + startError;
+            return;
+        }
+
+        // The server transport already holds a process-wide runtime lease;
+        // this short lease safely reads the same authenticated local identity.
+        SteamRuntimeLease identityLease;
+        if (!identityLease.Acquire() || identityLease.LocalSteamId() == 0)
+        {
+            multiplayerStatus_ = "Не удалось получить Steam ID: " + identityLease.LastError();
+            StopIntegratedListenServer();
+            return;
+        }
+
+        localServerStartTime_ = GetTime();
+        localServerAddress_ = std::to_string(identityLease.LocalSteamId()) + ":"
+            + std::to_string(config.port);
+        multiplayerAddress_ = localServerAddress_;
+
+        std::string lobbyError;
+        // A background startup attempt may have observed Steam while it was
+        // still reconnecting.  Hosting is an explicit retry point and the
+        // server transport now holds a valid Steam runtime lease.
+        steamLobbyStartAttempted_ = false;
+        steamLobbyRetryAfter_ = 0.0;
+        if (!EnsureSteamLobbyService(lobbyError))
+        {
+            multiplayerStatus_ = "Steam Lobby недоступен: " + lobbyError;
+            StopIntegratedListenServer();
+            return;
+        }
+        SteamLobbyHostSettings lobbySettings;
+        lobbySettings.serverName = config.serverName;
+        lobbySettings.hostSteamId = identityLease.LocalSteamId();
+        lobbySettings.virtualPort = config.port;
+        lobbySettings.maxPlayers = config.maxPlayers;
+        lobbySettings.mode = config.matchMode;
+        lobbySettings.biome = config.worldBiome;
+        lobbySettings.privateLobby = config.privateServer;
+        lobbySettings.passwordProtected = config.HasPassword();
+        if (!steamLobbyService_->CreateLobby(lobbySettings))
+        {
+            multiplayerStatus_ = "Не удалось создать Steam Lobby: "
+                + steamLobbyService_->LastError();
+            StopIntegratedListenServer();
+            return;
+        }
+
+        multiplayerStatus_ = "Steam-хост запущен. Создаётся лобби для приглашений...";
+        StartGuiConnect();
+        return;
+    }
 
     std::vector<std::string> args {
         "--host",
+        "--network-backend", config.networkBackend == NetworkBackend::SteamP2P ? "steam" : "udp",
         "--listen", config.listenAddress,
         "--port", std::to_string(config.port),
         "--server-name", config.serverName,
@@ -1346,6 +1482,11 @@ void Game::StartGuiHostAndConnect()
 
 void Game::HandleMultiplayerInput()
 {
+    if (steamFriendPickerOpen_)
+    {
+        HandleSteamFriendPickerInput();
+        return;
+    }
     if (IsKeyPressed(KEY_ESCAPE))
     {
         screen_ = GameScreen::MainMenu;
@@ -1451,19 +1592,19 @@ void Game::HandleMultiplayerInput()
     // --- Per-tab text-field editing for the focused control. ----------------
     if (multiplayerTab_ == 0)
     {
-        if (idx == 0) EditAsciiTextField(multiplayerAddress_, 64, false);
-        else if (idx == 1) EditAsciiTextField(multiplayerPlayerName_, 24, true);
-        else if (idx == 2) EditAsciiTextField(multiplayerPassword_, 32, true);
+        if (idx == 0) EditTextField(multiplayerAddress_, 64, false);
+        else if (idx == 1) EditTextField(multiplayerPlayerName_, 24, true, true);
+        else if (idx == 2) EditTextField(multiplayerPassword_, 32, true);
     }
     else
     {
         if (idx == 0)
         {
-            EditAsciiTextField(serverConfig_.serverName, 28, true);
+            EditTextField(serverConfig_.serverName, 28, true, true);
         }
         else if (idx == 2)
         {
-            EditAsciiTextField(hostPortText_, 5, false);
+            EditTextField(hostPortText_, 5, false);
             std::string digits;
             for (char c : hostPortText_)
             {
@@ -1473,7 +1614,7 @@ void Game::HandleMultiplayerInput()
         }
         else if (idx == 4)
         {
-            EditAsciiTextField(serverConfig_.password, 32, true);
+            EditTextField(serverConfig_.password, 32, true);
         }
     }
 
@@ -1533,15 +1674,25 @@ void Game::HandleMultiplayerInput()
         if (enter || leftClick) StartGuiHostAndConnect();
         break;
     case 11:
-        if ((enter || leftClick) && IsServerProcessRunning(localServerProcess_)) StopLocalServer();
+        if ((enter || leftClick)
+            && (IsServerProcessRunning(localServerProcess_) || IntegratedListenServerRunning()))
+        {
+            StopLocalServer();
+        }
         break;
     case 12:
         if (enter || leftClick)
         {
+            if (serverConfig_.networkBackend == NetworkBackend::SteamP2P)
+            {
+                OpenSteamInviteDialog();
+                break;
+            }
             const std::string address = localServerAddress_.empty()
                 ? ("127.0.0.1:" + hostPortText_)
                 : localServerAddress_;
-            SetClipboardText(JoinCommandFor(address, serverConfig_.password).c_str());
+            SetClipboardText(JoinCommandFor(address, serverConfig_.password,
+                                            serverConfig_.networkBackend).c_str());
             multiplayerStatus_ = "Команда подключения скопирована в буфер обмена.";
         }
         break;
@@ -1700,7 +1851,7 @@ void Game::HandleHeroSelectInput()
 
 void Game::HandleSettingsInput()
 {
-    constexpr int kSettingsRows = 22;
+    constexpr int kSettingsRows = 38;
     constexpr int kVisibleRows = 12;
     constexpr int kMaxFirstVisible = kSettingsRows - kVisibleRows;
     settingsIndex_ = std::clamp(settingsIndex_, 0, kSettingsRows - 1);
@@ -1804,12 +1955,12 @@ void Game::HandleSettingsInput()
     if (hoveredRow >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
     {
         settingsIndex_ = hoveredRow;
-        if (hoveredRow >= 20)
+        if (hoveredRow >= 36)
         {
             activate = true;
         }
-        else if (hoveredRow == 6 || hoveredRow == 12 || hoveredRow == 13
-                 || hoveredRow == 18 || hoveredRow == 19)
+        else if (hoveredRow == 6 || hoveredRow == 13 || hoveredRow == 14
+                 || hoveredRow == 20 || hoveredRow == 21)
         {
             delta = 1;
         }
@@ -1819,7 +1970,7 @@ void Game::HandleSettingsInput()
         }
     }
 
-    if (activate && settingsIndex_ < 20)
+    if (activate && settingsIndex_ < 36)
     {
         delta = 1;
     }
@@ -1858,17 +2009,42 @@ void Game::HandleSettingsInput()
             renderer_.SetWorldRenderDistance(kDrawDistances[drawDistanceIndex_]);
             break;
         case 10: shadowQuality_ = (shadowQuality_ + delta + 3) % 3; renderer_.SetShadowQuality(shadowQuality_); break;
-        case 11: effectsQuality_ = (effectsQuality_ + delta + 3) % 3; break;
-        case 12: postProcessing_ = !postProcessing_; break;
-        case 13: bloomEnabled_ = !bloomEnabled_; break;
-        case 14: masterVolume_ = std::clamp(masterVolume_ + delta * 0.1f, 0.0f, 1.0f); break;
-        case 15: musicVolume_ = std::clamp(musicVolume_ + delta * 0.1f, 0.0f, 1.0f); break;
-        case 16: sfxVolume_ = std::clamp(sfxVolume_ + delta * 0.1f, 0.0f, 1.0f); break;
-        case 17: ambientVolume_ = std::clamp(ambientVolume_ + delta * 0.1f, 0.0f, 1.0f); break;
-        case 18: reducedCameraShake_ = !reducedCameraShake_; break;
-        case 19: reducedFlashes_ = !reducedFlashes_; break;
+        case 11:
+            ambientOcclusionQuality_ = (ambientOcclusionQuality_ + delta + 3) % 3;
+            renderer_.SetAmbientOcclusionQuality(ambientOcclusionQuality_);
+            break;
+        case 12: effectsQuality_ = (effectsQuality_ + delta + 3) % 3; break;
+        case 13: postProcessing_ = !postProcessing_; break;
+        case 14: bloomEnabled_ = !bloomEnabled_; break;
+        case 15: bloomQuality_ = (bloomQuality_ + delta + 3) % 3; break;
+        case 16: masterVolume_ = std::clamp(masterVolume_ + delta * 0.1f, 0.0f, 1.0f); break;
+        case 17: musicVolume_ = std::clamp(musicVolume_ + delta * 0.1f, 0.0f, 1.0f); break;
+        case 18: sfxVolume_ = std::clamp(sfxVolume_ + delta * 0.1f, 0.0f, 1.0f); break;
+        case 19: ambientVolume_ = std::clamp(ambientVolume_ + delta * 0.1f, 0.0f, 1.0f); break;
+        case 20: reducedCameraShake_ = !reducedCameraShake_; break;
+        case 21: reducedFlashes_ = !reducedFlashes_; break;
+        case 22:
+            firstPersonMotionMode_ = (firstPersonMotionMode_ + delta + 3) % 3;
+            firstPersonMotion_.SetMode(static_cast<FirstPersonMotionMode>(firstPersonMotionMode_));
+            break;
+        case 23: ApplyShaderPreset((shaderPreset_ + delta + 3) % 3); break;
+        case 24: shaderSettings_.materialQuality = (shaderSettings_.materialQuality + delta + 3) % 3; break;
+        case 25: shaderSettings_.volumetricQuality = (shaderSettings_.volumetricQuality + delta + 4) % 4; break;
+        case 26: shaderSettings_.haze += delta * 0.1f; break;
+        case 27: shaderSettings_.sunIntensity += delta * 0.1f; break;
+        case 28: shaderSettings_.exposure += delta * 0.1f; break;
+        case 29: shaderSettings_.bloomIntensity += delta * 0.1f; break;
+        case 30: shaderSettings_.saturation += delta * 0.1f; break;
+        case 31: shaderSettings_.skyQuality = (shaderSettings_.skyQuality + delta + 3) % 3; break;
+        case 32: shaderSettings_.giQuality = (shaderSettings_.giQuality + delta + 3) % 3; break;
+        case 33: shaderSettings_.giStrength += delta * 0.1f; break;
+        case 34: shaderSettings_.localShadows = !shaderSettings_.localShadows; break;
+        case 35: shaderSettings_.shadowSoftness += delta * 0.25f; break;
         default: break;
         }
+        shaderSettings_.Clamp();
+        if ((settingsIndex_ >= 8 && settingsIndex_ <= 15) || (settingsIndex_ >= 24 && settingsIndex_ <= 35))
+            shaderPreset_ = 3;
         audio_.SetVolume(masterVolume_);
         audio_.SetCategoryVolumes(sfxVolume_, ambientVolume_);
         music_.SetVolume(masterVolume_, musicVolume_);
@@ -1877,13 +2053,13 @@ void Game::HandleSettingsInput()
 
     if (activate)
     {
-        if (settingsIndex_ == 20)
+        if (settingsIndex_ == 36)
         {
             controlsReturnScreen_ = GameScreen::Settings;
             screen_ = GameScreen::Controls;
             waitingForKey_ = false;
         }
-        else if (settingsIndex_ == 21)
+        else if (settingsIndex_ == 37)
         {
             SaveSettings();
             screen_ = returnScreen_;
@@ -2575,7 +2751,7 @@ void Game::RenderMultiplayerMenu() const
     {
         MenuFieldLabel("Адрес сервера", layout.joinAddress.x, layout.joinAddress.y - 17.0f);
         MenuTextField(layout.joinAddress, multiplayerAddress_, false, sel(0), caretOn, "адрес:порт");
-        MenuFieldLabel("Имя игрока", layout.joinName.x, layout.joinName.y - 17.0f);
+        MenuFieldLabel("Отображаемое имя (ID добавит сервер)", layout.joinName.x, layout.joinName.y - 17.0f);
         MenuTextField(layout.joinName, multiplayerPlayerName_, false, sel(1), caretOn, "Игрок");
         MenuFieldLabel("Пароль (необязательно)", layout.joinPassword.x, layout.joinPassword.y - 17.0f);
         MenuTextField(layout.joinPassword, multiplayerPassword_, true, sel(2), caretOn, "(нет)");
@@ -2620,7 +2796,8 @@ void Game::RenderMultiplayerMenu() const
         MenuTogglePill(layout.hostUniqueHeroes, "Уникальные герои", serverConfig_.enforceUniqueHeroesPerTeam, sel(9), 16);
 
         // Status strip.
-        const bool running = IsServerProcessRunning(localServerProcess_);
+        const bool running = IsServerProcessRunning(localServerProcess_)
+            || IntegratedListenServerRunning();
         DrawCircle(static_cast<int>(layout.hostStatus.x) + 7,
                    static_cast<int>(layout.hostStatus.y + layout.hostStatus.height * 0.5f), 5.0f,
                    running ? kAccentGreen : Fade(WHITE, 0.25f));
@@ -2631,6 +2808,12 @@ void Game::RenderMultiplayerMenu() const
             char clock[16];
             std::snprintf(clock, sizeof(clock), "%02d:%02d", up / 60, up % 60);
             statusText = "Сервер работает: " + localServerAddress_ + "  |  " + clock;
+            if (serverConfig_.networkBackend == NetworkBackend::SteamP2P
+                && steamLobbyService_ != nullptr)
+            {
+                statusText += SteamLobbyReady() ? "  |  Steam Lobby готово"
+                                                : "  |  Создание Steam Lobby...";
+            }
         }
         else
         {
@@ -2642,10 +2825,12 @@ void Game::RenderMultiplayerMenu() const
         MenuButton(layout.hostCreate, running ? "Перезапуск" : "Создать и войти",
                    MenuButtonStyle::Accent, sel(10), true);
         MenuButton(layout.hostStop, "Остановить", MenuButtonStyle::Danger, sel(11), running);
-        MenuButton(layout.hostCopy, "Копировать вход", MenuButtonStyle::Primary, sel(12), true);
+        const bool steamHost = serverConfig_.networkBackend == NetworkBackend::SteamP2P;
+        MenuButton(layout.hostCopy, steamHost ? "Пригласить друзей" : "Копировать вход",
+                   MenuButtonStyle::Primary, sel(12), !steamHost || SteamLobbyReady());
         MenuButton(layout.hostBack, "Назад", MenuButtonStyle::Ghost, sel(13), true);
     }
-
+    RenderSteamFriendPicker();
 }
 
 void Game::RenderHeroSelect() const
@@ -2662,7 +2847,7 @@ void Game::RenderHeroSelect() const
     DrawRectangleGradientV(0, 0, GetScreenWidth(), GetScreenHeight(),
                            Color { 5, 7, 11, 255 }, Color { 11, 16, 24, 255 });
     DrawRectangleGradientH(0, 58, GetScreenWidth(), GetScreenHeight() - 170,
-                           Fade(MenuHeroColor(selected.id), 0.07f), Fade(BLACK, 0.15f));
+                           Fade(VisualTheme::HeroAccent(selected.id), 0.07f), Fade(BLACK, 0.15f));
     DrawLineEx(Vector2 { 24.0f, 58.0f }, Vector2 { 424.0f, 58.0f }, 2.0f, Fade(WHITE, 0.24f));
     DrawLineEx(Vector2 { 424.0f, 58.0f }, Vector2 { 454.0f, 78.0f }, 2.0f, Fade(WHITE, 0.24f));
     DrawLineEx(Vector2 { static_cast<float>(GetScreenWidth()) - 24.0f, 58.0f },
@@ -2682,7 +2867,7 @@ void Game::RenderHeroSelect() const
         const bool current = i == heroSelectIndex_;
         const bool hovered = CheckCollisionPointRec(mouse, row);
         const bool focused = heroSelectControlIndex_ == i;
-        const Color heroColor = MenuHeroColor(hero.id);
+        const Color heroColor = VisualTheme::HeroAccent(hero.id);
         DrawRectangleRec(row, current ? Fade(heroColor, 0.30f)
                                       : (hovered ? Fade(Color { 62, 70, 84, 255 }, 0.90f)
                                                  : Fade(Color { 16, 20, 28, 255 }, 0.82f)));
@@ -2710,7 +2895,7 @@ void Game::RenderHeroSelect() const
     DrawTextShadow(selected.name.c_str(), static_cast<int>(layout.heroPane.x),
                    static_cast<int>(detailY), 28, WHITE);
     DrawText(selected.role.c_str(), static_cast<int>(layout.heroPane.x),
-             static_cast<int>(detailY) + 34, 15, MenuHeroColor(selected.id));
+             static_cast<int>(detailY) + 34, 15, VisualTheme::HeroAccent(selected.id));
     DrawTextShadow(selected.passiveName.c_str(), static_cast<int>(layout.heroPane.x),
                    static_cast<int>(detailY) + 60, 16, kAccentGold);
     const int passiveLines = std::max(2, std::min(5,
@@ -2819,13 +3004,16 @@ void Game::RenderHeroSelect() const
 
 void Game::RenderSettings() const
 {
-    constexpr int kSettingsRows = 22;
+    constexpr int kSettingsRows = 38;
     constexpr int kVisibleRows = 12;
     const char* labels[kSettingsRows] {
         "Чувствительность мыши", "Чувствительность геймпада", "Мёртвая зона стиков", "Угол обзора",
         "Разрешение", "Режим окна", "VSync", "Ограничение FPS", "Масштаб рендера", "Дальность прорисовки",
-        "Качество теней", "Качество эффектов", "Постобработка", "Свечение", "Общая громкость", "Музыка",
+        "Качество теней", "Затенение окружения", "Качество эффектов", "Постобработка", "Свечение", "Качество свечения", "Общая громкость", "Музыка",
         "Эффекты", "Окружение", "Ослабить тряску камеры", "Ослабить вспышки",
+        "Движение от первого лица", "Профиль шейдеров", "Материалы", "Объёмный свет",
+        "Плотность дымки", "Сила солнца", "Экспозиция", "Сила свечения", "Насыщенность", "Небо",
+        "Глобальное освещение", "Сила непрямого света", "Тени от ламп", "Мягкость теней",
         "Настроить управление", "Назад"
     };
     const auto percent = [](float value)
@@ -2843,9 +3031,21 @@ void Game::RenderSettings() const
         windowMode_ == 0 ? "Оконный" : (windowMode_ == 1 ? "Без рамки" : "Полноэкранный"),
         toggle(vsyncEnabled_), FpsLimitName(), percent(kRenderScales[renderScaleIndex_]),
         std::to_string(static_cast<int>(kDrawDistances[drawDistanceIndex_])) + " м", quality(shadowQuality_),
-        quality(effectsQuality_), toggle(postProcessing_), toggle(bloomEnabled_), percent(masterVolume_),
+        quality(ambientOcclusionQuality_), quality(effectsQuality_), toggle(postProcessing_), toggle(bloomEnabled_),
+        quality(bloomQuality_), percent(masterVolume_),
         percent(musicVolume_), percent(sfxVolume_), percent(ambientVolume_),
-        toggle(reducedCameraShake_), toggle(reducedFlashes_), "", ""
+        toggle(reducedCameraShake_), toggle(reducedFlashes_),
+        firstPersonMotionMode_ == 0 ? "Выкл." : (firstPersonMotionMode_ == 1 ? "Сниженное" : "Полное"),
+        shaderPreset_ == 0 ? "Быстрый" : (shaderPreset_ == 1 ? "Баланс" : (shaderPreset_ == 2 ? "Кино" : "Свой")),
+        shaderSettings_.materialQuality == 0 ? "Простые" : (shaderSettings_.materialQuality == 1 ? "Рельеф" : "Отражения"),
+        shaderSettings_.volumetricQuality == 0 ? "Выкл." : (shadowQuality_ == 0 ? "Нужны тени" :
+            (shaderSettings_.volumetricQuality == 1 ? "Низкое" : (shaderSettings_.volumetricQuality == 2 ? "Среднее" : "Высокое"))),
+        percent(shaderSettings_.haze), percent(shaderSettings_.sunIntensity), percent(shaderSettings_.exposure),
+        percent(shaderSettings_.bloomIntensity), percent(shaderSettings_.saturation),
+        shaderSettings_.skyQuality == 0 ? "Простое" : (shaderSettings_.skyQuality == 1 ? "Атмосфера" : "Облака"),
+        shaderSettings_.giQuality == 0 ? "Выкл." : (shaderSettings_.giQuality == 1 ? "Среднее" : "Высокое"),
+        percent(shaderSettings_.giStrength), toggle(shaderSettings_.localShadows), FormatTenths(shaderSettings_.shadowSoftness),
+        "", ""
     };
 
     DrawCenteredText("Настройки", 56, 40, kTextBright);
@@ -2878,7 +3078,7 @@ void Game::RenderSettings() const
     // everything else as < value > steppers.
     const auto isToggleRow = [](int i)
     {
-        return i == 6 || i == 12 || i == 13 || i == 18 || i == 19;
+        return i == 6 || i == 13 || i == 14 || i == 20 || i == 21;
     };
     const Rectangle firstRow = SettingsRowRect(0);
     BeginScissorMode(static_cast<int>(firstRow.x) - 4, static_cast<int>(panel.y) + 8,
@@ -2888,7 +3088,7 @@ void Game::RenderSettings() const
         const int i = firstVisible + visible;
         const bool selected = i == settingsIndex_;
         const Rectangle row = SettingsRowRect(visible);
-        if (i >= 20)
+        if (i >= 36)
         {
             MenuButton(row, labels[i], MenuButtonStyle::Accent, selected, true, 18);
         }
@@ -2920,6 +3120,22 @@ void Game::RenderSettings() const
     };
     DrawRectangleRec(thumb, MixColor(kButtonTop, kAccentCyan, 0.18f));
     PixelBevel(thumb, 2, false);
+    const char* hint = "";
+    if (settingsIndex_ == 23) hint = "Профиль меняет графику; отдельные параметры можно настроить после.";
+    else if (settingsIndex_ == 24) hint = "Рельеф поверхностей, блики и число локальных источников света.";
+    else if (settingsIndex_ == 25) hint = "Солнечные лучи в дымке. Требуются тени; высокое качество нагружает GPU.";
+    else if (settingsIndex_ == 26) hint = "Атмосферная дымка. Дальние границы мира скрываются даже при 0%.";
+    else if (settingsIndex_ == 28 || settingsIndex_ == 30)
+        hint = postProcessing_ ? "Цвет сцены меняется без перезапуска. Интерфейс сохраняет свои цвета."
+                               : "Для этого эффекта включите постобработку в разделе «Графика».";
+    else if (settingsIndex_ == 29)
+        hint = postProcessing_ && bloomEnabled_ ? "Интенсивность свечения. При 0% проходы bloom отключаются."
+                                               : "Включите постобработку и свечение в разделе «Графика».";
+    else if (settingsIndex_ == 31) hint = "Атмосфера: солнце и небосвод. Облака добавляют плавное движение.";
+    else if (settingsIndex_ == 32 || settingsIndex_ == 33) hint = "Непрямой свет и цветные отражения блоков. Высокое качество: больше лучей.";
+    else if (settingsIndex_ == 34) hint = "Квадратный свет ламп учитывает блоки, полублоки и ступени рядом с камерой.";
+    else if (settingsIndex_ == 35) hint = "0: резкие тени. Высокое качество теней учитывает расстояние до препятствия.";
+    DrawCenteredText(hint, std::min(GetScreenHeight() - 24, static_cast<int>(panel.y + panel.height) + 12), 14, kTextDim);
 }
 
 void Game::RenderControls() const
@@ -2937,7 +3153,7 @@ void Game::RenderControls() const
         "Атака / ломать",
         "Использовать / ставить",
         "Магазин / действие",
-        "Инвентарь",
+        "Творческая палитра",
         "Выбросить",
         "Камера",
 #if DAIBED_DEVELOPER_BUILD
@@ -3115,7 +3331,7 @@ void Game::RenderGameHints(const Player& localPlayer) const
     const std::string combatHints = std::string(KeyLabel(bindings.heroActive1)) + "/"
         + KeyLabel(bindings.heroActive2) + "/"
         + KeyLabel(bindings.heroUltimate) + " способности"
-        + " | " + KeyLabel(bindings.inventory) + " инвентарь"
+        + " | CapsLock+колесо варианты"
         + " | " + KeyLabel(bindings.drop) + " выброс"
         + " | ПКМ использовать/ставить"
         + " | утилиты " + KeyLabel(bindings.shoot) + "/" + KeyLabel(bindings.fireball) + "/" + KeyLabel(bindings.heal)
@@ -3497,6 +3713,35 @@ void Game::RenderChestOverlay() const
             DrawText(count.c_str(), sx + slotSize - MeasureText(count.c_str(), 12) - 3, sy + 3, 12, WHITE);
         }
     };
+
+    const int hotbarX = inventoryPanelX + 21;
+    const int hotbarY = y + 58 + 3 * (inventorySlotSize + inventoryGap) + 14;
+    DrawRectangle(inventoryPanelX, hotbarY - 42, inventoryPanelWidth, 108,
+        Fade(BLACK, 0.72f));
+    DrawRectangleLines(inventoryPanelX, hotbarY - 42, inventoryPanelWidth, 108,
+        Fade(WHITE, 0.22f));
+    DrawText("Хотбар", inventoryPanelX + 18, hotbarY - 31, 18, WHITE);
+    const auto& playerHotbar = player->GetInventory().GetHotbarSlots();
+    for (int slot = 0; slot < kHotbarSlotCount; ++slot)
+    {
+        const int sx = hotbarX + slot * (inventorySlotSize + inventoryGap);
+        const Rectangle bounds {
+            static_cast<float>(sx), static_cast<float>(hotbarY),
+            static_cast<float>(inventorySlotSize), static_cast<float>(inventorySlotSize) };
+        DrawRectangle(sx, hotbarY, inventorySlotSize, inventorySlotSize,
+            Fade(Color { 24, 28, 36, 255 }, 0.88f));
+        DrawRectangleLines(sx, hotbarY, inventorySlotSize, inventorySlotSize,
+            CheckCollisionPointRec(mouse, bounds) ? Color { 112, 232, 255, 255 } : Fade(WHITE, 0.18f));
+        const ItemStack& stack = playerHotbar[slot];
+        if (!stack.IsEmpty())
+        {
+            DrawRectangle(sx + 12, hotbarY + 10, inventorySlotSize - 24,
+                inventorySlotSize - 23, itemColor(stack.type));
+            const std::string count = std::to_string(stack.count);
+            DrawText(count.c_str(), sx + inventorySlotSize - MeasureText(count.c_str(), 12) - 4,
+                hotbarY + 4, 12, WHITE);
+        }
+    }
 
     DrawRectangle(x, y, panelWidth, panelHeight, Fade(BLACK, 0.76f));
     DrawRectangleLines(x, y, panelWidth, panelHeight, Fade(WHITE, 0.24f));

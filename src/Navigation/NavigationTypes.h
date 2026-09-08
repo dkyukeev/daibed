@@ -144,6 +144,13 @@ struct NavigationPath
     std::size_t ActionCount() const noexcept { return movements.size(); }
 };
 
+struct NavigationFailedTransition
+{
+    GridPos from {};
+    GridPos to {};
+    MovementType type = MovementType::Walk;
+};
+
 struct NavigationSearchLimits
 {
     int maxExpansions = 3200;
@@ -161,6 +168,9 @@ struct NavigationSearchLimits
     GridPos corridorEnd {};
     float corridorHalfWidth = 10.0f;
     int corridorVerticalPadding = 10;
+    // Short-lived execution evidence, supplied by the controller. A new
+    // strategic goal must not immediately rediscover the same failed jump.
+    std::vector<NavigationFailedTransition> failedTransitions;
 };
 
 enum class NavigationSearchStatus : std::uint8_t

@@ -688,6 +688,49 @@ void ChunkRenderer::RebuildChunk(
                     std::array<float, 4> cornerAo { 1.0f, 1.0f, 1.0f, 1.0f };
                     if (bakeAmbientOcclusion)
                     {
+                        // Low-frequency cavity term complements corner AO:
+                        // roofs, tight corridors and recessed openings stay
+                        // darker even when no blocker touches this exact
+                        // vertex. It is baked only when a chunk changes.
+                        bool roofed = false;
+                        for (int step = 1; step <= 8; ++step)
+                        {
+                            if (occludes(GridPos { neighborPos.x, neighborPos.y + step, neighborPos.z }))
+                            {
+                                roofed = true;
+                                break;
+                            }
+                        }
+                        constexpr GridPos enclosureDirections[] {
+                            GridPos { 1, 0, 0 }, GridPos { -1, 0, 0 },
+                            GridPos { 0, 0, 1 }, GridPos { 0, 0, -1 },
+                            GridPos { 0, 1, 0 }
+                        };
+                        int enclosure = 0;
+                        for (const GridPos& direction : enclosureDirections)
+                        {
+                            bool blocked = false;
+                            for (int step = 1; step <= 2; ++step)
+                            {
+                                const GridPos sample {
+                                    neighborPos.x + direction.x * step,
+                                    neighborPos.y + direction.y * step,
+                                    neighborPos.z + direction.z * step
+                                };
+                                // Do not count the face's own source block as
+                                // enclosure when looking out from a wall.
+                                if (sample == pos) continue;
+                                if (occludes(sample))
+                                {
+                                    blocked = true;
+                                    break;
+                                }
+                            }
+                            enclosure += blocked ? 1 : 0;
+                        }
+                        const float cavityAo = (roofed ? 0.78f : 1.0f)
+                            * (1.0f - std::min(0.20f, static_cast<float>(enclosure) * 0.045f));
+
                         // Minecraft-style corner AO: the two edge neighbors
                         // and the diagonal one layer above the face decide
                         // how dark each vertex gets.
@@ -719,7 +762,7 @@ void ChunkRenderer::RebuildChunk(
                             const int level = (occludedU && occludedV)
                                 ? 0
                                 : 3 - (static_cast<int>(occludedU) + static_cast<int>(occludedV) + static_cast<int>(occludes(diagonal)));
-                            cornerAo[cornerIndex] = kCornerAoLevels[level];
+                            cornerAo[cornerIndex] = kCornerAoLevels[level] * cavityAo;
                         }
                     }
                     AppendFace(builder, pos, face, color, cornerAo);

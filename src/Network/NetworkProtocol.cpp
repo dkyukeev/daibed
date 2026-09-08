@@ -3,7 +3,7 @@
 #include <cstring> // std::memcpy
 #include <iostream>
 
-// See NetworkProtocol.h / docs/NETWORK_PREP_PLAN.md for the encoding contract.
+// See NetworkProtocol.h / docs/P2P_IMPLEMENTATION.md for the encoding contract.
 // This stays raylib-free and depends only on the snapshot/command value types.
 
 const char* ToString(MessageType type)
@@ -87,6 +87,11 @@ public:
         U16(static_cast<std::uint16_t>(v & 0xFFFF));
         U16(static_cast<std::uint16_t>((v >> 16) & 0xFFFF));
     }
+    void U64(std::uint64_t v)
+    {
+        U32(static_cast<std::uint32_t>(v & 0xFFFF'FFFFu));
+        U32(static_cast<std::uint32_t>(v >> 32));
+    }
     void I32(std::int32_t v) { U32(static_cast<std::uint32_t>(v)); }
     void F32(float v)
     {
@@ -142,6 +147,12 @@ public:
         const std::uint32_t hi = U16();
         return lo | (hi << 16);
     }
+    std::uint64_t U64()
+    {
+        const std::uint64_t lo = U32();
+        const std::uint64_t hi = U32();
+        return lo | (hi << 32);
+    }
     std::int32_t I32() { return static_cast<std::int32_t>(U32()); }
     float F32()
     {
@@ -184,6 +195,28 @@ private:
 };
 
 // --- Leaf serializers --------------------------------------------------------
+void WriteSessionCredentials(ByteWriter& w, const SessionCredentials& credentials)
+{
+    w.U64(credentials.sessionId.high);
+    w.U64(credentials.sessionId.low);
+    w.U64(credentials.playerSessionId.high);
+    w.U64(credentials.playerSessionId.low);
+    w.U64(credentials.reconnectToken.high);
+    w.U64(credentials.reconnectToken.low);
+}
+
+SessionCredentials ReadSessionCredentials(ByteReader& r)
+{
+    SessionCredentials credentials;
+    credentials.sessionId.high = r.U64();
+    credentials.sessionId.low = r.U64();
+    credentials.playerSessionId.high = r.U64();
+    credentials.playerSessionId.low = r.U64();
+    credentials.reconnectToken.high = r.U64();
+    credentials.reconnectToken.low = r.U64();
+    return credentials;
+}
+
 void WriteVec3(ByteWriter& w, const Vec3& v)
 {
     w.F32(v.x);
@@ -228,6 +261,8 @@ void WritePlayerCommand(ByteWriter& w, const PlayerCommand& c)
     w.Bool(c.sprintTapped);
     w.Bool(c.sneak);
     w.I32(c.selectedSlot);
+    w.I32(c.woolVariant);
+    w.I32(c.arrowVariant);
     w.Bool(c.attackPressed);
     w.Bool(c.attackHeld);
     w.Bool(c.attackReleased);
@@ -249,6 +284,8 @@ void WritePlayerCommand(ByteWriter& w, const PlayerCommand& c)
     w.I32(c.actionType);
     w.I32(c.actionParamA);
     w.I32(c.actionParamB);
+    w.U32(c.chatSeq);
+    w.Str(c.chatMessage);
     w.U32(c.rewindTick);
 }
 void ReadPlayerCommand(ByteReader& r, PlayerCommand& c)
@@ -264,6 +301,8 @@ void ReadPlayerCommand(ByteReader& r, PlayerCommand& c)
     c.sprintTapped = r.Bool();
     c.sneak = r.Bool();
     c.selectedSlot = r.I32();
+    c.woolVariant = r.I32();
+    c.arrowVariant = r.I32();
     c.attackPressed = r.Bool();
     c.attackHeld = r.Bool();
     c.attackReleased = r.Bool();
@@ -285,6 +324,8 @@ void ReadPlayerCommand(ByteReader& r, PlayerCommand& c)
     c.actionType = r.I32();
     c.actionParamA = r.I32();
     c.actionParamB = r.I32();
+    c.chatSeq = r.U32();
+    c.chatMessage = r.Str();
     c.rewindTick = r.U32();
 }
 
@@ -346,6 +387,9 @@ void WriteAbilityHud(ByteWriter& w, const HeroAbilityHudSnapshot& hud)
     w.F32(hud.ultimateCharge);
     w.Bool(hud.ultimatePrimed);
     w.F32(hud.bowDrawTimer);
+    w.I32(hud.arrowVariant);
+    for (int ammo : hud.arrowAmmo) w.I32(ammo);
+    for (float timer : hud.arrowReloadTimers) w.F32(timer);
     w.I32(hud.blasterState);
     w.F32(hud.blasterLoadTimer);
 }
@@ -361,6 +405,9 @@ void ReadAbilityHud(ByteReader& r, HeroAbilityHudSnapshot& hud)
     hud.ultimateCharge = r.F32();
     hud.ultimatePrimed = r.Bool();
     hud.bowDrawTimer = r.F32();
+    hud.arrowVariant = r.I32();
+    for (int& ammo : hud.arrowAmmo) ammo = r.I32();
+    for (float& timer : hud.arrowReloadTimers) timer = r.F32();
     hud.blasterState = r.I32();
     hud.blasterLoadTimer = r.F32();
 }
@@ -643,6 +690,7 @@ void WriteProjectileSnapshot(ByteWriter& w, const ProjectileSnapshot& projectile
 {
     w.I32(projectile.id);
     w.I32(projectile.kind);
+    w.I32(projectile.arrowVariant);
     WriteVec3(w, projectile.position);
     WriteVec3(w, projectile.velocity);
     w.I32(projectile.ownerPlayerId);
@@ -655,6 +703,7 @@ void ReadProjectileSnapshot(ByteReader& r, ProjectileSnapshot& projectile)
 {
     projectile.id = r.I32();
     projectile.kind = r.I32();
+    projectile.arrowVariant = r.I32();
     projectile.position = ReadVec3(r);
     projectile.velocity = ReadVec3(r);
     projectile.ownerPlayerId = r.I32();
@@ -1333,15 +1382,16 @@ std::vector<std::uint8_t> EncodeControl(MessageType type, std::uint32_t sequence
     return FramePacket(type, sequence, tick, {});
 }
 
-std::vector<std::uint8_t> EncodeConnect(std::uint32_t sequence, const std::string& token)
+std::vector<std::uint8_t> EncodeConnect(std::uint32_t sequence, const ConnectRequest& request)
 {
     ByteWriter payload;
-    payload.Str(token);
+    payload.Str(request.password);
+    WriteSessionCredentials(payload, request.resume);
     return FramePacket(MessageType::Connect, sequence, 0, payload.Bytes());
 }
 
 DecodeStatus DecodeConnect(const std::uint8_t* data, std::size_t size,
-                           PacketHeader& header, std::string& token)
+                           PacketHeader& header, ConnectRequest& request)
 {
     ByteReader r(data, size);
     const DecodeStatus status = ReadAndValidateHeader(r, header);
@@ -1353,14 +1403,16 @@ DecodeStatus DecodeConnect(const std::uint8_t* data, std::size_t size,
     {
         return DecodeStatus::WrongType;
     }
-    token = r.Str();
+    request.password = r.Str();
+    request.resume = ReadSessionCredentials(r);
     return r.Ok() ? DecodeStatus::Ok : DecodeStatus::BadPayload;
 }
 
-std::vector<std::uint8_t> EncodeConnectAck(std::uint32_t sequence, int assignedPlayerId)
+std::vector<std::uint8_t> EncodeConnectAck(std::uint32_t sequence, const ConnectAccept& accept)
 {
     ByteWriter payload;
-    payload.I32(assignedPlayerId);
+    payload.I32(accept.clientId);
+    WriteSessionCredentials(payload, accept.credentials);
     return FramePacket(MessageType::ConnectAck, sequence, 0, payload.Bytes());
 }
 
@@ -1543,7 +1595,7 @@ DecodeStatus DecodePacketFragment(
 }
 
 DecodeStatus DecodeConnectAck(const std::uint8_t* data, std::size_t size,
-                              PacketHeader& header, int& assignedPlayerId)
+                              PacketHeader& header, ConnectAccept& accept)
 {
     ByteReader r(data, size);
     const DecodeStatus status = ReadAndValidateHeader(r, header);
@@ -1555,7 +1607,8 @@ DecodeStatus DecodeConnectAck(const std::uint8_t* data, std::size_t size,
     {
         return DecodeStatus::WrongType;
     }
-    assignedPlayerId = r.I32();
+    accept.clientId = r.I32();
+    accept.credentials = ReadSessionCredentials(r);
     return r.Ok() ? DecodeStatus::Ok : DecodeStatus::BadPayload;
 }
 

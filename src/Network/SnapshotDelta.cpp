@@ -79,6 +79,25 @@ bool PlayerScoreEqual(const PlayerScoreSnapshot& a, const PlayerScoreSnapshot& b
         && a.coresDestroyed == b.coresDestroyed;
 }
 
+bool AbilityHudEqual(const HeroAbilityHudSnapshot& a, const HeroAbilityHudSnapshot& b)
+{
+    return a.present == b.present
+        && a.active1Cooldown == b.active1Cooldown
+        && a.active1ActiveTimer == b.active1ActiveTimer
+        && a.active2Cooldown == b.active2Cooldown
+        && a.active2ActiveTimer == b.active2ActiveTimer
+        && a.ultimateCooldown == b.ultimateCooldown
+        && a.ultimateActiveTimer == b.ultimateActiveTimer
+        && a.ultimateCharge == b.ultimateCharge
+        && a.ultimatePrimed == b.ultimatePrimed
+        && a.bowDrawTimer == b.bowDrawTimer
+        && a.arrowVariant == b.arrowVariant
+        && a.arrowAmmo == b.arrowAmmo
+        && a.arrowReloadTimers == b.arrowReloadTimers
+        && a.blasterState == b.blasterState
+        && a.blasterLoadTimer == b.blasterLoadTimer;
+}
+
 bool PlayerEqual(const PlayerSnapshot& a, const PlayerSnapshot& b)
 {
     return a.playerId == b.playerId && a.playerName == b.playerName
@@ -88,6 +107,7 @@ bool PlayerEqual(const PlayerSnapshot& a, const PlayerSnapshot& b)
         && a.alive == b.alive && a.eliminated == b.eliminated
         && a.respawnTimer == b.respawnTimer && a.selectedSlot == b.selectedSlot
         && InventoryEqual(a.inventory, b.inventory)
+        && AbilityHudEqual(a.abilityHud, b.abilityHud)
         && a.disguiseTeamId == b.disguiseTeamId && a.disguiseHeroId == b.disguiseHeroId;
 }
 
@@ -129,7 +149,8 @@ bool BlockDeltaEqual(const BlockDelta& a, const BlockDelta& b)
 
 bool ProjectileEqual(const ProjectileSnapshot& a, const ProjectileSnapshot& b)
 {
-    return a.id == b.id && a.kind == b.kind && VecEqual(a.position, b.position)
+    return a.id == b.id && a.kind == b.kind && a.arrowVariant == b.arrowVariant
+        && VecEqual(a.position, b.position)
         && VecEqual(a.velocity, b.velocity) && a.ownerPlayerId == b.ownerPlayerId
         && a.ownerTeamId == b.ownerTeamId && a.remainingLifetime == b.remainingLifetime
         && a.fireZone == b.fireZone && a.visibility == b.visibility;

@@ -21,6 +21,41 @@ enum class ProjectileKind
     Blaster
 };
 
+enum class ArrowVariant
+{
+    Standard = 0,
+    Breacher = 1,
+    Impulse = 2,
+    Count = 3
+};
+
+inline constexpr int kArrowVariantCount = static_cast<int>(ArrowVariant::Count);
+inline constexpr float kQuiverReloadSeconds = 3.4f;
+
+inline constexpr int ArrowQuiverCapacity(ArrowVariant variant)
+{
+    switch (variant)
+    {
+    case ArrowVariant::Standard: return 16;
+    case ArrowVariant::Breacher: return 12;
+    case ArrowVariant::Impulse: return 10;
+    case ArrowVariant::Count: break;
+    }
+    return 0;
+}
+
+inline constexpr const char* ArrowVariantName(ArrowVariant variant)
+{
+    switch (variant)
+    {
+    case ArrowVariant::Standard: return "Обычные стрелы";
+    case ArrowVariant::Breacher: return "Осадные стрелы";
+    case ArrowVariant::Impulse: return "Импульсные стрелы";
+    case ArrowVariant::Count: break;
+    }
+    return "Стрелы";
+}
+
 struct ProjectileTuning
 {
     float speed;

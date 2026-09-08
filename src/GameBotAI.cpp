@@ -1,4 +1,5 @@
 #include "Game.h"
+#include "BotCombatAssessment.h"
 #include "VecConvert.h"
 
 #include "raylib.h"
@@ -940,34 +941,6 @@ float DifficultyCautionOffset(BotDifficulty difficulty, float easyOffset, float 
         break;
     }
     return 0.0f;
-}
-
-float FightRequiredMarginForDifficulty(const BotTuningGenome& tuning, BotDifficulty difficulty)
-{
-    switch (difficulty)
-    {
-    case BotDifficulty::Easy:
-        return tuning.fightRequiredMarginEasy;
-    case BotDifficulty::Hard:
-        return tuning.fightRequiredMarginHard;
-    case BotDifficulty::Normal:
-        break;
-    }
-    return tuning.fightRequiredMarginNormal;
-}
-
-float RetreatPowerMarginForDifficulty(const BotTuningGenome& tuning, BotDifficulty difficulty)
-{
-    switch (difficulty)
-    {
-    case BotDifficulty::Easy:
-        return tuning.retreatPowerMarginEasy;
-    case BotDifficulty::Hard:
-        return tuning.retreatPowerMarginHard;
-    case BotDifficulty::Normal:
-        break;
-    }
-    return tuning.retreatPowerMarginNormal;
 }
 
 int BotRetreatHealth(BotRole role, BotDifficulty difficulty, bool coreAlive, const BotTuningGenome& tuning)
@@ -2003,172 +1976,6 @@ const ResourcePickup* FindBestPickupForBot(
     }
 
     return best;
-}
-
-struct BotCombatPowerWeights
-{
-    float health = 1.05f;
-    float sword = 17.0f;
-    float armor = 14.0f;
-    float shield = 13.0f;
-    float tool = 8.0f;
-    float fireball = 8.0f;
-    float dash = 7.0f;
-    float molotov = 6.0f;
-    float speedBoost = 10.0f;
-};
-
-constexpr BotCombatPowerWeights kDecisionCombatPowerWeights {};
-constexpr BotCombatPowerWeights kPathCombatPowerWeights {
-    1.1f,
-    18.0f,
-    14.0f,
-    13.0f,
-    8.0f,
-    7.0f,
-    6.0f,
-    5.0f,
-    9.0f
-};
-
-BotCombatPowerWeights ApplyCombatTuning(BotCombatPowerWeights weights, const BotTuningGenome& tuning)
-{
-    weights.shield = tuning.shieldPower;
-    weights.speedBoost = tuning.speedBoostPower;
-    return weights;
-}
-
-float BotCombatPowerScore(const Player& player, const BotCombatPowerWeights& weights)
-{
-    const Inventory& inventory = player.GetInventory();
-    float score = static_cast<float>(player.GetHealth()) * weights.health;
-    score += static_cast<float>(inventory.GetSwordLevel()) * weights.sword;
-    score += static_cast<float>(inventory.GetArmorLevel()) * weights.armor;
-    score += player.HasShield() ? weights.shield : 0.0f;
-    score += static_cast<float>(inventory.GetToolLevel()) * weights.tool;
-    score += static_cast<float>(inventory.GetUtility(UtilityType::Fireball)) * weights.fireball;
-    score += static_cast<float>(inventory.GetUtility(UtilityType::Dash)) * weights.dash;
-    score += static_cast<float>(inventory.GetUtility(UtilityType::Molotov)) * weights.molotov;
-    score += player.GetSpeedBoostTimer() > 0.0f ? weights.speedBoost : 0.0f;
-    return score;
-}
-
-float BotCombatPowerScore(const Player& player, const BotTuningGenome& tuning)
-{
-    return BotCombatPowerScore(player, ApplyCombatTuning(kDecisionCombatPowerWeights, tuning));
-}
-
-struct FightAssessment
-{
-    float selfPower = 0.0f;
-    float targetPower = 0.0f;
-    float allyPower = 0.0f;
-    float enemyPower = 0.0f;
-    float powerMargin = 0.0f;
-    float distance = 999.0f;
-    int nearbyAllies = 0;
-    int nearbyEnemies = 0;
-    bool canWin = false;
-    bool shouldFight = false;
-    bool shouldRetreat = false;
-};
-
-FightAssessment AssessFight(
-    const Player& bot,
-    const Player& target,
-    const std::vector<Player*>* aliveAllies,
-    const std::vector<Player*>* aliveEnemies,
-    BotRole role,
-    BotDifficulty difficulty,
-    const BotTuningGenome& tuning,
-    bool defendingCore,
-    bool finalLifeTarget,
-    bool objectiveBlocker)
-{
-    FightAssessment result {};
-    result.selfPower = BotCombatPowerScore(bot, tuning);
-    result.targetPower = BotCombatPowerScore(target, tuning);
-    result.distance = std::sqrt(DistanceSquared(bot.GetPosition(), target.GetPosition()));
-
-    // Hunting a final-life target is a pack activity: allies still closing in
-    // should already count, otherwise hunters trickle in one by one and lose.
-    const float allyAssistRangeSq = finalLifeTarget ? 16.0f * 16.0f : 9.5f * 9.5f;
-    constexpr float enemyAssistRangeSq = 8.5f * 8.5f;
-    if (aliveAllies != nullptr)
-    {
-        for (const Player* ally : *aliveAllies)
-        {
-            if (ally == nullptr
-                || ally->GetId() == bot.GetId()
-                || ally->GetTeamId() != bot.GetTeamId()
-                || !ally->IsAlive()
-                || ally->IsEliminated())
-            {
-                continue;
-            }
-
-            const bool closeToFight = DistanceSquared(ally->GetPosition(), target.GetPosition()) < allyAssistRangeSq
-                || DistanceSquared(ally->GetPosition(), bot.GetPosition()) < allyAssistRangeSq;
-            if (!closeToFight)
-            {
-                continue;
-            }
-
-            ++result.nearbyAllies;
-            result.allyPower += BotCombatPowerScore(*ally, tuning) * tuning.allyAssistWeight;
-        }
-    }
-    (void)aliveEnemies;
-    (void)enemyAssistRangeSq;
-
-    result.powerMargin = result.selfPower + result.allyPower - result.targetPower - result.enemyPower;
-
-    float requiredMargin = FightRequiredMarginForDifficulty(tuning, difficulty);
-    if (role == BotRole::Fighter)
-    {
-        requiredMargin -= 12.0f;
-    }
-    else if (role == BotRole::Collector)
-    {
-        requiredMargin += 14.0f;
-    }
-    else if (role == BotRole::Defender && defendingCore)
-    {
-        requiredMargin -= 18.0f;
-    }
-    if (finalLifeTarget)
-    {
-        requiredMargin -= 22.0f;
-    }
-    if (objectiveBlocker)
-    {
-        requiredMargin -= 10.0f;
-    }
-    if (bot.GetHealth() < 48)
-    {
-        requiredMargin += 18.0f;
-    }
-    const int outnumberedBy = std::max(0, result.nearbyEnemies - result.nearbyAllies);
-    requiredMargin += static_cast<float>(outnumberedBy) * 16.0f;
-
-    const bool targetWeak = target.GetHealth() <= bot.GetHealth() - (difficulty == BotDifficulty::Easy ? 34 : 18)
-        && outnumberedBy < 2;
-    result.canWin = result.powerMargin >= requiredMargin;
-    result.shouldFight = defendingCore
-        || finalLifeTarget
-        || objectiveBlocker
-        || targetWeak
-        || result.canWin;
-    result.shouldRetreat = !defendingCore
-        && !finalLifeTarget
-        && bot.GetHealth() < (role == BotRole::Collector ? 72 : 58)
-        && result.powerMargin < RetreatPowerMarginForDifficulty(tuning, difficulty);
-    if (!defendingCore && !finalLifeTarget && outnumberedBy >= 2 && bot.GetHealth() < 70)
-    {
-        result.shouldRetreat = true;
-    }
-
-    return result;
 }
 
 // A chase that has not closed the gap for a while gets banned for a few
@@ -3576,7 +3383,7 @@ BotMovementPlan BuildBotMovementPlan(
         // still closes (you finish the kill); defenders hold their shell.
         const Inventory& kiteInventory = bot.GetInventory();
         const bool hasReadyRanged =
-            (kiteInventory.HasItem(ItemType::Bow) && kiteInventory.GetUtility(UtilityType::Arrows) > 0)
+            kiteInventory.HasItem(ItemType::Bow)
             || kiteInventory.HasItem(ItemType::Blaster)
             || kiteInventory.HasItem(ItemType::SniperRifle);
         const bool witnessZoner = bot.GetHeroId() == HeroId::Svidetel;
@@ -4170,7 +3977,7 @@ bool Game::BotUseUtility(Player& bot, Team& team, Player* enemy, EnergyCore* ene
         if (distance > 4.2f
             && distance < 11.0f
             && bot.GetInventory().HasItem(ItemType::Bow)
-            && bot.GetInventory().GetUtility(UtilityType::Arrows) > 0
+            && bot.GetArrowReloadTimer(bot.GetArrowVariant()) <= 0.0f
             && (memory.role == BotRole::Fighter || memory.role == BotRole::Rusher || botDifficulty_ == BotDifficulty::Hard))
         {
             const float drawPower = distance > 7.0f ? 1.0f : 0.72f;
@@ -4511,8 +4318,8 @@ bool Game::BotUseHeroAbility(Player& bot, Team& team, Player* enemy, EnergyCore*
         {
             return cast(HeroAbilitySlot::Ultimate, Vector3 {}, false);
         }
-        // Turret holds ground while defending or brawling near base. Keep a
-        // small gold reserve when not defending.
+        // Kamikaze drone intercepts attackers near the base. Keep a small gold
+        // reserve when the bot is not actively defending.
         if (bot.IsHeroAbilityReady(HeroAbilitySlot::Active2)
             && inventory.GetResource(ResourceType::Gold) >= 12 + (defendingBase ? 0 : 8)
             && (defendingBase || (enemy != nullptr && enemyDistance < 9.0f)))
@@ -4815,7 +4622,6 @@ void Game::UpdateBots(float dt)
         }
 
         EnergyCore* bestCore = nullptr;
-        float bestCoreScore = std::numeric_limits<float>::max();
         int aliveEnemyCores = 0;
         TeamCoordinationBus* coordBus = team.id >= 0 && team.id < static_cast<int>(teamCoordBuses_.size())
             ? &teamCoordBuses_[team.id]
@@ -4889,47 +4695,70 @@ void Game::UpdateBots(float dt)
         {
             coordBus->reserveDefenderId = plan.primaryDefenderId;
         }
+        BotAttackCommitment localCommitment;
+        BotAttackCommitment& attackCommitment = coordBus != nullptr
+            ? coordBus->attackCommitment : localCommitment;
+        EnergyCore* committedCore = FindCoreByTeam(attackCommitment.teamId);
+        const bool recheckAttack = now >= attackCommitment.recheckAt
+            || committedCore == nullptr || !committedCore->IsAlive();
+        std::vector<BotAttackOption> attackOptions;
+        int availableBridgeBlocks = 0;
+        for (const Player* ally : teamContext.aliveAllies)
+            if (ally != nullptr) availableBridgeBlocks = std::max(availableBridgeBlocks, ally->GetInventory().GetBlocks());
         for (EnergyCore& core : matchSimulation_.Cores())
         {
-            if (core.GetTeamId() == team.id || !core.IsAlive())
-            {
-                continue;
-            }
-
+            if (core.GetTeamId() == team.id || !core.IsAlive()) continue;
             ++aliveEnemyCores;
-            const Vector3 corePos = world_.GridToWorld(core.GetBlockPosition());
-            const float distanceFromBase = DistanceSquared(teamContext.coreHome, corePos);
-            const float weaknessBonus = static_cast<float>(core.GetMaxHealth() - core.GetHealth()) * 2.4f;
-            // Do not read the enemy's private role distribution or exact shell
-            // holes.  Core health is public match state; defenders are learned
-            // only by actually encountering them during the push.
-            const float defenderPenalty = 0.0f;
-
-            const int coordinatedAttackers = coordBus != nullptr
-                ? coordBus->CountSignal(
-                    CoordinationSignal::AttackingCore,
-                    matchSimulation_.MatchTimeSeconds(),
-                    kCoordinationSignalTtl,
-                    core.GetTeamId())
-                : 0;
-            const bool clockwisePressure = !automatch_.active || automatch_.completedRuns % 2 == 0;
-            const float neighborBonus = core.GetTeamId() == PreferredNeighborTeam(team.id, clockwisePressure) ? 48.0f : 0.0f;
-            const float sharedPressureBonus = coordBus != nullptr
-                && coordBus->pressureTeamId == core.GetTeamId()
-                && matchSimulation_.MatchTimeSeconds() - coordBus->pressureTimestamp < kCoordinationSignalTtl * 2.0f
-                ? 115.0f : 0.0f;
-            const float score = distanceFromBase * 0.38f
-                - weaknessBonus
-                + defenderPenalty
-                + static_cast<float>(coordinatedAttackers) * 88.0f
-                - neighborBonus
-                - sharedPressureBonus;
-            if (score < bestCoreScore)
+            if (!recheckAttack) continue;
+            BotAttackOption option;
+            option.teamId = core.GetTeamId();
+            const Vector3 corePosition = world_.GridToWorld(core.GetBlockPosition());
+            option.travelSeconds = std::sqrt(DistanceSquared(teamContext.coreHome, corePosition)) / 4.0f;
+            if (!routeGraph_.Empty())
             {
-                bestCoreScore = score;
-                bestCore = &core;
+                const RouteCorridor corridor = routeGraph_.FindCorridor(
+                    world_.WorldToGrid(teamContext.coreHome), core.GetBlockPosition(), team.id);
+                option.reachable = corridor.valid;
+                if (corridor.valid)
+                {
+                    option.travelSeconds = corridor.cost / 4.0f;
+                    int constructionBlocks = 0;
+                    for (const RouteCorridorSegment& segment : corridor.segments)
+                    {
+                        if (!segment.IsBridge()) continue;
+                        const auto low = static_cast<std::uint32_t>(std::min(segment.fromNodeIndex, segment.toNodeIndex) + 1);
+                        const auto high = static_cast<std::uint32_t>(std::max(segment.fromNodeIndex, segment.toNodeIndex) + 1);
+                        const std::uint64_t signature = (static_cast<std::uint64_t>(low) << 32u) | high;
+                        if (coordBus == nullptr || !coordBus->IsRouteOpened(signature, now))
+                            constructionBlocks += segment.expectedBridgeBlocks;
+                    }
+                    option.preparationSeconds = constructionBlocks * 0.25f
+                        + std::max(0, constructionBlocks - availableBridgeBlocks) * 0.5f;
+                }
             }
+            option.remainingHealthFraction = static_cast<float>(core.GetHealth()) / std::max(1, core.GetMaxHealth());
+            option.supportingAttackers = coordBus != nullptr ? coordBus->CountSignal(
+                CoordinationSignal::AttackingCore, now, kCoordinationSignalTtl, core.GetTeamId()) : 0;
+            for (const Player* enemy : teamContext.aliveEnemies)
+            {
+                if (enemy == nullptr || DistanceSquared(enemy->GetPosition(), corePosition) > 144.0f) continue;
+                const bool observed = std::any_of(teamContext.aliveAllies.begin(), teamContext.aliveAllies.end(),
+                    [this, enemy](const Player* ally) { return ally != nullptr && BotHasLineOfSight(*ally, *enemy); });
+                if (observed) ++option.observedDefenders;
+            }
+            for (const Player* ally : teamContext.aliveAllies)
+            {
+                if (ally == nullptr) continue;
+                const BotMemory* memory = FindBotMemoryByPlayerId(botMemories_, botMemoryIndexByPlayerId_, ally->GetId());
+                if (memory != nullptr && memory->currentPlan.targetTeamId == core.GetTeamId()
+                    && memory->routeFailureCooldown > 0.0f)
+                    option.recentRouteFailures = std::max(option.recentRouteFailures, memory->repeatedRouteFailures);
+            }
+            attackOptions.push_back(option);
         }
+        const int selectedCoreTeam = recheckAttack
+            ? SelectBotAttackOption(attackOptions, attackCommitment, now) : attackCommitment.teamId;
+        bestCore = FindCoreByTeam(selectedCoreTeam);
 
         if (bestCore != nullptr)
         {
@@ -4951,8 +4780,7 @@ void Game::UpdateBots(float dt)
         // the coordination bus, so dynamic roles and simulation order cannot
         // make all four bots swap into cleanup on the same frame.
         BotTeamFrameContext* cleanupTargetContext = nullptr;
-        if (coordBus != nullptr && hypixelRush && team.coreAlive
-            && (bestCore != nullptr || aliveEnemyCores == 0))
+        if (coordBus != nullptr)
         {
             const auto eligibleCleanupTarget = [&frameContext, &team](int targetTeamId) -> BotTeamFrameContext*
             {
@@ -5127,6 +4955,7 @@ void Game::UpdateBots(float dt)
         teamContext.strategicPlan = plan;
     }
 
+    UpdateBotBridgeCoordination();
     for (std::size_t botOffset = 0; botOffset < players_.size(); ++botOffset)
     {
         Player& bot = players_[(simulationOrderOffset_ + botOffset) % players_.size()];
@@ -5204,22 +5033,29 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
     const bool assignedCleanupHunter = strategicPlan.cleanupHunterId == bot.GetId()
         && strategicPlan.cleanupTargetTeamId >= 0
         && strategicPlan.cleanupTargetAlivePlayers > 0;
-    if (assignedCleanupHunter
-        && !strategicPlan.cleanupTargetRecentlySeen
-        && memory.currentPlan.goal == StrategicGoal::HuntPlayers
-        && memory.currentPlan.targetTeamId == strategicPlan.cleanupTargetTeamId
-        && memory.currentPlan.stage >= 1)
+    if (assignedCleanupHunter && !strategicPlan.cleanupTargetRecentlySeen && coordBus != nullptr)
     {
-        // Reaching the Core does not mean the base was searched: a final-life
-        // player commonly waits at its spawn/shop, 15-25 blocks behind the
-        // Core.  The old fallback picked the first crystal generator in map
-        // order (north-west on Castle), sending a green-base hunter across the
-        // whole map while the survivor stood behind it.  Sweep the target
-        // team's spawn first; visual pursuit takes over as soon as it is seen.
         const Team* cleanupTeam = FindTeam(strategicPlan.cleanupTargetTeamId);
         if (cleanupTeam != nullptr)
         {
-            strategicPlan.cleanupTargetPosition = cleanupTeam->spawnPoint;
+            std::vector<BotSearchSite> sites;
+            if (coordBus->cleanupLastSeenTimestamp > -999.0f
+                && matchSimulation_.MatchTimeSeconds() - coordBus->cleanupLastSeenTimestamp < 45.0f)
+                sites.push_back({ 0, coordBus->cleanupLastKnownPosition, 80.0f });
+            sites.push_back({ 1, world_.GridToWorld(cleanupTeam->coreBlock), 40.0f });
+            sites.push_back({ 2, cleanupTeam->spawnPoint, 35.0f });
+            sites.push_back({ 3, cleanupTeam->shopPosition, 25.0f });
+            for (int index = 0; index < static_cast<int>(routeGraph_.NodeCount()); ++index)
+            {
+                const CreativeRouteNode* node = routeGraph_.Node(index);
+                if (node == nullptr || (node->teamId >= 0 && node->teamId != team.id)) continue;
+                // These are authored public places, never coordinates read
+                // from an unseen enemy. Include the different Castle floors.
+                sites.push_back({ 10 + index, world_.GridToWorld(node->pos), 0.0f });
+            }
+            strategicPlan.cleanupTargetPosition = SelectBotSearchSite(sites,
+                coordBus->searchMemory, bot.GetPosition(), cleanupTeam->id,
+                coordBus->cleanupLastSeenTimestamp, matchSimulation_.MatchTimeSeconds());
         }
     }
     if (strategicPlan.attackCoreTeamId >= 0)
@@ -5724,6 +5560,7 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
         ? AssessFight(
             bot,
             *nearbyEnemy,
+            [this](const Player& observer, const Player& actor) { return BotHasLineOfSight(observer, actor); },
             teamContext != nullptr ? &teamContext->aliveAllies : nullptr,
             &aliveEnemies,
             memory.role,
@@ -6101,10 +5938,10 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
         decision.reason = macroDirective.reason;
         decision.score += 520.0f;
     }
-    const bool openingScout = matchSimulation_.MatchTimeSeconds() < 60.0f
-        && openingRank >= 1
-        && openingRank <= 2
-        && distanceFromHome < 196.0f
+    const bool openingScout = BotOpeningPressureEligible(
+        matchSimulation_.MatchTimeSeconds(), openingRank, memory.role == BotRole::Defender,
+        distanceFromHome, memory.intent == BotIntent::PressureCore
+            || memory.intent == BotIntent::BreakCoreDefense)
         && enemyAtCore == nullptr
         && !coreDefenseCritical
         && (!hypixelRush || inventory.GetBlocks() >= 12);
@@ -6122,7 +5959,10 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
     const float coordinationNow = matchSimulation_.MatchTimeSeconds();
     const bool bridgeRequestActive = coordBus != nullptr
         && coordBus->bridgeRequestorId >= 0
-        && coordinationNow - coordBus->bridgeRequestTimestamp <= 7.0f;
+        && coordinationNow - coordBus->bridgeRequestTimestamp <= 7.0f
+        && std::any_of(players_.begin(), players_.end(), [coordBus](const Player& player) {
+            return player.GetId() == coordBus->bridgeRequestorId && player.IsAlive() && !player.IsEliminated();
+        });
     if (bridgeRequestActive && coordBus->bridgeRequestorId != bot.GetId())
     {
         const bool assignedBuilderAlive = std::any_of(
@@ -6131,18 +5971,23 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
                 return candidate.GetId() == coordBus->bridgeRequestBuilderId
                     && candidate.IsAlive() && !candidate.IsEliminated();
             });
-        const bool canTakeBridgeRequest = inventory.GetBlocks() >= 4
-            && memory.role != BotRole::Defender
+        const bool canTakeBridgeRequest = memory.role != BotRole::Defender
+            && (coordBus->bridgeRequestBuilderId == bot.GetId() || coordBus->preferredBridgeHelperId == bot.GetId())
             && !coreDefenseCritical
+            && decision.intent != BotIntent::RetreatHome
+            && decision.intent != BotIntent::Recover
             && (nearbyEnemy == nullptr || nearbyEnemyDistance > 7.5f);
-        const bool ownsRequest = coordBus->bridgeRequestBuilderId == bot.GetId();
-        const bool requestUnassigned = !assignedBuilderAlive
-            || coordBus->bridgeRequestReservationUntil < coordinationNow;
-        if (canTakeBridgeRequest && (ownsRequest || requestUnassigned))
+        const int previousHelper = coordBus->bridgeRequestBuilderId;
+        if (canTakeBridgeRequest && coordBus->TryClaimBridgeRequest(bot.GetId(), botPos,
+            inventory.GetBlocks(), coordinationNow, assignedBuilderAlive))
         {
-            coordBus->bridgeRequestBuilderId = bot.GetId();
-            coordBus->bridgeRequestReservationUntil = coordinationNow + 2.5f;
             memory.assignedBridgeAssist = true;
+            if (automatch_.active && previousHelper != bot.GetId()
+                && std::count_if(automatch_.currentTimeline.begin(), automatch_.currentTimeline.end(),
+                    [](const AutomatchTimelineEvent& event) { return event.type == "bridgeHelpAssigned"; }) < 128)
+                automatch_.currentTimeline.push_back(AutomatchTimelineEvent {
+                    coordinationNow, "bridgeHelpAssigned", team.id, team.id, bot.GetId(),
+                    coordBus->bridgeRequestorId, inventory.GetBlocks(), "helper assigned" });
             decision.intent = coordBus->bridgeRequestIntent;
             decision.state = BotState::Bridge;
             decision.target = coordBus->bridgeRequestTarget;
@@ -6205,7 +6050,9 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
         coordBus->Broadcast(bot.GetId(), signal, decision.target, matchSimulation_.MatchTimeSeconds(), coordinationTargetTeamId);
     }
 
-    if (memory.intent == BotIntent::RepairCoreDefense && TryBotRepairCoreDefense(bot, team, dt))
+    if (memory.intent == BotIntent::RepairCoreDefense
+        && DistanceSquared(botPos, coreHome) <= 100.0f
+        && TryBotRepairCoreDefense(bot, team, dt))
     {
         return;
     }
@@ -6213,23 +6060,28 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
     decisionProfile.Stop();
     ScopedProfileTimer movementProfile(profilingEnabled_, profileMovementMs_, profileMovementCalls_);
     Vector3 target = decision.target;
-    if (memory.intent == BotIntent::RetreatHome && memory.role != BotRole::Defender && bot.GetHealth() < 55)
+    if (!memory.assignedBridgeAssist && memory.intent == BotIntent::RetreatHome
+        && memory.role != BotRole::Defender && bot.GetHealth() < 55)
     {
         target = spawnTarget;
     }
     const bool cleanupSearch = assignedCleanupHunter
         && (decision.fightTarget == nullptr
             || decision.fightTarget->GetTeamId() != strategicPlan.cleanupTargetTeamId);
-    const bool pursuitNavigation = memory.intent == BotIntent::ChaseWeakEnemy
+    const bool rangedApproach = memory.intent == BotIntent::FightEnemy
+        && (inventory.HasItem(ItemType::Bow) || inventory.HasItem(ItemType::Blaster)
+            || inventory.HasItem(ItemType::SniperRifle));
+    const bool pursuitNavigation = (memory.intent == BotIntent::ChaseWeakEnemy
+            || memory.intent == BotIntent::FightEnemy)
         && decision.fightTarget != nullptr
-        && DistanceSquared(botPos, decision.fightTarget->GetPosition()) > 22.0f;
+        && DistanceSquared(botPos, decision.fightTarget->GetPosition()) > (rangedApproach ? 144.0f : 22.0f);
     const bool navigationEligible = memory.state != BotState::Fight || pursuitNavigation;
     const bool cleanupRoute = assignedCleanupHunter && (cleanupSearch || pursuitNavigation);
     const bool objectivePush = memory.intent == BotIntent::PressureCore
         || memory.intent == BotIntent::BreakCoreDefense
         || memory.state == BotState::AttackCore
         || memory.state == BotState::BreakDefense;
-    if (objectivePush && enemyCore != nullptr && enemyCore->IsAlive())
+    if (!memory.assignedBridgeAssist && objectivePush && enemyCore != nullptr && enemyCore->IsAlive())
     {
         target = world_.GridToWorld(enemyCore->GetBlockPosition());
         Vector3 center { 0.0f, botPos.y, 0.0f };
@@ -6245,7 +6097,7 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
         // core. Without the progress check a bot circling the mid-radius rim on
         // a large map flip-flops between "go to center" and "go to core" every
         // step across the boundary and orbits forever.
-        if (DistanceSquared(botPos, center) > 130.0f
+        if (routeGraph_.Empty() && DistanceSquared(botPos, center) > 130.0f
             && DistanceSquared(botPos, target) > 360.0f
             && DistanceSquared(center, target) + 380.0f < DistanceSquared(botPos, target))
         {
@@ -6296,31 +6148,28 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
         && !cleanupSearch
         && resourceTargetType == ResourceType::Crystal
         && DistanceSquared(coreHome, target) > 900.0f;
-    // Authored lanes are a team tool, not a formation order for all four bots.
-    // The rusher opens the route; a collector may follow it to the neutral
-    // economy. Fighters and defenders keep their independent tactical pathing,
-    // which avoids four bodies contesting the same one-block bridge/stair.
-    const bool authoredRouteRole = memory.role == BotRole::Rusher
-        || (memory.role == BotRole::Collector && outboundResourceRoute)
-        || cleanupRoute
-        || (botStrategyProfile_ == BotStrategyProfile::HypixelRush
-            && objectivePush
-            && memory.role == BotRole::Fighter);
-    if (navigationEligible
-        && authoredRouteRole
-        && (objectivePush || outboundResourceRoute || cleanupRoute))
+    // The graph describes map connectivity, not a role assignment. All long
+    // trips use it, including defense, resupply, retreat and pursuit. Legacy
+    // outward-only markers remain restricted to outbound tasks.
+    const bool longTrip = DistanceSquared(botPos, target) > 1024.0f;
+    const bool continuingTrip = memory.usingRouteCorridor
+        && memory.hasRouteCorridorObjective
+        && DistanceSquared(memory.routeCorridorObjective, target) <= 100.0f;
+    memory.usingAuthoredRoute = false;
+    memory.authoredRouteMarkerKind = -1;
+    if (navigationEligible && (longTrip || continuingTrip))
     {
         target = ChooseBotRouteCorridorWaypoint(bot, target);
-        if (!memory.usingRouteCorridor)
-        {
+        if (routeGraph_.Empty() && (objectivePush || outboundResourceRoute || cleanupRoute))
             target = ChooseBotAuthoredWaypoint(bot, target);
-        }
     }
     else
     {
-        memory.usingAuthoredRoute = false;
-        memory.authoredRouteMarkerKind = -1;
         memory.usingRouteCorridor = false;
+        memory.routeEntryPending = false;
+        memory.routeEntryRepair = false;
+        memory.routeCorridorBridgeSegment = false;
+        memory.routeCorridorWaitingForBuilder = false;
     }
 
     if (navigationEligible
@@ -6355,15 +6204,16 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
             && !nearCoreGapOpportunity;
         const Vector3 navigationTarget = (memory.usingAuthoredRoute
                 || memory.usingRouteCorridor
-                || restockingObjectivePush)
+                || restockingObjectivePush || memory.assignedBridgeAssist)
             ? target
-            : (memory.hasObjectiveTarget ? memory.objectiveTarget : target);
+            : (pursuitNavigation ? decision.target
+                : (memory.hasObjectiveTarget ? memory.objectiveTarget : target));
         actionNavigationActive = UpdateActionNavigation(
             bot,
             memory,
             navigationTarget,
             decision.fightTarget,
-            restockingObjectivePush ? nullptr : enemyCore,
+            (restockingObjectivePush || memory.assignedBridgeAssist) ? nullptr : enemyCore,
             dt,
             actionNavigationCommand,
             navigationGoalSatisfied);
@@ -6459,7 +6309,7 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
     constexpr float kPerchSenseRangeSq = 14.0f * 14.0f;
     const Inventory& perchInventory = bot.GetInventory();
     const bool botHasRanged =
-        (perchInventory.HasItem(ItemType::Bow) && perchInventory.GetUtility(UtilityType::Arrows) > 0)
+        perchInventory.HasItem(ItemType::Bow)
         || perchInventory.HasItem(ItemType::Blaster)
         || perchInventory.HasItem(ItemType::SniperRifle);
     const bool perchTriggerActive = !actionNavigationActive
@@ -6575,6 +6425,17 @@ void Game::UpdateSingleBot(Player& bot, Team& team, float dt, const BotFrameCont
         movementCommand.sneak = edgePressure;
     }
     ApplyPlayerCommand(bot, movementCommand, dt);
+    if (actionNavigationActive && memory.assignedBridgeAssist
+        && movementCommand.actionType == static_cast<int>(PlayerActionType::DropItem))
+    {
+        const PlayerActionResult result = ApplyPlayerEconomyCommand(bot, movementCommand);
+        if (result.success && automatch_.active
+            && std::count_if(automatch_.currentTimeline.begin(), automatch_.currentTimeline.end(),
+                [](const AutomatchTimelineEvent& event) { return event.type == "bridgeHelpSupplied"; }) < 128)
+            automatch_.currentTimeline.push_back(AutomatchTimelineEvent {
+                matchSimulation_.MatchTimeSeconds(), "bridgeHelpSupplied", bot.GetTeamId(), bot.GetTeamId(),
+                bot.GetId(), -1, movementCommand.actionParamB, "helper dropped building stock; pickup not yet confirmed" });
+    }
     if (automatch_.active
         && groundedBeforeMove
         && !bot.IsOnGround()
@@ -6946,6 +6807,7 @@ Vector3 Game::ChooseBotPathWaypoint(Player& bot, Vector3 finalTarget, float dt, 
         ? AssessFight(
             bot,
             *duelEnemy,
+            [this](const Player& observer, const Player& actor) { return BotHasLineOfSight(observer, actor); },
             teamContext != nullptr ? &teamContext->aliveAllies : nullptr,
             teamContext != nullptr ? &teamContext->aliveEnemies : nullptr,
             memory.role,
@@ -7597,322 +7459,6 @@ Vector3 Game::ChooseBotAuthoredWaypoint(Player& bot, Vector3 finalTarget)
     return world_.GridToWorld(marker.pos);
 }
 
-Vector3 Game::ChooseBotRouteCorridorWaypoint(Player& bot, Vector3 finalTarget)
-{
-    BotMemory& memory = GetBotMemory(bot);
-    const bool wasUsingCorridor = memory.usingRouteCorridor;
-    memory.usingRouteCorridor = false;
-    memory.routeCorridorBridgeSegment = false;
-    memory.routeCorridorExpectedBridgeBlocks = 0;
-    if (routeGraph_.Empty())
-    {
-        memory.routeCorridorNodes.clear();
-        memory.routeCorridorTraversal.clear();
-        memory.routeCorridorBridgeBlocks.clear();
-        memory.hasRouteCorridorObjective = false;
-        return finalTarget;
-    }
-
-    const bool objectiveChanged = !memory.hasRouteCorridorObjective
-        || DistanceSquared(memory.routeCorridorObjective, finalTarget) > 100.0f;
-    if (objectiveChanged && memory.routeCorridorReplanCooldown > 0.0f)
-    {
-        // Never follow a stale corridor toward the wrong objective merely to
-        // satisfy the replan budget. The local fallback remains available.
-        return finalTarget;
-    }
-
-    if (objectiveChanged || memory.routeCorridorNodes.empty())
-    {
-        const GridPos failedPosition = world_.WorldToGrid(memory.lastRouteFailurePosition);
-        const GridPos* avoidFailure = memory.hasLastRouteFailure
-            && memory.routeFailureCooldown > 0.0f ? &failedPosition : nullptr;
-        const RouteCorridor corridor = routeGraph_.FindCorridor(
-            world_.WorldToGrid(bot.GetPosition()),
-            world_.WorldToGrid(finalTarget),
-            bot.GetTeamId(),
-            avoidFailure,
-            55.0f * static_cast<float>(std::max(1, memory.repeatedRouteFailures)));
-        memory.routeCorridorReplanCooldown = 1.25f;
-        if (!corridor.valid || corridor.nodeIndices.empty())
-        {
-            memory.routeCorridorNodes.clear();
-            memory.routeCorridorTraversal.clear();
-            memory.routeCorridorBridgeBlocks.clear();
-            memory.hasRouteCorridorObjective = false;
-            ++navigationMetrics_.corridorFailures;
-            return finalTarget;
-        }
-
-        memory.routeCorridorNodes = corridor.nodeIndices;
-        memory.routeCorridorTraversal.clear();
-        memory.routeCorridorBridgeBlocks.clear();
-        memory.routeCorridorTraversal.reserve(corridor.segments.size());
-        memory.routeCorridorBridgeBlocks.reserve(corridor.segments.size());
-        for (const RouteCorridorSegment& segment : corridor.segments)
-        {
-            memory.routeCorridorTraversal.push_back(segment.IsBridge() ? 1 : 0);
-            memory.routeCorridorBridgeBlocks.push_back(segment.expectedBridgeBlocks);
-        }
-        memory.routeCorridorIndex = 0;
-        memory.routeCorridorObjective = finalTarget;
-        memory.hasRouteCorridorObjective = true;
-        memory.routeCorridorSignature = corridor.signature;
-        memory.hasRouteCorridorLastAdvancePosition = false;
-        memory.routeCorridorWaitingForBuilder = false;
-        memory.routeCorridorLastProgressTimestamp = matchSimulation_.MatchTimeSeconds();
-        memory.routeCorridorProgressPosition = bot.GetPosition();
-        memory.routeCorridorProgressIndex = 0;
-        memory.routeCorridorProgressDistanceSq = std::numeric_limits<float>::max();
-        memory.hasNavWaypoint = false;
-        ++navigationMetrics_.corridorPlans;
-    }
-    else if (!wasUsingCorridor
-        && memory.routeCorridorIndex < static_cast<int>(memory.routeCorridorNodes.size()))
-    {
-        // Tactical combat/defense temporarily interrupted, but did not erase,
-        // the strategic route. Resuming it is cheaper and more human-readable
-        // than planning an unrelated lane from scratch.
-        ++navigationMetrics_.corridorReuses;
-    }
-
-    const int count = static_cast<int>(memory.routeCorridorNodes.size());
-    memory.routeCorridorIndex = std::clamp(memory.routeCorridorIndex, 0, count);
-    TeamCoordinationBus* coordBus = bot.GetTeamId() >= 0
-        && bot.GetTeamId() < static_cast<int>(teamCoordBuses_.size())
-        ? &teamCoordBuses_[static_cast<std::size_t>(bot.GetTeamId())]
-        : nullptr;
-    const auto bridgeSegmentForTarget = [&memory](int targetIndex)
-    {
-        const int segmentIndex = targetIndex - 1;
-        return segmentIndex >= 0
-            && segmentIndex < static_cast<int>(memory.routeCorridorTraversal.size())
-            && memory.routeCorridorTraversal[static_cast<std::size_t>(segmentIndex)] != 0;
-    };
-    const auto bridgeSignatureForTarget = [&memory](int targetIndex) -> std::uint64_t
-    {
-        const int segmentIndex = targetIndex - 1;
-        if (segmentIndex < 0
-            || targetIndex >= static_cast<int>(memory.routeCorridorNodes.size()))
-        {
-            return 0;
-        }
-        const std::uint32_t from = static_cast<std::uint32_t>(
-            memory.routeCorridorNodes[static_cast<std::size_t>(segmentIndex)] + 1);
-        const std::uint32_t to = static_cast<std::uint32_t>(
-            memory.routeCorridorNodes[static_cast<std::size_t>(targetIndex)] + 1);
-        const std::uint32_t low = std::min(from, to);
-        const std::uint32_t high = std::max(from, to);
-        return (static_cast<std::uint64_t>(low) << 32u) | high;
-    };
-    while (memory.routeCorridorIndex < count)
-    {
-        const CreativeRouteNode* node = routeGraph_.Node(
-            memory.routeCorridorNodes[static_cast<std::size_t>(memory.routeCorridorIndex)]);
-        if (node == nullptr)
-        {
-            memory.routeCorridorNodes.clear();
-            memory.routeCorridorTraversal.clear();
-            memory.routeCorridorBridgeBlocks.clear();
-            memory.hasRouteCorridorObjective = false;
-            ++navigationMetrics_.corridorFailures;
-            return finalTarget;
-        }
-
-        const Vector3 nodePosition = world_.GridToWorld(node->pos);
-        const float nodeDistanceSq = DistanceSquared(bot.GetPosition(), nodePosition);
-        const bool firstPortal = memory.routeCorridorIndex == 0;
-        // The six-block portal radius used to overlap several castle ingress
-        // nodes.  Combined with a separate three-block movement requirement,
-        // nodes spaced 2.8-3 blocks apart could never advance.  Only the first
-        // coarse portal keeps the generous radius; subsequent nodes require a
-        // real visit to their support cell.  Advance at most one per frame.
-        const bool reached = nodeDistanceSq <= (firstPortal ? 36.0f : 4.0f);
-        if (!reached) break;
-
-        const bool completedBridge = bridgeSegmentForTarget(memory.routeCorridorIndex);
-        const std::uint64_t completedBridgeSignature = completedBridge
-            ? bridgeSignatureForTarget(memory.routeCorridorIndex) : 0;
-        if (completedBridge && memory.routeCorridorBridgeStarted
-            && completedBridgeSignature == memory.routeCorridorActiveBridgeSignature)
-        {
-            ++navigationMetrics_.routeBridgeSegmentsCompleted;
-            memory.routeCorridorBridgeStarted = false;
-            memory.routeCorridorActiveBridgeSignature = 0;
-            memory.routeCorridorWaitingForBuilder = false;
-            if (coordBus != nullptr)
-            {
-                coordBus->MarkRouteOpened(
-                    completedBridgeSignature, matchSimulation_.MatchTimeSeconds());
-                if (coordBus->bridgeRouteSignature == completedBridgeSignature)
-                {
-                    coordBus->bridgeBuilderId = -1;
-                    coordBus->bridgeReservationUntil = -1000.0f;
-                    coordBus->bridgeLastProgressTimestamp = -1000.0f;
-                    coordBus->bridgeLastProgressBlocks = -1;
-                }
-            }
-        }
-
-        ++memory.routeCorridorIndex;
-        ++memory.routeCorridorAdvances;
-        ++navigationMetrics_.corridorAdvances;
-        memory.routeCorridorLastAdvancePosition = bot.GetPosition();
-        memory.hasRouteCorridorLastAdvancePosition = true;
-        memory.routeCorridorLastProgressTimestamp = matchSimulation_.MatchTimeSeconds();
-        memory.routeCorridorProgressPosition = bot.GetPosition();
-        memory.routeCorridorProgressIndex = memory.routeCorridorIndex;
-        memory.routeCorridorProgressDistanceSq = std::numeric_limits<float>::max();
-        memory.hasNavWaypoint = false;
-        break;
-    }
-
-    if (memory.routeCorridorIndex >= count)
-    {
-        return finalTarget;
-    }
-    const CreativeRouteNode* next = routeGraph_.Node(
-        memory.routeCorridorNodes[static_cast<std::size_t>(memory.routeCorridorIndex)]);
-    if (next == nullptr) return finalTarget;
-    const float now = matchSimulation_.MatchTimeSeconds();
-    const float nextDistanceSq = DistanceSquared(bot.GetPosition(), world_.GridToWorld(next->pos));
-    if (memory.routeCorridorProgressIndex != memory.routeCorridorIndex
-        || nextDistanceSq + 1.0f < memory.routeCorridorProgressDistanceSq)
-    {
-        memory.routeCorridorProgressIndex = memory.routeCorridorIndex;
-        memory.routeCorridorProgressDistanceSq = nextDistanceSq;
-        memory.routeCorridorLastProgressTimestamp = now;
-        memory.routeCorridorProgressPosition = bot.GetPosition();
-    }
-    if (now - memory.routeCorridorLastProgressTimestamp > 16.0f
-        && !memory.routeCorridorWaitingForBuilder)
-    {
-        if (coordBus != nullptr && coordBus->bridgeBuilderId == bot.GetId())
-        {
-            coordBus->bridgeBuilderId = -1;
-            coordBus->bridgeReservationUntil = -1000.0f;
-            coordBus->bridgeLastProgressTimestamp = -1000.0f;
-            coordBus->bridgeLastProgressBlocks = -1;
-        }
-        memory.lastRouteFailurePosition = bot.GetPosition();
-        memory.hasLastRouteFailure = true;
-        memory.repeatedRouteFailures = std::max(1, memory.repeatedRouteFailures + 1);
-        memory.routeFailureCooldown = std::max(memory.routeFailureCooldown, 8.0f);
-        memory.routeCorridorNodes.clear();
-        memory.routeCorridorTraversal.clear();
-        memory.routeCorridorBridgeBlocks.clear();
-        memory.hasRouteCorridorObjective = false;
-        memory.routeCorridorReplanCooldown = 0.0f;
-        memory.routeCorridorBridgeSegment = false;
-        memory.routeCorridorWaitingForBuilder = false;
-        ++navigationMetrics_.corridorFailures;
-        return finalTarget;
-    }
-    memory.usingRouteCorridor = true;
-    const int segmentIndex = memory.routeCorridorIndex - 1;
-    const bool bridgeSegment = bridgeSegmentForTarget(memory.routeCorridorIndex);
-    if (bridgeSegment)
-    {
-        const std::uint64_t activeBridgeSignature =
-            bridgeSignatureForTarget(memory.routeCorridorIndex);
-        const bool routeAlreadyOpened = coordBus != nullptr
-            && coordBus->IsRouteOpened(
-                activeBridgeSignature, matchSimulation_.MatchTimeSeconds());
-        if (coordBus != nullptr
-            && coordBus->bridgeBuilderId >= 0
-            && coordBus->bridgeRouteSignature == activeBridgeSignature
-            && matchSimulation_.MatchTimeSeconds() - coordBus->bridgeLastProgressTimestamp > 8.0f)
-        {
-            // A lease is backed by physical progress, not by repeatedly asking
-            // for the same waypoint.  Let a waiting rusher/fighter take over.
-            coordBus->bridgeBuilderId = -1;
-            coordBus->bridgeReservationUntil = -1000.0f;
-            coordBus->bridgeLastProgressTimestamp = -1000.0f;
-            coordBus->bridgeLastProgressBlocks = -1;
-        }
-        const bool reservationExpired = coordBus == nullptr
-            || coordBus->bridgeBuilderId < 0
-            || coordBus->bridgeRouteSignature != activeBridgeSignature
-            || coordBus->bridgeReservationUntil < matchSimulation_.MatchTimeSeconds();
-        const bool assignedCleanupBuilder = memory.currentPlan.goal == StrategicGoal::HuntPlayers;
-        const bool eligibleBuilder = assignedCleanupBuilder
-            || memory.role == BotRole::Rusher
-            || (botStrategyProfile_ == BotStrategyProfile::HypixelRush
-                && memory.role == BotRole::Fighter);
-        if (!routeAlreadyOpened && coordBus != nullptr
-            && (reservationExpired || assignedCleanupBuilder)
-            && eligibleBuilder
-            && memory.routeFailureCooldown <= 0.0f)
-        {
-            coordBus->bridgeBuilderId = bot.GetId();
-            coordBus->bridgeRouteSignature = activeBridgeSignature;
-            coordBus->bridgeReservationUntil = matchSimulation_.MatchTimeSeconds() + 8.0f;
-            coordBus->bridgeLastProgressTimestamp = matchSimulation_.MatchTimeSeconds();
-            coordBus->bridgeLastProgressPosition = bot.GetPosition();
-            coordBus->bridgeLastProgressBlocks = bot.GetInventory().GetBlocks();
-        }
-        const bool isBuilder = routeAlreadyOpened || coordBus == nullptr
-            || coordBus->bridgeBuilderId == bot.GetId();
-        if (!isBuilder)
-        {
-            if (!memory.routeCorridorWaitingForBuilder)
-            {
-                ++navigationMetrics_.routeBridgeFollowersHeld;
-                memory.routeCorridorWaitingForBuilder = true;
-            }
-            const RouteCorridorSegment waitingSegment {
-                memory.routeCorridorNodes[static_cast<std::size_t>(segmentIndex)],
-                memory.routeCorridorNodes[static_cast<std::size_t>(memory.routeCorridorIndex)],
-                "bridge", 0 };
-            const CreativeRouteNode* waitAt = routeGraph_.Node(waitingSegment.fromNodeIndex);
-            memory.routeCorridorBridgeSegment = false;
-            memory.routeCorridorLastProgressTimestamp = matchSimulation_.MatchTimeSeconds();
-            return waitAt != nullptr ? world_.GridToWorld(waitAt->pos) : world_.GridToWorld(next->pos);
-        }
-
-        memory.routeCorridorWaitingForBuilder = false;
-        // Cleanup may revisit a bridge that was marked opened when a previous
-        // attacker reached its far portal, even if combat later left holes in
-        // the span. Keep the long-segment action budget available so the lone
-        // cleaner can repair/cross it instead of stopping at the near edge.
-        memory.routeCorridorBridgeSegment = !routeAlreadyOpened || assignedCleanupBuilder;
-        memory.routeCorridorExpectedBridgeBlocks = segmentIndex >= 0
-            && segmentIndex < static_cast<int>(memory.routeCorridorBridgeBlocks.size())
-            ? memory.routeCorridorBridgeBlocks[static_cast<std::size_t>(segmentIndex)]
-            : 0;
-        if (!routeAlreadyOpened
-            && memory.routeCorridorActiveBridgeSignature != activeBridgeSignature)
-        {
-            memory.routeCorridorActiveBridgeSignature = activeBridgeSignature;
-            memory.routeCorridorBridgeStarted = true;
-            ++navigationMetrics_.routeBridgeSegmentsStarted;
-        }
-        if (!routeAlreadyOpened && coordBus != nullptr)
-        {
-            const int blocksNow = bot.GetInventory().GetBlocks();
-            const bool placedBlock = coordBus->bridgeLastProgressBlocks >= 0
-                && blocksNow < coordBus->bridgeLastProgressBlocks;
-            const bool movedForward = DistanceSquared(
-                bot.GetPosition(), coordBus->bridgeLastProgressPosition) >= 4.0f;
-            if (placedBlock || movedForward)
-            {
-                coordBus->bridgeLastProgressTimestamp = matchSimulation_.MatchTimeSeconds();
-                coordBus->bridgeLastProgressPosition = bot.GetPosition();
-                coordBus->bridgeLastProgressBlocks = blocksNow;
-                coordBus->bridgeReservationUntil = matchSimulation_.MatchTimeSeconds() + 8.0f;
-            }
-            coordBus->Broadcast(bot.GetId(), CoordinationSignal::BuildingBridge,
-                world_.GridToWorld(next->pos), matchSimulation_.MatchTimeSeconds(),
-                memory.currentPlan.targetTeamId);
-        }
-    }
-    else
-    {
-        memory.routeCorridorWaitingForBuilder = false;
-    }
-    return world_.GridToWorld(next->pos);
-}
-
 bool Game::TryBotPlaceCommand(Player& bot, const GridPos& pos, float dt, bool preferCheapBlock)
 {
     const auto& hotbar = bot.GetInventory().GetHotbarSlots();
@@ -8519,10 +8065,6 @@ void Game::BotTryShop(Player& bot, Team& team)
         {
             priorities.push_back(206);
         }
-        if (inventory.GetUtility(UtilityType::Arrows) < 6)
-        {
-            priorities.push_back(104);
-        }
         if (!inventory.HasItem(ItemType::Bow))
         {
             priorities.push_back(108);
@@ -8671,9 +8213,15 @@ void Game::BotTryShop(Player& bot, Team& team)
 
 EnergyCore* Game::SelectBestAttackTarget(
     const Player& player,
-    const BotFrameContext& /*frameContext*/,
+    const BotFrameContext& frameContext,
     const TeamCoordinationBus* coordBus)
 {
+    const auto context = frameContext.teamContexts.find(player.GetTeamId());
+    if (context != frameContext.teamContexts.end())
+    {
+        EnergyCore* selected = FindCoreByTeam(context->second.strategicPlan.attackCoreTeamId);
+        return selected != nullptr && selected->IsAlive() ? selected : nullptr;
+    }
     EnergyCore* best = nullptr;
     float bestScore = std::numeric_limits<float>::max();
     const BotTuningGenome& tuning = BotTuningForTeam(player.GetTeamId());
@@ -9121,18 +8669,6 @@ bool Game::TryBotUpgradeCoreDefense(Player& bot, Team& team, float dt)
     }
     return true;
 
-#if 0
-    if (false)
-    {
-        AddWorldEffect(targetPos, GetTeamColor(team.color), 0.26f, 0.24f);
-        AddFloatingText("upgrade", targetPos, GetTeamColor(team.color));
-        AddEventMessage(bot.GetName() + " улучшил защиту Кора", GetTeamColor(team.color), 1.5f);
-        audio_.PlayBreakBlockAt(targetPos);
-        bot.GetInventory().DamageTool(1);
-    }
-    memory.hasBreakTarget = false;
-    memory.breakProgress = 0.0f;
-#endif
     return true;
 }
 

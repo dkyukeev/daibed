@@ -90,6 +90,11 @@ NavigationControllerUpdate NavigationController::Update(
     update.command.aimYaw = actor.GetYaw();
     update.command.selectedSlot = actor.GetSelectedSlot();
     deltaSeconds = std::clamp(deltaSeconds, 0.0f, 0.25f);
+    for (FailedTransitionMemory& failure : failedTransitions_)
+        failure.remainingSeconds -= deltaSeconds;
+    failedTransitions_.erase(std::remove_if(failedTransitions_.begin(), failedTransitions_.end(),
+        [](const FailedTransitionMemory& failure) { return failure.remainingSeconds <= 0.0f; }),
+        failedTransitions_.end());
     repathCooldown_ = std::max(0.0f, repathCooldown_ - deltaSeconds);
     arbiter_.Clear();
 
@@ -476,6 +481,8 @@ NavigationControllerUpdate NavigationController::Update(
                         update.failedMovementType = failed->type;
                         update.failedMovementFrom = failed->from;
                         update.failedMovementTo = failed->to;
+                        if (failedTransitions_.size() >= 16) failedTransitions_.erase(failedTransitions_.begin());
+                        failedTransitions_.push_back({ { failed->from, failed->to, failed->type }, 30.0f });
                     }
                     ++metrics_.routeAbandonments;
                     ++metricsDelta_.routeAbandonments;
@@ -544,6 +551,8 @@ bool NavigationController::Plan(
 
     const NavigationState start { *support, profile.availableBridgeBlocks, 0 };
     NavigationSearchLimits limits = settings_.searchLimits;
+    for (const FailedTransitionMemory& failure : failedTransitions_)
+        limits.failedTransitions.push_back(failure.transition);
     const std::optional<GridPos> representative = goal_->RepresentativePosition();
     if (settings_.enableCorridorSearch && representative.has_value())
     {
@@ -688,6 +697,8 @@ bool NavigationController::TryRepairSegment(
         if (!world.IsSupported(reconnect) || !world.IsBodyClear(reconnect, profile)) continue;
 
         NavigationSearchLimits limits = settings_.searchLimits;
+        for (const FailedTransitionMemory& failure : failedTransitions_)
+            limits.failedTransitions.push_back(failure.transition);
         limits.maxExpansions = settings_.segmentRepairMaxExpansions;
         limits.maxActions = settings_.segmentRepairMaxActions;
         limits.maxSearchRadius = settings_.segmentRepairRadius;

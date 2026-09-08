@@ -10,8 +10,8 @@
 #include <string>
 #include <vector>
 
-// Real (socket) network transport for localhost / private servers — see
-// docs/NETWORK_PREP_PLAN.md. This is the first transport that actually moves
+// Real socket/provider transport for multiplayer — see
+// docs/P2P_IMPLEMENTATION.md. This layer moves
 // bytes off the heap and over UDP, but it is deliberately minimal: connect /
 // disconnect / send command / receive snapshot / timeout. No reliability, no
 // ordering, no production hardening yet.
@@ -98,8 +98,8 @@ public:
     std::vector<ReconnectedClient> TakeReconnectedClients();
 
     // Match join policy: once locked, brand-new late joins are denied. A client
-    // that disconnected from an assigned slot may always reconnect by sending the
-    // same lobby player name.
+    // that disconnected from an assigned slot can reclaim it only by presenting
+    // the server-issued session credentials (the display name is not identity).
     void SetMatchJoinLocked(bool locked);
 
     // --- Pre-match lobby -------------------------------------------------
@@ -151,7 +151,7 @@ private:
 class ClientTransport : public INetworkTransport
 {
 public:
-    ClientTransport();
+    explicit ClientTransport(NetworkBackend backend = NetworkBackend::SystemUdp);
     ~ClientTransport() override;
 
     ClientTransport(const ClientTransport&) = delete;
@@ -163,14 +163,16 @@ public:
     // waiting for the server, so a dead server is not an error here; connection
     // completes asynchronously via Poll() -> IsConnected() (or WasDenied()).
     bool Open(const std::string& host, std::uint16_t port, const std::string& token = "",
-              float timeoutSeconds = 5.0f);
+              float timeoutSeconds = 5.0f,
+              const SessionCredentials& resumeCredentials = {});
 
     // Convenience for standalone clients (e.g. --connect): Open(), then pump for
     // up to timeoutSeconds. Returns whether the handshake completed. A dead /
     // unreachable server returns false; a wrong password returns false with
     // WasDenied()==true. It never throws or crashes.
     bool Connect(const std::string& host, std::uint16_t port, const std::string& token = "",
-                 float timeoutSeconds = 5.0f);
+                 float timeoutSeconds = 5.0f,
+                 const SessionCredentials& resumeCredentials = {});
 
     bool IsOpen() const override;
     void Close() override;
@@ -193,6 +195,7 @@ public:
     bool WasDenied() const;
     const std::string& DenyReason() const;
     int LobbyClientId() const;
+    const SessionCredentials& Credentials() const;
     int AssignedPlayerId() const;
     bool InMatch() const;
     bool HasLobbySnapshot() const;
@@ -227,3 +230,7 @@ private:
 // Also checks that a connect to a dead port fails gracefully. Returns a process
 // exit code (0 == success).
 int RunLocalhostNetSmoke(const ServerConfig& config);
+// Runs the complete handshake/snapshot protocol over opaque in-process peer
+// handles. This is the provider-contract test before an external P2P SDK is
+// selected and linked.
+int RunDatagramBackendSmoke();

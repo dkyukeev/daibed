@@ -1,6 +1,6 @@
 #include "Network/SnapshotVisibility.h"
 
-// See SnapshotVisibility.h / docs/NETWORK_PREP_PLAN.md for the policy. This
+// See SnapshotVisibility.h / docs/MULTIPLAYER_TARGET_ARCHITECTURE.md for the policy. This
 // stays raylib-free and depends only on the snapshot value type.
 
 namespace

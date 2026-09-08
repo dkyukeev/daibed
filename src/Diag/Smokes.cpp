@@ -1,4 +1,6 @@
 #include "Game.h"
+#include "BotCombatAssessment.h"
+#include "Navigation/BotNavigationGoal.h"
 
 #include "Network/LocalServerSession.h"
 #include "Network/LoopbackTransport.h"
@@ -8,6 +10,9 @@
 #include "Platform/PreciseTimer.h"
 #include "UiText.h"
 #include "VecConvert.h"
+#include "VisualTheme.h"
+#include "VoxelLightShape.h"
+#include "rlgl.h"
 
 #include <algorithm>
 #include <chrono>
@@ -36,6 +41,126 @@ constexpr int kCombatFlagRecipientAttacker = 1 << 0;
 constexpr int kCombatFlagRecipientTarget = 1 << 1;
 constexpr int kHeroAbilityFlagWorldEffect = 1 << 6;
 constexpr int kHeroAbilityFlagDirectedEffect = 1 << 7;
+
+bool CheckVoxelLightShapes()
+{
+    World world;
+    const GridPos cell { 1, 1, 1 };
+    bool passed = true;
+    const unsigned char stairMasks[] { 0x5f, 0xaf, 0x3f, 0xcf, 0xf5, 0xfa, 0xf3, 0xfc };
+    for (BlockType type : { BlockType::StoneBrickStairsBlock, BlockType::BirchStairsBlock })
+    for (int variant = 0; variant < 8; ++variant)
+        passed &= VoxelLightShape::Occupancy(world, cell, Block { type, -1, true, variant }) == stairMasks[variant];
+    for (BlockType type : { BlockType::StoneSlabBlock, BlockType::StoneBrickSlabBlock, BlockType::BirchSlabBlock })
+    {
+        passed &= VoxelLightShape::Occupancy(world, cell, Block { type, -1, true, 0 }) == 0x0f;
+        passed &= VoxelLightShape::Occupancy(world, cell, Block { type, -1, true, 8 }) == 0xf0;
+    }
+    world.PlaceBlock(GridPos { 0, 1, 1 }, Block { BlockType::StoneBrickStairsBlock, -1, true, 2 });
+    passed &= VoxelLightShape::Occupancy(world, cell, Block { BlockType::StoneBrickStairsBlock }) == 0x1f;
+    world.Clear();
+    world.PlaceBlock(GridPos { 2, 1, 1 }, Block { BlockType::BirchStairsBlock, -1, true, 2 });
+    passed &= VoxelLightShape::Occupancy(world, cell, Block { BlockType::StoneBrickStairsBlock }) == 0x7f;
+
+    // Compile the actual production trace functions with a tiny diagnostic main.
+    // Read back hit distance and normal, not just whether GLSL compiled.
+    std::string source;
+    for (const char* path : { "assets/shaders/lighting.fs", "../assets/shaders/lighting.fs", "../../assets/shaders/lighting.fs" })
+    {
+        if (!FileExists(path)) continue;
+        char* text = LoadFileText(path);
+        if (text != nullptr) { source = text; UnloadFileText(text); }
+        break;
+    }
+    const auto mainAt = source.find("void main()");
+    if (mainAt == std::string::npos) return false;
+    source.resize(mainAt);
+    source += R"(
+uniform vec3 testOrigin;
+uniform vec3 testDirection;
+void main()
+{
+    vec3 hp, hn; vec4 material;
+    bool hit = TraceVoxel(testOrigin, testDirection, 3.0, hp, hn, material);
+    finalColor = vec4(hit ? 1.0 : 0.0, hn.y * 0.5 + 0.5,
+                      hit ? length(hp - testOrigin) / 4.0 : 0.0, 1.0);
+}
+)";
+    Shader shader = LoadShaderFromMemory(nullptr, source.c_str());
+    if (shader.id == 0 || shader.id == rlGetShaderIdDefault()) return false;
+    std::array<Color, 64> cells {};
+    Image image { cells.data(), 16, 4, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
+    Texture2D atlas = LoadTextureFromImage(image);
+    RenderTexture2D result = LoadRenderTexture(1, 1);
+    if (atlas.id == 0 || result.id == 0)
+    {
+        if (atlas.id != 0) UnloadTexture(atlas);
+        if (result.id != 0) UnloadRenderTexture(result);
+        UnloadShader(shader);
+        return false;
+    }
+    const int size = 4;
+    const float origin[] { -0.5f, -0.5f, -0.5f };
+    SetShaderValue(shader, GetShaderLocation(shader, "voxelSize"), &size, SHADER_UNIFORM_INT);
+    SetShaderValue(shader, GetShaderLocation(shader, "voxelOrigin"), origin, SHADER_UNIFORM_VEC3);
+    const int atlasSlot = 12;
+    SetShaderValue(shader, GetShaderLocation(shader, "voxelAtlas"), &atlasSlot, SHADER_UNIFORM_INT);
+    const int rayOrigin = GetShaderLocation(shader, "testOrigin");
+    const int rayDirection = GetShaderLocation(shader, "testDirection");
+    struct Case { int mask; Vector3 origin; Vector3 direction; bool hit; float distance; float normalY; };
+    const Case cases[] {
+        { 0x0f, { 0, .75f, 1 }, { 1, 0, 0 }, true, .5f, 0 },
+        { 0x0f, { 0, 1.25f, 1 }, { 1, 0, 0 }, false, 0, 0 },
+        { 0x0f, { 1, 1.25f, 1 }, { 0, -1, 0 }, true, .25f, 1 },
+        { 0xf0, { 0, .75f, 1 }, { 1, 0, 0 }, false, 0, 0 },
+        { 0xf0, { 0, 1.25f, 1 }, { 1, 0, 0 }, true, .5f, 0 },
+        { 0xf0, { 1, .75f, 1 }, { 0, 1, 0 }, true, .25f, -1 },
+        { 0x5f, { 1.25f, 1.25f, 0 }, { 0, 0, 1 }, false, 0, 0 },
+        { 0x5f, { .75f, 1.25f, 0 }, { 0, 0, 1 }, true, .5f, 0 },
+        { 0x1f, { .75f, 1.25f, 2 }, { 0, 0, -1 }, true, 1.0f, 0 },
+        { 0x7f, { 1.25f, 1.25f, 0 }, { 0, 0, 1 }, true, .5f, 0 },
+        { 255, { 1, 2, 1 }, { 0, -1, 0 }, true, .5f, 1 },
+        { 128, { 0, 1, 1 }, { 1, 0, 0 }, true, .5f, 0 },
+        { 0, { 0, 1, 1 }, { 1, 0, 0 }, false, 0, 0 }
+    };
+    int index = 0;
+    for (const Case& test : cases)
+    {
+        cells[21] = Color { 180, 180, 180, static_cast<unsigned char>(test.mask) };
+        UpdateTexture(atlas, cells.data());
+        SetShaderValue(shader, rayOrigin, &test.origin, SHADER_UNIFORM_VEC3);
+        SetShaderValue(shader, rayDirection, &test.direction, SHADER_UNIFORM_VEC3);
+        BeginTextureMode(result);
+        ClearBackground(BLACK);
+        // Match production's manual slot: BeginShaderMode flushes raylib's
+        // transient texture pool, which would otherwise replace the atlas.
+        rlActiveTextureSlot(atlasSlot);
+        rlEnableTexture(atlas.id);
+        rlActiveTextureSlot(0);
+        BeginShaderMode(shader);
+        DrawRectangle(0, 0, 1, 1, WHITE);
+        EndShaderMode();
+        EndTextureMode();
+        Image readback = LoadImageFromTexture(result.texture);
+        const Color pixel = GetImageColor(readback, 0, 0);
+        UnloadImage(readback);
+        const bool correct = (pixel.r > 127) == test.hit && (!test.hit
+            || (std::abs(pixel.b * 4.0f / 255.0f - test.distance) < 0.025f
+                && std::abs(pixel.g * 2.0f / 255.0f - 1.0f - test.normalY) < 0.01f));
+        if (!correct) std::cout << "voxel-light GPU case " << index << " FAILED rgb="
+            << int(pixel.r) << ',' << int(pixel.g) << ',' << int(pixel.b) << '\n';
+        passed &= correct;
+        ++index;
+    }
+    UnloadRenderTexture(result);
+    rlActiveTextureSlot(atlasSlot);
+    rlDisableTexture();
+    rlActiveTextureSlot(0);
+    UnloadTexture(atlas);
+    UnloadShader(shader);
+    std::cout << (passed ? "VOXEL_LIGHT_SHAPES_OK" : "VOXEL_LIGHT_SHAPES_FAIL") << '\n';
+    return passed;
+}
 
 Vector3 AimDirectionFromCommand(const PlayerCommand& command)
 {
@@ -87,6 +212,7 @@ void ApplyProjectileDefaults(EnergyProjectile& projectile)
 
 int Game::RunUiScreenshotDiag()
 {
+    const bool shapeTests = CheckVoxelLightShapes();
     // Renders the menu screens for a few frames each and saves PNGs next to the
     // exe (ui_menu/ui_settings/ui_controls.png) — screenshot-based UI review
     // without driving the window from outside. Windowed only.
@@ -111,7 +237,266 @@ int Game::RunUiScreenshotDiag()
         TakeScreenshot(shot.file);
         std::cout << "ui-screenshot: " << shot.file << '\n';
     }
-    std::cout << "UI_SCREENSHOT_OK" << std::endl;
+    settingsIndex_ = 20;
+    settingsFirstVisible_ = 11;
+    screen_ = GameScreen::Settings;
+    for (int frame = 0; frame < 6; ++frame)
+    {
+        Render();
+    }
+    TakeScreenshot("ui_settings_motion.png");
+    std::cout << "ui-screenshot: ui_settings_motion.png\n";
+    settingsIndex_ = 23;
+    settingsFirstVisible_ = 21;
+    for (int frame = 0; frame < 6; ++frame) Render();
+    TakeScreenshot("ui_settings_shaders.png");
+    // Exercise actual GPU programs and target reallocations across all presets.
+    // Keep user settings intact; run this diagnostic in a separate directory.
+    const ShaderSettings savedShaders = shaderSettings_;
+    const int savedPreset = shaderPreset_;
+    const int savedScale = renderScaleIndex_;
+    const int savedDistance = drawDistanceIndex_;
+    const int savedShadows = shadowQuality_;
+    const int savedAo = ambientOcclusionQuality_;
+    const int savedEffects = effectsQuality_;
+    const int savedBloomQuality = bloomQuality_;
+    const bool savedPost = postProcessing_;
+    const bool savedBloom = bloomEnabled_;
+    StartSelectedMatch();
+    const char* shaderShots[] { "shader_fast.png", "shader_balanced.png", "shader_cinematic.png" };
+    for (int preset = 0; preset < 3; ++preset)
+    {
+        ApplyShaderPreset(preset);
+        screen_ = GameScreen::Playing;
+        for (int frame = 0; frame < 8; ++frame) Render();
+        TakeScreenshot(shaderShots[preset]);
+    }
+    // A controlled color-bleed scene: white floor, red/green walls, partial roof.
+    // No simulation ticks between the paired captures, so geometry stays fixed.
+    world_.Clear();
+    for (int x = 96; x <= 104; ++x)
+    for (int z = 98; z <= 107; ++z)
+    {
+        world_.PlaceBlock(GridPos { x, 0, z }, Block { BlockType::SmoothStoneBlock });
+        if (z <= 101) world_.PlaceBlock(GridPos { x, 5, z }, Block { BlockType::SmoothStoneBlock });
+    }
+    for (int y = 1; y <= 5; ++y)
+    for (int z = 98; z <= 106; ++z)
+    {
+        world_.PlaceBlock(GridPos { 96, y, z }, Block { BlockType::ColoredClayBlock, -1, true, 14 });
+        world_.PlaceBlock(GridPos { 104, y, z }, Block { BlockType::ColoredClayBlock, -1, true, 5 });
+    }
+    for (int x = 97; x < 104; ++x)
+    for (int y = 1; y <= 5; ++y)
+        world_.PlaceBlock(GridPos { x, y, 98 }, Block { BlockType::SmoothStoneBlock });
+    cameraController_.Reset(0.0f, -0.18f, Vector3 { 100, 2.0f, 109 });
+    shaderSettings_.volumetricQuality = 0;
+    shaderSettings_.skyQuality = 0;
+    shaderSettings_.haze = 0.0f;
+    shaderSettings_.giQuality = 0;
+    shaderSettings_.localShadows = false;
+    for (int frame = 0; frame < 4; ++frame) Render();
+    TakeScreenshot("gi_room_off.png");
+    shaderSettings_.giQuality = 2;
+    shaderSettings_.localShadows = true;
+    for (int frame = 0; frame < 4; ++frame) Render();
+    TakeScreenshot("gi_room_on.png");
+    // A lamp behind a wall must stop illuminating the floor in front of it.
+    world_.PlaceBlock(GridPos { 100, 1, 100 }, Block { BlockType::TorchBlock });
+    for (int x = 99; x <= 101; ++x)
+    for (int y = 1; y <= 2; ++y)
+        world_.PlaceBlock(GridPos { x, y, 102 }, Block { BlockType::SmoothStoneBlock });
+    shaderSettings_.giQuality = 0;
+    shaderSettings_.sunIntensity = 0.0f;
+    shaderSettings_.localShadows = false;
+    for (int frame = 0; frame < 4; ++frame) Render();
+    TakeScreenshot("local_shadow_off.png");
+    shaderSettings_.localShadows = true;
+    for (int frame = 0; frame < 4; ++frame) Render();
+    TakeScreenshot("local_shadow_on.png");
+    // Break a roof block and recenter the cache across a negative coordinate.
+    world_.RemoveBlock(GridPos { 100, 5, 101 });
+    Render();
+    world_.RemoveBlock(GridPos { 100, 1, 100 });
+    world_.PlaceBlock(GridPos { 100, 3, 100 }, Block { BlockType::TorchBlock });
+    for (int upper = 0; upper < 2; ++upper)
+    {
+        for (int x = 99; x <= 101; ++x)
+            world_.PlaceBlock(GridPos { x, 2, 102 }, Block { BlockType::StoneSlabBlock, -1, true, upper * 8 }, true);
+        for (int frame = 0; frame < 4; ++frame) Render();
+        TakeScreenshot(upper ? "slab_light_upper.png" : "slab_light_lower.png");
+    }
+    // Overhead view makes the square light contour easy to inspect.
+    world_.Clear();
+    for (int x = 100; x <= 120; ++x)
+    for (int z = 100; z <= 120; ++z)
+        world_.PlaceBlock(GridPos { x, 0, z }, Block { BlockType::SmoothStoneBlock });
+    world_.PlaceBlock(GridPos { 110, 1, 110 }, Block { BlockType::TorchBlock });
+    cameraController_.Reset(0, -1.56f, Vector3 { 110, 16, 110 });
+    for (int frame = 0; frame < 4; ++frame) Render();
+    TakeScreenshot("square_light.png");
+    // Columns at 40/90/150/195 m exercise both cascades beyond the old cutoff.
+    world_.Clear();
+    for (int x = 94; x <= 106; ++x)
+    for (int z = -205; z <= 5; ++z)
+        world_.PlaceBlock(GridPos { x, 0, z }, Block { BlockType::SmoothStoneBlock });
+    for (int z : { -40, -90, -150, -195 })
+    for (int y = 1; y <= 8; ++y)
+        world_.PlaceBlock(GridPos { 100, y, z }, Block { BlockType::StoneBlock });
+    shaderSettings_.sunIntensity = 1.0f;
+    shaderSettings_.localShadows = false;
+    cameraController_.Reset(0.0f, -0.13f, Vector3 { 104, 8, 8 });
+    for (int frame = 0; frame < 4; ++frame) Render();
+    TakeScreenshot("shadow_distance_220m.png");
+    cameraController_.Reset(0, 0, Vector3 { -4.1f, 2, -4.1f });
+    Render();
+    ApplyShaderPreset(0);
+    Render();
+    ApplyShaderPreset(2);
+    settingsIndex_ = 32;
+    settingsFirstVisible_ = 26;
+    screen_ = GameScreen::Settings;
+    Render();
+    TakeScreenshot("ui_settings_gi.png");
+    screen_ = GameScreen::Playing;
+    // Highest march budget and zero-density branch must also render cleanly.
+    shaderSettings_.volumetricQuality = 3;
+    for (int frame = 0; frame < 4; ++frame) Render();
+    shaderSettings_.haze = 0.0f;
+    Render();
+    shaderSettings_.haze = 0.7f;
+    shaderSettings_.exposure = 1.3f;
+    shaderSettings_.saturation = 0.8f;
+    SaveSettings();
+    shaderSettings_ = ShaderSettings {};
+    LoadSettings();
+    const bool roundTrip = shapeTests && shaderSettings_.volumetricQuality == 3
+        && shaderSettings_.giQuality == 2 && shaderSettings_.localShadows
+        && std::abs(shaderSettings_.giStrength - 1.0f) < 0.001f
+        && std::abs(shaderSettings_.shadowSoftness - 1.5f) < 0.001f
+        && shaderSettings_.skyQuality == 2 && shaderSettings_.materialQuality == 2
+        && std::abs(shaderSettings_.haze - 0.7f) < 0.001f
+        && std::abs(shaderSettings_.exposure - 1.3f) < 0.001f
+        && std::abs(shaderSettings_.saturation - 0.8f) < 0.001f;
+    shaderSettings_ = savedShaders;
+    shaderPreset_ = savedPreset;
+    renderScaleIndex_ = savedScale;
+    const float scales[] { 0.60f, 0.75f, 0.85f, 1.0f };
+    renderScale_ = scales[savedScale];
+    drawDistanceIndex_ = savedDistance;
+    shadowQuality_ = savedShadows;
+    ambientOcclusionQuality_ = savedAo;
+    effectsQuality_ = savedEffects;
+    bloomQuality_ = savedBloomQuality;
+    postProcessing_ = savedPost;
+    bloomEnabled_ = savedBloom;
+    renderer_.SetShadowQuality(shadowQuality_);
+    renderer_.SetAmbientOcclusionQuality(ambientOcclusionQuality_);
+    const float distances[] { 64.0f, 96.0f, 150.0f, 220.0f };
+    renderer_.SetWorldRenderDistance(distances[savedDistance]);
+    std::cout << (roundTrip ? "UI_SCREENSHOT_OK" : "SHADER_DIAGNOSTICS_FAIL") << std::endl;
+    return roundTrip ? 0 : 1;
+}
+
+int Game::RunParticleReviewDiag()
+{
+    if (headless_)
+    {
+        std::cerr << "particle-review requires a graphics window\n";
+        return 2;
+    }
+
+    StartSelectedMatch();
+    Player* player = GetLocalPlayer();
+    if (player == nullptr)
+    {
+        std::cerr << "particle-review failed: no local player\n";
+        return 3;
+    }
+
+    UpdateCamera(1.0f / 60.0f);
+    const Vector3 forward = cameraController_.GetFlatForward();
+    const Vector3 right = cameraController_.GetFlatRight();
+    Vector3 target = player->GetPosition();
+    target.y += 0.62f;
+    const Vector3 pickupSource {
+        target.x + forward.x * 2.7f - right.x * 0.85f,
+        target.y - 0.28f,
+        target.z + forward.z * 2.7f - right.z * 0.85f,
+    };
+    const Vector3 landingPosition {
+        player->GetPosition().x + forward.x * 2.15f + right.x * 0.95f,
+        cameraController_.GetCamera().position.y - 0.72f,
+        player->GetPosition().z + forward.z * 2.15f + right.z * 0.95f,
+    };
+    particles_.Clear();
+    particles_.SetQuality(2);
+    particles_.EmitPickup(pickupSource, target, VisualTheme::Palette::ResourceGold, 6);
+    particles_.EmitLanding(
+        landingPosition,
+        Vector3 { forward.x * 4.8f, 0.0f, forward.z * 4.8f },
+        VisualTheme::SurfaceDust(BlockType::StoneBlock),
+        1.0f);
+
+    for (int frame = 0; frame < 3; ++frame)
+    {
+        particles_.Update(1.0f / 60.0f);
+        Render();
+    }
+    TakeScreenshot("particle_review.png");
+    std::cout << "particle-review: active=" << particles_.ActiveCount()
+              << " screenshot=particle_review.png\n";
+
+    const Vector3 materialCenter {
+        player->GetPosition().x + forward.x * 3.15f,
+        cameraController_.GetCamera().position.y - 0.42f,
+        player->GetPosition().z + forward.z * 3.15f,
+    };
+    const auto offsetRight = [&materialCenter, &right](float amount)
+    {
+        return Vector3 {
+            materialCenter.x + right.x * amount,
+            materialCenter.y,
+            materialCenter.z + right.z * amount,
+        };
+    };
+    particles_.Clear();
+    particles_.EmitBlockBreak(
+        offsetRight(-1.35f), forward, Color { 142, 146, 154, 255 }, ParticleMaterial::Stone);
+    particles_.EmitBlockBreak(
+        offsetRight(-0.45f), forward, Color { 222, 88, 92, 255 }, ParticleMaterial::Fabric);
+    particles_.EmitBlockPlace(
+        offsetRight(0.48f), forward, Color { 112, 232, 255, 255 }, ParticleMaterial::Glass);
+    particles_.EmitImpact(
+        offsetRight(1.36f), forward, Color { 255, 224, 122, 255 }, ParticleMaterial::Character, 1.2f);
+    for (int frame = 0; frame < 3; ++frame)
+    {
+        particles_.Update(1.0f / 60.0f);
+        Render();
+    }
+    TakeScreenshot("particle_material_review.png");
+    std::cout << "particle-review: material-active=" << particles_.ActiveCount()
+              << " stone=" << particles_.ActiveCount(ParticleKind::Debris)
+              << " fibers=" << particles_.ActiveCount(ParticleKind::Fiber)
+              << " build=" << particles_.ActiveCount(ParticleKind::BuildTrace)
+              << " hit=" << particles_.ActiveCount(ParticleKind::ImpactStreak)
+              << " screenshot=particle_material_review.png\nPARTICLE_REVIEW_OK\n";
+
+    particles_.Clear();
+    particles_.EmitHeal(offsetRight(-1.8f), Color { 128, 238, 166, 255 }, 1.0f);
+    particles_.EmitTrap(offsetRight(-0.9f), Color { 255, 235, 142, 255 }, 0.72f, true);
+    particles_.EmitDevice(offsetRight(0.0f), Color { 96, 202, 118, 255 }, 1.0f, true);
+    particles_.EmitAbility(offsetRight(0.9f), forward, Color { 180, 104, 255, 255 },
+        0.68f, AbilityParticleStyle::Ring);
+    particles_.EmitCoreDestruction(offsetRight(1.8f), Color { 255, 118, 118, 255 }, 1.0f);
+    for (int frame = 0; frame < 3; ++frame)
+    {
+        particles_.Update(1.0f / 60.0f);
+        Render();
+    }
+    TakeScreenshot("particle_semantic_review.png");
+    std::cout << "particle-review: semantic-active=" << particles_.ActiveCount()
+              << " screenshot=particle_semantic_review.png\n";
     return 0;
 }
 
@@ -200,7 +585,9 @@ int Game::RunFrameProfileDiag()
     return 0;
 }
 
-int Game::RunMapReviewDiag(const std::string& mapPath)
+int Game::RunMapReviewDiag(
+    const std::string& mapPath,
+    std::optional<ArenaBiome> lightingBiomeOverride)
 {
     // Loads a creative map through the same creative -> test-play flow the
     // user plays it with, asserts the castle-utility physics (auto-step onto
@@ -216,6 +603,12 @@ int Game::RunMapReviewDiag(const std::string& mapPath)
     }
     StartCreativeSessionFromDocument(document);
     StartCreativeMapTest();
+    if (lightingBiomeOverride.has_value())
+    {
+        // An explicit --biome is a lighting-review override. The map's stored
+        // biome remains untouched; only this diagnostic render session uses it.
+        arenaBiome_ = *lightingBiomeOverride;
+    }
     Player* player = GetLocalPlayer();
     if (player == nullptr)
     {
@@ -407,6 +800,7 @@ int Game::RunNetworkSmoke()
 
     constexpr int kSmokeTicks = 90; // ~1.5s at the simulation tick rate.
     const float fixedDt = matchSimulation_.FixedDeltaSeconds();
+
     const float injectedAimYaw = startYaw; // fixed facing so movement is along one axis
     // Exercise the action-command path: fire the hero's first ability on tick 0
     // and observe the controlled effect (a cooldown is started, or it is a clean
@@ -2070,10 +2464,45 @@ int Game::RunIntegratedServerSmoke()
         && projectiles_.back().kind == ProjectileKind::Arrow
         && controlled->GetBowDrawTimer() <= 0.0f;
 
+    // Exercise the production listen-server lifecycle used by a Steam GUI
+    // host. InProcessP2P supplies the same opaque-peer contract in CI without
+    // requiring a Steam account or SDK installation.
+    ServerConfig listenConfig;
+    listenConfig.networkBackend = NetworkBackend::InProcessP2P;
+    listenConfig.listenAddress = "integrated-listen-smoke";
+    listenConfig.port = 0;
+    listenConfig.minPlayersToStart = 1;
+    std::string listenError;
+    const bool listenStarted = StartIntegratedListenServer(listenConfig, listenError);
+    ClientTransport listenClient(NetworkBackend::InProcessP2P);
+    bool listenConnected = false;
+    bool listenLobbyReceived = false;
+    if (listenStarted)
+    {
+        listenConnected = listenClient.Open(
+            listenConfig.listenAddress, integratedServerTransport_->BoundPort(), "", 1.0f);
+        for (int attempt = 0; listenConnected && attempt < 300
+             && (!listenClient.IsConnected() || !listenClient.HasLobbySnapshot()); ++attempt)
+        {
+            PumpIntegratedListenServer(0.005f);
+            listenClient.Poll();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        listenConnected = listenClient.IsConnected();
+        listenLobbyReceived = listenClient.HasLobbySnapshot();
+        listenClient.Disconnect();
+        PumpIntegratedListenServer(0.02f);
+    }
+    StopIntegratedListenServer();
+    const bool listenStopped = !IntegratedListenServerRunning();
+    const bool listenServerOk = listenStarted && listenConnected
+        && listenLobbyReceived && listenStopped;
+
     const bool ok = startedOk && channelOk && buyOk && dedupeOk && deniedOk
         && placeOk && placeOnceOk && castOk && castOnceOk && healOk
         && rightClickUtilityOk
-        && directCombatSuppressed && meleeOk && breakOk && rangedOk;
+        && directCombatSuppressed && meleeOk && breakOk && rangedOk
+        && listenServerOk;
     std::cout << "integrated-server-smoke: started=" << (startedOk ? "ok" : "FAIL")
               << " channel=" << (channelOk ? "ok" : "FAIL")
               << " (drained=" << integratedServerCommandsDrained_
@@ -2101,7 +2530,12 @@ int Game::RunIntegratedServerSmoke()
               << " directCombat=" << (directCombatSuppressed ? "ok" : "FAIL")
               << " melee=" << (meleeOk ? "ok" : "FAIL")
               << " break=" << (breakOk ? "ok" : "FAIL")
-              << " ranged=" << (rangedOk ? "ok" : "FAIL") << '\n';
+              << " ranged=" << (rangedOk ? "ok" : "FAIL")
+              << " listenServer=" << (listenServerOk ? "ok" : "FAIL")
+              << " (started=" << (listenStarted ? "yes" : listenError)
+              << " connected=" << (listenConnected ? "yes" : "no")
+              << " lobby=" << (listenLobbyReceived ? "yes" : "no")
+              << " stopped=" << (listenStopped ? "yes" : "no") << ")\n";
     std::cout << (ok ? "INTEGRATED_SERVER_SMOKE_OK" : "INTEGRATED_SERVER_SMOKE_FAIL") << std::endl;
     return ok ? 0 : 4;
 }
@@ -2791,7 +3225,7 @@ int Game::RunMultiplayerLoopbackSmoke()
         if (clientA.IsConnected() && !sentLobbyA)
         {
             LobbyUpdate update;
-            update.playerName = "Alice";
+            update.playerName = "Алиса";
             update.selectedTeam = 0;
             update.selectedHero = 0;
             update.ready = true;
@@ -2802,7 +3236,7 @@ int Game::RunMultiplayerLoopbackSmoke()
         if (clientB.IsConnected() && !sentLobbyB)
         {
             LobbyUpdate update;
-            update.playerName = "Bob";
+            update.playerName = "Алиса"; // same chosen name: server must disambiguate it.
             update.selectedTeam = 0;
             update.selectedHero = 0; // duplicate with Alice: start must block first.
             update.ready = true;
@@ -2817,7 +3251,7 @@ int Game::RunMultiplayerLoopbackSmoke()
             {
                 duplicateBlocked = true;
                 LobbyUpdate update;
-                update.playerName = "Bob";
+                update.playerName = "Алиса";
                 update.selectedTeam = 0;
                 update.selectedHero = 1;
                 update.ready = true;
@@ -2869,6 +3303,18 @@ int Game::RunMultiplayerLoopbackSmoke()
     const bool differentPlayers = playerA >= 0 && playerB >= 0 && playerA != playerB;
     const bool badDenied = clientBad.WasDenied();
     const bool lobbySnapshots = clientA.HasLobbySnapshot() && clientB.HasLobbySnapshot();
+    std::string visibleNameA;
+    std::string visibleNameB;
+    for (const LobbyPlayerState& player : clientA.LatestLobbySnapshot().players)
+    {
+        if (player.clientId == clientA.LobbyClientId()) visibleNameA = player.playerName;
+        if (player.clientId == clientB.LobbyClientId()) visibleNameB = player.playerName;
+    }
+    const bool duplicateNamesDisambiguated = !visibleNameA.empty()
+        && !visibleNameB.empty()
+        && visibleNameA != visibleNameB
+        && visibleNameA.find("Алиса #") == 0
+        && visibleNameB.find("Алиса #") == 0;
     const bool lobbyStartedBoth = clientA.LatestLobbySnapshot().matchStarted
         && clientB.LatestLobbySnapshot().matchStarted;
     const bool bothSeeBoth = aSeesA && aSeesB && bSeesA && bSeesB;
@@ -2878,6 +3324,8 @@ int Game::RunMultiplayerLoopbackSmoke()
     const std::uint32_t bTickBefore = clientB.LatestSnapshot().tick;
     const std::uint32_t clientAFullBeforeDisconnect = clientA.FullSnapshotsReceived();
     const std::uint32_t clientADeltaBeforeDisconnect = clientA.DeltaSnapshotsReceived();
+    const SessionCredentials reconnectCredentials = clientA.Credentials();
+    const bool credentialsIssued = reconnectCredentials.CanReconnect();
     clientA.Disconnect();
     bool serverSurvived = true;
     const Clock::time_point deadline2 = Clock::now() + std::chrono::seconds(2);
@@ -2897,53 +3345,60 @@ int Game::RunMultiplayerLoopbackSmoke()
     const bool bStillConnected = clientB.IsConnected();
     const bool bStillReceiving = clientB.LatestSnapshot().tick > bTickBefore;
 
-    // Phase 3: Alice reconnects by name into the reserved slot; an unrelated
-    // late join is denied. Then send an old command tick and ensure the server
-    // drops it instead of replaying stale input.
+    // Phase 3: Alice reclaims the slot with server-issued credentials. A new
+    // client that intends to reuse her display name, and a client with a
+    // modified bearer token, must both be denied before entering the lobby.
     ClientTransport clientAReconnect;
-    ClientTransport clientLate;
-    clientAReconnect.Open("127.0.0.1", port, "secret", 3.0f);
-    clientLate.Open("127.0.0.1", port, "secret", 3.0f);
+    ClientTransport clientNameHijack;
+    ClientTransport clientBadReconnectToken;
+    SessionCredentials invalidCredentials = reconnectCredentials;
+    invalidCredentials.reconnectToken.low ^= 1u;
+    clientAReconnect.Open("127.0.0.1", port, "secret", 3.0f, reconnectCredentials);
+    clientNameHijack.Open("127.0.0.1", port, "secret", 3.0f);
+    clientBadReconnectToken.Open("127.0.0.1", port, "secret", 3.0f, invalidCredentials);
     bool sentReconnectLobby = false;
-    bool sentLateLobby = false;
+    bool sentHijackLobby = false;
     bool reconnectSlot = false;
-    bool lateDenied = false;
+    bool nameHijackDenied = false;
+    bool badReconnectTokenDenied = false;
     const Clock::time_point deadline3 = Clock::now() + std::chrono::seconds(3);
     while (Clock::now() < deadline3)
     {
         NetworkServerTick(server, fixedDt);
         clientB.Poll();
         clientAReconnect.Poll();
-        clientLate.Poll();
+        clientNameHijack.Poll();
+        clientBadReconnectToken.Poll();
 
         if (clientAReconnect.IsConnected() && !sentReconnectLobby)
         {
             LobbyUpdate update;
-            update.playerName = "Alice";
+            update.playerName = "Алиса";
             update.selectedTeam = 0;
             update.selectedHero = 0;
             update.ready = true;
             clientAReconnect.SendLobbyUpdate(update);
             sentReconnectLobby = true;
         }
-        if (clientLate.IsConnected() && !sentLateLobby)
+        if (clientNameHijack.IsConnected() && !sentHijackLobby)
         {
             LobbyUpdate update;
-            update.playerName = "Eve";
-            update.selectedTeam = 1;
-            update.selectedHero = 2;
+            update.playerName = "Алиса";
+            update.selectedTeam = 0;
+            update.selectedHero = 0;
             update.ready = true;
-            clientLate.SendLobbyUpdate(update);
-            sentLateLobby = true;
+            clientNameHijack.SendLobbyUpdate(update);
+            sentHijackLobby = true;
         }
-
         sendMove(clientB);
         sendMove(clientAReconnect);
 
         reconnectSlot = clientAReconnect.InMatch()
             && clientAReconnect.AssignedPlayerId() == playerA;
-        lateDenied = clientLate.WasDenied();
-        if (reconnectSlot && lateDenied && clientB.HasSnapshot()
+        nameHijackDenied = clientNameHijack.WasDenied();
+        badReconnectTokenDenied = clientBadReconnectToken.WasDenied();
+        if (reconnectSlot && nameHijackDenied && badReconnectTokenDenied
+            && clientB.HasSnapshot()
             && clientAReconnect.HasSnapshot())
         {
             break;
@@ -2983,7 +3438,11 @@ int Game::RunMultiplayerLoopbackSmoke()
     }
     const bool staleDropped = server.StaleCommandsDropped() > staleBefore;
     const std::uint32_t staleDropCount = server.StaleCommandsDropped();
-    const std::string lateDenyReason = clientLate.DenyReason();
+    const bool reconnectTokenRotated = clientAReconnect.Credentials().CanReconnect()
+        && clientAReconnect.Credentials().reconnectToken
+            != reconnectCredentials.reconnectToken;
+    const std::string nameHijackReason = clientNameHijack.DenyReason();
+    const std::string badTokenReason = clientBadReconnectToken.DenyReason();
     const std::uint32_t ackB = clientB.LastAckedCommandTick();
     const bool deltaSnapshotsActive = clientAFullBeforeDisconnect > 0
         && clientB.FullSnapshotsReceived() > 0
@@ -3011,11 +3470,13 @@ int Game::RunMultiplayerLoopbackSmoke()
     // Capture final teardown state BEFORE closing (diagnostics use captured
     // booleans above, not live post-teardown values).
     clientAReconnect.Disconnect();
-    clientLate.Disconnect();
+    clientNameHijack.Disconnect();
+    clientBadReconnectToken.Disconnect();
     clientB.Disconnect();
     server.Close();
 
     std::cout << "mp-smoke: lobbySnapshots=" << (lobbySnapshots ? "yes" : "no")
+              << " duplicateNames=" << (duplicateNamesDisambiguated ? "safe" : "FAIL")
               << " duplicateHeroBlocked=" << (duplicateBlocked ? "yes" : "no")
               << " lobbyStartedBoth=" << (lobbyStartedBoth ? "yes" : "no")
               << '\n';
@@ -3033,7 +3494,12 @@ int Game::RunMultiplayerLoopbackSmoke()
               << " serverAlive=" << (serverSurvived ? "yes" : "no") << "]\n";
     std::cout << "mp-smoke: reconnectSlot=" << (reconnectSlot ? "yes" : "no")
               << " reconnectRespawning=" << (reconnectRespawning ? "yes" : "no")
-              << " lateJoin=" << (lateDenied ? ("denied(" + lateDenyReason + ")") : std::string("ACCEPTED"))
+              << " credentials=" << (credentialsIssued ? "issued" : "MISSING")
+              << " tokenRotated=" << (reconnectTokenRotated ? "yes" : "no")
+              << " nameHijack=" << (nameHijackDenied
+                    ? ("denied(" + nameHijackReason + ")") : std::string("ACCEPTED"))
+              << " badToken=" << (badReconnectTokenDenied
+                    ? ("denied(" + badTokenReason + ")") : std::string("ACCEPTED"))
               << " staleDropped=" << (staleDropped ? "yes" : "no")
               << " staleDrops=" << staleDropCount
               << " ackB=" << ackB << '\n';
@@ -3046,16 +3512,20 @@ int Game::RunMultiplayerLoopbackSmoke()
               << " drop/ignoreB=" << clientBDropped << '/' << clientBIgnored
               << " resyncServer=" << serverResyncs << '\n';
 
-    const bool ok = lobbySnapshots && duplicateBlocked && lobbyStartedBoth
+    const bool ok = lobbySnapshots && duplicateNamesDisambiguated
+        && duplicateBlocked && lobbyStartedBoth
         && bothConnected && differentPlayers && badDenied && bothSeeBoth
         && movementVisible && serverSurvived && aClientGone && noAiTakeover
         && bStillConnected && bStillReceiving
-        && reconnectSlot && reconnectRespawning && lateDenied && staleDropped
+        && credentialsIssued && reconnectSlot && reconnectRespawning
+        && reconnectTokenRotated && nameHijackDenied && badReconnectTokenDenied
+        && staleDropped
         && deltaSnapshotsActive && deltaSmallerThanFull && reconnectBaselineThenDeltas;
 
     if (!ok)
     {
         std::cout << "mp-smoke: checks lobbySnapshots=" << (lobbySnapshots ? "ok" : "FAIL")
+                  << " duplicateNames=" << (duplicateNamesDisambiguated ? "ok" : "FAIL")
                   << " duplicateBlocked=" << (duplicateBlocked ? "ok" : "FAIL")
                   << " lobbyStartedBoth=" << (lobbyStartedBoth ? "ok" : "FAIL")
                   << " bothConnected=" << (bothConnected ? "ok" : "FAIL")
@@ -3069,7 +3539,10 @@ int Game::RunMultiplayerLoopbackSmoke()
                   << " bStillReceiving=" << (bStillReceiving ? "ok" : "FAIL")
                   << " reconnectSlot=" << (reconnectSlot ? "ok" : "FAIL")
                   << " reconnectRespawning=" << (reconnectRespawning ? "ok" : "FAIL")
-                  << " lateDenied=" << (lateDenied ? "ok" : "FAIL")
+                  << " credentialsIssued=" << (credentialsIssued ? "ok" : "FAIL")
+                  << " tokenRotated=" << (reconnectTokenRotated ? "ok" : "FAIL")
+                  << " nameHijackDenied=" << (nameHijackDenied ? "ok" : "FAIL")
+                  << " badTokenDenied=" << (badReconnectTokenDenied ? "ok" : "FAIL")
                   << " staleDropped=" << (staleDropped ? "ok" : "FAIL")
                   << " deltaActive=" << (deltaSnapshotsActive ? "ok" : "FAIL")
                   << " deltaSmaller=" << (deltaSmallerThanFull ? "ok" : "FAIL")
@@ -3468,6 +3941,22 @@ int Game::RunNetworkRangedSmoke()
             return player.GetInventory().GetBlocks() == 0;
         });
 
+    Player witnessLoadoutTester(9001, "Witness Loadout", 0, Vector3 {}, false);
+    witnessLoadoutTester.SetHeroId(HeroId::Svidetel);
+    ApplyBotLoadout(witnessLoadoutTester);
+    const bool witnessStartsWithoutSniper =
+        witnessLoadoutTester.GetInventory().HasItem(ItemType::Sword)
+        && !witnessLoadoutTester.GetInventory().HasItem(ItemType::SniperRifle)
+        && !witnessLoadoutTester.GetInventory().HasItem(ItemType::Blaster);
+    witnessLoadoutTester.GetInventory().AddResource(ResourceType::Gold, 8);
+    witnessLoadoutTester.GetInventory().AddResource(ResourceType::Crystal, 2);
+    Team witnessShopTeam {};
+    std::string witnessPurchaseMessage;
+    const bool witnessBuysSniper = shop_.Purchase(
+        witnessLoadoutTester, witnessShopTeam, 401, witnessPurchaseMessage)
+        && witnessLoadoutTester.GetInventory().HasItem(ItemType::SniperRifle)
+        && !witnessLoadoutTester.GetInventory().HasItem(ItemType::Blaster);
+
     if (matchSimulation_.Players().empty())
     {
         std::cout << "network-ranged-smoke: no players\n"
@@ -3497,6 +3986,42 @@ int Game::RunNetworkRangedSmoke()
     };
 
     const float fixedDt = matchSimulation_.FixedDeltaSeconds();
+
+    // Wool is a single pooled hotbar stack: all 16 selectable colours share
+    // one slot and therefore raise that slot's cap to 16 * 64.
+    Inventory woolInventory;
+    const bool woolBatchAdded = woolInventory.AddItem(ItemType::LightBlock, 128);
+    const int woolHotbarSlots = static_cast<int>(std::count_if(
+        woolInventory.GetHotbarSlots().begin(), woolInventory.GetHotbarSlots().end(),
+        [](const ItemStack& stack) { return stack.type == ItemType::LightBlock; }));
+    const bool pooledWoolStack = woolBatchAdded
+        && ItemMaxStack(ItemType::LightBlock) == 16 * 64
+        && woolHotbarSlots == 1
+        && woolInventory.CountItem(ItemType::LightBlock) == 128
+        && std::all_of(woolInventory.GetMainSlots().begin(), woolInventory.GetMainSlots().end(),
+            [](const ItemStack& stack) { return stack.IsEmpty(); });
+
+    // Every arrow family has its own finite quiver, but the quiver refills
+    // automatically after the longer empty reload instead of consuming items.
+    Player quiverTester;
+    bool standardQuiverEmptied = true;
+    for (int shot = 0; shot < ArrowQuiverCapacity(ArrowVariant::Standard); ++shot)
+    {
+        standardQuiverEmptied = standardQuiverEmptied && quiverTester.TryConsumeArrow();
+    }
+    standardQuiverEmptied = standardQuiverEmptied
+        && !quiverTester.TryConsumeArrow()
+        && quiverTester.GetArrowAmmo(ArrowVariant::Standard) == 0
+        && quiverTester.GetArrowReloadTimer(ArrowVariant::Standard) > 0.0f;
+    quiverTester.UpdateTimers(kQuiverReloadSeconds + 0.05f);
+    const bool standardQuiverReloaded =
+        quiverTester.GetArrowAmmo(ArrowVariant::Standard) == 16
+        && quiverTester.GetArrowReloadTimer(ArrowVariant::Standard) <= 0.0f;
+    quiverTester.CycleArrowVariant(1);
+    const bool arrowVariantsConfigured =
+        quiverTester.GetArrowVariant() == ArrowVariant::Breacher
+        && quiverTester.GetArrowAmmo(ArrowVariant::Breacher) == 12
+        && ArrowQuiverCapacity(ArrowVariant::Impulse) == 10;
 
     // Fireball quick-use: previously this used the server camera through
     // LaunchProjectile(); it must now use PlayerCommand aim.
@@ -3546,16 +4071,12 @@ int Game::RunNetworkRangedSmoke()
     recentActionResults_.clear();
     controlled.ResetAttackCooldown(0.0f);
 
-    // Bow draw/release: charge state lives on the player; release consumes an
-    // arrow and spawns an arrow along command aim.
+    // Bow draw/release: charge state lives on the player; release consumes one
+    // round from the selected infinite quiver and spawns along command aim.
     ItemStack bow;
     bow.type = ItemType::Bow;
     bow.count = 1;
-    ItemStack arrows;
-    arrows.type = ItemType::EnergyArrow;
-    arrows.count = 4;
     controlled.GetInventory().SwapSlot(0, bow);
-    controlled.GetInventory().SwapSlot(1, arrows);
     controlled.SetSelectedSlot(0);
     selectedHotbarSlot_ = 0;
 
@@ -3578,6 +4099,9 @@ int Game::RunNetworkRangedSmoke()
         && projectiles_.back().kind == ProjectileKind::Arrow;
     const bool bowAimOk = bowSpawned
         && directionMatches(projectiles_.back(), AimDirectionFromCommand(bowCommand), 0.999f);
+    const bool bowUsedQuiver = bowSpawned
+        && projectiles_.back().arrowVariant == ArrowVariant::Standard
+        && controlled.GetArrowAmmo(ArrowVariant::Standard) == 15;
     // Stable spawn id (not the vector index — see EnergyProjectile::id): the
     // real LaunchBowShot path must assign a real id, not the struct default -1.
     const int bowProjectileId = bowSpawned ? projectiles_.back().id : -1;
@@ -3852,6 +4376,63 @@ int Game::RunNetworkRangedSmoke()
         && world_.IsAir(fireballWool)
         && world_.IsAir(fireballWood);
 
+    // Breacher arrows require two hits by the same team within one minute.
+    const GridPos breacherWool { 320, 70, 320 };
+    world_.PlaceBlock(breacherWool, Block { BlockType::WoolBlock, 1, true }, true);
+    const auto hitWoolWithBreacher = [this, &controlled, &breacherWool, fixedDt]()
+    {
+        EnergyProjectile arrow {};
+        arrow.id = NextProjectileId();
+        arrow.position = world_.GridToWorld(breacherWool);
+        arrow.previousPosition = arrow.position;
+        arrow.startPosition = arrow.position;
+        arrow.ownerId = controlled.GetId();
+        arrow.ownerTeamId = controlled.GetTeamId();
+        arrow.kind = ProjectileKind::Arrow;
+        arrow.arrowVariant = ArrowVariant::Breacher;
+        arrow.lifetime = 1.0f;
+        projectiles_.push_back(arrow);
+        UpdateProjectiles(fixedDt);
+    };
+    hitWoolWithBreacher();
+    const bool breacherFirstHitMarked = !world_.IsAir(breacherWool)
+        && woolBreachMarks_.size() == 1;
+    UpdateProjectiles(60.05f);
+    const bool breacherMarkExpires = !world_.IsAir(breacherWool)
+        && woolBreachMarks_.empty();
+    hitWoolWithBreacher();
+    hitWoolWithBreacher();
+    const bool breacherSecondHitBreaks = world_.IsAir(breacherWool)
+        && woolBreachMarks_.empty();
+
+    // Brom's combat drone now commits to the target, detonates on contact,
+    // damages the enemy and destroys nearby fragile defence.
+    bool bromKamikazeWorked = false;
+    if (protectedTarget != nullptr)
+    {
+        const GridPos kamikazeWool { 340, 70, 340 };
+        const Vector3 woolCenter = world_.GridToWorld(kamikazeWool);
+        world_.PlaceBlock(kamikazeWool, Block { BlockType::WoolBlock, 1, true }, true);
+        protectedTarget->RespawnAt(Vector3 { woolCenter.x - 0.9f, woolCenter.y, woolCenter.z });
+        protectedTarget->UpdateTimers(2.0f);
+        const int targetHpBeforeKamikaze = protectedTarget->GetHealth();
+        bromTurretDrones_.clear();
+        BromTurretDrone drone {};
+        drone.id = NextHeroDeviceId();
+        drone.ownerPlayerId = controlled.GetId();
+        drone.ownerTeamId = controlled.GetTeamId();
+        drone.position = Vector3 {
+            protectedTarget->GetPosition().x - 0.4f,
+            protectedTarget->GetPosition().y + 0.65f,
+            protectedTarget->GetPosition().z };
+        drone.health = 60;
+        bromTurretDrones_.push_back(drone);
+        UpdateBromDevices(fixedDt);
+        bromKamikazeWorked = bromTurretDrones_.empty()
+            && world_.IsAir(kamikazeWool)
+            && protectedTarget->GetHealth() < targetHpBeforeKamikaze;
+    }
+
     // Collapse must be a live match rule even when automatch is disabled.
     automatch_.active = false;
     creativeMode_ = false;
@@ -3864,14 +4445,19 @@ int Game::RunNetworkRangedSmoke()
             [this](const Team& team) { return !IsTeamActiveForMode(team.id) || !team.coreAlive; });
 
     const bool ok = noStartingBlocks
+        && witnessStartsWithoutSniper && witnessBuysSniper
         && fireballSpawned && fireballAimOk
         && fireballPresentationClean && fireballResultReplicated
-        && bowSpawned && bowAimOk && bowResultReplicated && bowHasStableId
+        && pooledWoolStack
+        && standardQuiverEmptied && standardQuiverReloaded && arrowVariantsConfigured
+        && bowSpawned && bowAimOk && bowUsedQuiver && bowResultReplicated && bowHasStableId
         && blasterSpawned && blasterAimOk && blasterResultReplicated && blasterHasStableId
         && stableIdSurvivedExpiry && explosiveIdSurvivedExpiry && explosiveFallsWithoutSupport && hazardIdSurvivedExpiry
         && projectileCoreImmune && fireCoreImmune
         && projectileSpawnProtection && explosionSpawnProtection
         && tntPreservesReinforced && fireballPreservesFortified
+        && breacherFirstHitMarked && breacherMarkExpires && breacherSecondHitBreaks
+        && bromKamikazeWorked
         && liveCoreCollapse;
     std::cout << "network-ranged-smoke: fireball spawned="
               << (fireballSpawned ? "yes" : "no")
@@ -3891,12 +4477,23 @@ int Game::RunNetworkRangedSmoke()
               << " explosiveFalls=" << (explosiveFallsWithoutSupport ? "ok" : "FAIL")
               << " hazardSurvivesExpiry=" << (hazardIdSurvivedExpiry ? "ok" : "FAIL")
               << " noStartingBlocks=" << (noStartingBlocks ? "ok" : "FAIL")
+              << " witnessStart=" << (witnessStartsWithoutSniper ? "ok" : "FAIL")
+              << " witnessShop=" << (witnessBuysSniper ? "ok" : "FAIL")
+              << " pooledWool=" << (pooledWoolStack ? "ok" : "FAIL")
+              << " quiverEmpty=" << (standardQuiverEmptied ? "ok" : "FAIL")
+              << " quiverReload=" << (standardQuiverReloaded ? "ok" : "FAIL")
+              << " arrowVariants=" << (arrowVariantsConfigured ? "ok" : "FAIL")
+              << " bowUsesQuiver=" << (bowUsedQuiver ? "ok" : "FAIL")
               << " projectileCoreImmune=" << (projectileCoreImmune ? "ok" : "FAIL")
               << " fireCoreImmune=" << (fireCoreImmune ? "ok" : "FAIL")
               << " projectileSpawnProtection=" << (projectileSpawnProtection ? "ok" : "FAIL")
               << " explosionSpawnProtection=" << (explosionSpawnProtection ? "ok" : "FAIL")
               << " tntPreservesReinforced=" << (tntPreservesReinforced ? "ok" : "FAIL")
               << " fireballPreservesFortified=" << (fireballPreservesFortified ? "ok" : "FAIL")
+              << " breacherFirst=" << (breacherFirstHitMarked ? "ok" : "FAIL")
+              << " breacherExpiry=" << (breacherMarkExpires ? "ok" : "FAIL")
+              << " breacherSecond=" << (breacherSecondHitBreaks ? "ok" : "FAIL")
+              << " bromKamikaze=" << (bromKamikazeWorked ? "ok" : "FAIL")
               << " liveCoreCollapse=" << (liveCoreCollapse ? "ok" : "FAIL") << '\n';
     std::cout << (ok ? "NETWORK_RANGED_SMOKE_OK" : "NETWORK_RANGED_SMOKE_FAIL")
               << std::endl;
@@ -4644,6 +5241,22 @@ int Game::RunNetworkActionsSmoke()
     const int speedBoostIdAfter = findControlledSpeedBoostId(BuildNetworkSnapshot());
     const bool statusEffectIdStable = speedBoostIdBefore > 0 && speedBoostIdBefore == speedBoostIdAfter;
 
+    // Chat is a public, server-validated world event and must remain exactly
+    // once even when redundant command batches repeat the same sequence.
+    const NetworkMode modeBeforeChat = networkMode_;
+    const std::size_t worldEventsBeforeChat = recentWorldEvents_.size();
+    networkMode_ = NetworkMode::DedicatedServer;
+    PlayerCommand chatCommand;
+    chatCommand.chatSeq = 41;
+    chatCommand.chatMessage = "Держим центр";
+    ApplyChatCommand(controlled, chatCommand);
+    ApplyChatCommand(controlled, chatCommand);
+    const bool chatReplicated = recentWorldEvents_.size() == worldEventsBeforeChat + 1
+        && recentWorldEvents_.back().kind == static_cast<int>(WorldEventKind::ChatMessage)
+        && recentWorldEvents_.back().actorPlayerId == controlled.GetId()
+        && recentWorldEvents_.back().cause.find("Держим центр") != std::string::npos;
+    networkMode_ = modeBeforeChat;
+
     const bool presentationSuppressed =
         message_ == messageBefore
         && eventMessages_.size() == eventMessagesBefore
@@ -4686,6 +5299,7 @@ int Game::RunNetworkActionsSmoke()
               << " serverTick=" << (serverTickImpactWorked ? "ok" : "FAIL")
               << " serverTickResults=" << (serverTickResultsReplicated ? "ok" : "FAIL")
               << " statusEffectIdStable=" << (statusEffectIdStable ? "ok" : "FAIL")
+              << " chat=" << (chatReplicated ? "ok" : "FAIL")
               << " presentation=" << (presentationSuppressed ? "ok" : "FAIL")
               << " localCombat=" << (localCombatFeedbackSuppressed ? "ok" : "FAIL")
               << " audioRestore=" << (audioRestored ? "ok" : "FAIL") << '\n';
@@ -4697,6 +5311,7 @@ int Game::RunNetworkActionsSmoke()
         && blockResultsReplicated
         && bromChestBlockWorked && bromChestDeliveryWorked
         && serverTickImpactWorked && serverTickResultsReplicated && statusEffectIdStable
+        && chatReplicated
         && presentationSuppressed && localCombatFeedbackSuppressed && audioRestored;
     std::cout << (ok ? "NETWORK_ACTIONS_SMOKE_OK" : "NETWORK_ACTIONS_SMOKE_FAIL") << std::endl;
     return ok ? 0 : 9;
@@ -5195,7 +5810,7 @@ int Game::RunClientDynamicApplySmoke()
     // presentation while staying headless. A real GUI client is never headless
     // so this suppression never applies there.
     client.suppressLocalFeedback_ = false;
-    const std::size_t clientEffectsBeforeDash = client.worldEffects_.size();
+    const int clientParticlesBeforeDash = client.particles_.ActiveCount();
     PlayerCommand orbitaDashDiagCmd;
     orbitaDashDiagCmd.controlledPlayerId = static_cast<std::uint32_t>(owner.GetId());
     orbitaDashDiagCmd.aimYaw = 0.0f;
@@ -5211,19 +5826,15 @@ int Game::RunClientDynamicApplySmoke()
     client.headless_ = false;
     client.ApplyClientSnapshotFeedback(orbitaDashSnapshot);
     client.headless_ = true;
-    const WorldEffect* orbitaDashEffect = client.worldEffects_.size() > clientEffectsBeforeDash
-        ? &client.worldEffects_.back()
-        : nullptr;
+    const int orbitaDashParticleCount = client.particles_.ActiveCount() - clientParticlesBeforeDash;
+    const int orbitaDashTrails = client.particles_.ActiveCount(ParticleKind::Trail);
     const bool orbitaDashEffectKindCorrect = orbitaDashDiagApplied
-        && orbitaDashEffect != nullptr
-        && orbitaDashEffect->kind == WorldEffectKind::Trail
-        && orbitaDashEffect->radius > 1.0f && orbitaDashEffect->radius < 1.3f;
+        && orbitaDashParticleCount > 0
+        && orbitaDashTrails > 0;
     std::cout << "client-dynamic-apply-smoke: orbitaDash applied="
               << (orbitaDashDiagApplied ? "yes" : "no")
-              << " effectPushed=" << (orbitaDashEffect != nullptr ? "yes" : "no")
-              << " kind=" << (orbitaDashEffect != nullptr ? static_cast<int>(orbitaDashEffect->kind) : -1)
-              << " radius=" << (orbitaDashEffect != nullptr ? orbitaDashEffect->radius : -1.0f)
-              << " expectedKind=" << static_cast<int>(WorldEffectKind::Trail) << '\n';
+              << " particles=" << orbitaDashParticleCount
+              << " trails=" << orbitaDashTrails << '\n';
 
     // Diagnostic (2026-07-01, RunNetworkClient audit): HandleDeathsAndRespawns
     // is server-only (never runs on the client), so a network player's own
@@ -5374,6 +5985,7 @@ bool CommandEqual(const PlayerCommand& a, const PlayerCommand& b)
         && a.aimYaw == b.aimYaw && a.aimPitch == b.aimPitch
         && a.jump == b.jump && a.sprint == b.sprint && a.sprintTapped == b.sprintTapped
         && a.sneak == b.sneak && a.selectedSlot == b.selectedSlot
+        && a.woolVariant == b.woolVariant && a.arrowVariant == b.arrowVariant
         && a.attackPressed == b.attackPressed && a.attackHeld == b.attackHeld
         && a.attackReleased == b.attackReleased && a.placePressed == b.placePressed
         && a.placeHeld == b.placeHeld && a.scopeHeld == b.scopeHeld && a.interact == b.interact
@@ -5383,6 +5995,7 @@ bool CommandEqual(const PlayerCommand& a, const PlayerCommand& b)
         && a.useMolotov == b.useMolotov && a.useAlarm == b.useAlarm
         && a.actionSeq == b.actionSeq && a.actionType == b.actionType
         && a.actionParamA == b.actionParamA && a.actionParamB == b.actionParamB
+        && a.chatSeq == b.chatSeq && a.chatMessage == b.chatMessage
         && a.rewindTick == b.rewindTick;
 }
 
@@ -5424,6 +6037,9 @@ bool AbilityHudEqual(const HeroAbilityHudSnapshot& a, const HeroAbilityHudSnapsh
         && FloatEqual(a.ultimateCharge, b.ultimateCharge)
         && a.ultimatePrimed == b.ultimatePrimed
         && FloatEqual(a.bowDrawTimer, b.bowDrawTimer)
+        && a.arrowVariant == b.arrowVariant
+        && a.arrowAmmo == b.arrowAmmo
+        && a.arrowReloadTimers == b.arrowReloadTimers
         && a.blasterState == b.blasterState
         && FloatEqual(a.blasterLoadTimer, b.blasterLoadTimer);
 }
@@ -5515,7 +6131,8 @@ bool DeltaEqual(const BlockDelta& a, const BlockDelta& b)
 
 bool ProjectileEqual(const ProjectileSnapshot& a, const ProjectileSnapshot& b)
 {
-    return a.id == b.id && a.kind == b.kind && VecEqual(a.position, b.position)
+    return a.id == b.id && a.kind == b.kind && a.arrowVariant == b.arrowVariant
+        && VecEqual(a.position, b.position)
         && VecEqual(a.velocity, b.velocity) && a.ownerPlayerId == b.ownerPlayerId
         && a.ownerTeamId == b.ownerTeamId && a.remainingLifetime == b.remainingLifetime
         && a.fireZone == b.fireZone && a.visibility == b.visibility;
@@ -5727,6 +6344,13 @@ bool LobbyUpdateEqual(const LobbyUpdate& a, const LobbyUpdate& b)
         && a.startRequested == b.startRequested;
 }
 
+bool CredentialsEqual(const SessionCredentials& a, const SessionCredentials& b)
+{
+    return a.sessionId == b.sessionId
+        && a.playerSessionId == b.playerSessionId
+        && a.reconnectToken == b.reconnectToken;
+}
+
 bool LobbyPlayerEqual(const LobbyPlayerState& a, const LobbyPlayerState& b)
 {
     return a.clientId == b.clientId
@@ -5807,6 +6431,8 @@ PlayerCommand MakeSampleCommand()
     c.actionType = static_cast<int>(PlayerActionType::BuyItem);
     c.actionParamA = 101;
     c.actionParamB = 4;
+    c.chatSeq = 17;
+    c.chatMessage = "Игрок: держим центр";
     c.rewindTick = 1200;
     return c;
 }
@@ -5905,7 +6531,7 @@ MatchSnapshot MakeSampleSnapshot()
     s.blockDeltas.push_back(d);
 
     s.projectiles.push_back(ProjectileSnapshot {
-        3, 1, Vec3 { 1.0f, 2.0f, 3.0f }, Vec3 { 4.0f, 0.0f, 0.0f },
+        3, 1, 0, Vec3 { 1.0f, 2.0f, 3.0f }, Vec3 { 4.0f, 0.0f, 0.0f },
         1, 0, 1.5f, true, SnapshotVisibility::Public });
     s.explosives.push_back(ExplosiveSnapshot {
         4, Vec3 { -2.0f, 1.0f, 2.0f }, 1, 0, 2.25f, 3.5f, SnapshotVisibility::Public });
@@ -5936,7 +6562,7 @@ MatchSnapshot MakeSampleSnapshot()
         0.0f });
     // Phase 4/5 slice: utility / hero ability / projectile owner-private results
     // ride the same generic ActionResultSnapshot fields as BuyItem above (see
-    // docs/NETWORK_PREP_PLAN.md) — exercised here so the roundtrip covers the
+    // docs/MULTIPLAYER_TARGET_ARCHITECTURE.md) — exercised here so the roundtrip covers the
     // new PlayerActionType values, not just their (already generic) wire shape.
     s.actionResults.push_back(ActionResultSnapshot {
         1,
@@ -6256,7 +6882,42 @@ int RunProtocolSmoke()
               << " players=" << decodedLobbySnapshot.players.size()
               << " roundtrip=" << (lobbySnapshotOk ? "ok" : "FAIL") << '\n';
 
-    // 4) Truncated packets must be rejected, never crash. Try every cut length.
+    // 5) Session handshake roundtrip. Reconnect identity is binary and opaque;
+    // it must survive both request and acceptance without lossy conversions.
+    SessionCredentials sampleCredentials;
+    sampleCredentials.sessionId = SessionId { 0x0123'4567'89AB'CDEFu, 0x1020'3040'5060'7080u };
+    sampleCredentials.playerSessionId =
+        PlayerSessionId { 0x8877'6655'4433'2211u, 0xA1A2'A3A4'A5A6'A7A8u };
+    sampleCredentials.reconnectToken =
+        ReconnectToken { 0xDEAD'BEEF'CAFE'BABEu, 0x0BAD'F00D'1234'5678u };
+    const ConnectRequest connectRequest { "secret", sampleCredentials };
+    const std::vector<std::uint8_t> connectBytes = EncodeConnect(103, connectRequest);
+    PacketHeader connectHeader;
+    ConnectRequest decodedConnect;
+    const DecodeStatus connectStatus = DecodeConnect(
+        connectBytes.data(), connectBytes.size(), connectHeader, decodedConnect);
+    const ConnectAccept connectAccept { 17, sampleCredentials };
+    const std::vector<std::uint8_t> connectAckBytes = EncodeConnectAck(104, connectAccept);
+    PacketHeader connectAckHeader;
+    ConnectAccept decodedAccept;
+    const DecodeStatus connectAckStatus = DecodeConnectAck(
+        connectAckBytes.data(), connectAckBytes.size(), connectAckHeader, decodedAccept);
+    const bool handshakeOk = connectStatus == DecodeStatus::Ok
+        && connectHeader.type == MessageType::Connect
+        && connectHeader.sequence == 103
+        && decodedConnect.password == connectRequest.password
+        && CredentialsEqual(decodedConnect.resume, sampleCredentials)
+        && connectAckStatus == DecodeStatus::Ok
+        && connectAckHeader.type == MessageType::ConnectAck
+        && connectAckHeader.sequence == 104
+        && decodedAccept.clientId == connectAccept.clientId
+        && CredentialsEqual(decodedAccept.credentials, sampleCredentials);
+    ok = ok && handshakeOk;
+    std::cout << "protocol-smoke: sessionHandshake connectBytes=" << connectBytes.size()
+              << " ackBytes=" << connectAckBytes.size()
+              << " roundtrip=" << (handshakeOk ? "ok" : "FAIL") << '\n';
+
+    // 6) Truncated packets must be rejected, never crash. Try every cut length.
     bool truncationSafe = true;
     for (std::size_t cut = 0; cut < snapshotBytes.size(); ++cut)
     {
@@ -6522,8 +7183,241 @@ int Game::RunBotAISmoke()
               && rushStrategy.strategicEconomyBonus < standardStrategy.strategicEconomyBonus,
           "Hypixel Rush did not accelerate pressure and reduce economy bias");
 
+    Player fighter(901, "fighter", 0, Vector3 { 0, 2, 0 }, false);
+    Player opponent(902, "opponent", 1, Vector3 { 2, 2, 0 }, false);
+    Player support(903, "support", 1, Vector3 { 3, 2, 0 }, false);
+    Player secondSupport(904, "support2", 1, Vector3 { 4, 2, 0 }, false);
+    Player ally(905, "ally", 0, Vector3 { 1, 2, 0 }, false);
+    fighter.ApplyReplicatedState(50, 100, true, false, 0.0f);
+    opponent.ApplyReplicatedState(50, 100, true, false, 0.0f);
+    const BotTuningGenome combatTuning = DefaultBotTuningGenome();
+    std::vector<Player*> allies;
+    std::vector<Player*> enemies { &opponent };
+    int hiddenActor = -1;
+    const auto visible = [&hiddenActor](const Player& observer, const Player& actor)
+    {
+        return observer.GetId() != hiddenActor && actor.GetId() != hiddenActor;
+    };
+    const auto assess = [&]()
+    {
+        return AssessFight(fighter, opponent, visible, &allies, &enemies,
+            BotRole::Fighter, BotDifficulty::Hard, combatTuning, false, false, false);
+    };
+    const FightAssessment duel = assess();
+    enemies.push_back(&support);
+    enemies.push_back(&secondSupport);
+    const FightAssessment outnumbered = assess();
+    check("18_visible_enemy_support", duel.canWin && !outnumbered.canWin
+              && outnumbered.shouldRetreat && outnumbered.nearbyEnemies == 2
+              && outnumbered.enemyPower > 0.0f,
+          "visible enemy support did not turn an even duel into a retreat");
+
+    enemies = { &opponent, &support };
+    hiddenActor = support.GetId();
+    const FightAssessment hiddenSupport = assess();
+    check("19_hidden_enemy_support", hiddenSupport.nearbyEnemies == 0
+              && std::fabs(hiddenSupport.powerMargin - duel.powerMargin) < 0.001f,
+          "hidden authoritative enemy leaked into fight assessment");
+
+    enemies = { &opponent };
+    allies = { &ally };
+    hiddenActor = -1;
+    const FightAssessment supported = assess();
+    hiddenActor = ally.GetId();
+    const FightAssessment blockedAlly = assess();
+    hiddenActor = -1;
+    ally.SetPosition(Vec3 { 1, 12, 0 });
+    const FightAssessment upstairsAlly = assess();
+    check("20_unavailable_ally_support", supported.allyPower > 0.0f
+              && blockedAlly.allyPower == 0.0f && upstairsAlly.allyPower == 0.0f,
+          "ally behind cover or on another floor counted as immediate support");
+
+    allies.clear();
+    support.ApplyReplicatedState(0, 100, false, true, 0.0f);
+    enemies = { &opponent, &support, &fighter, nullptr };
+    const FightAssessment invalidSupport = assess();
+    check("21_support_roster_filter", invalidSupport.nearbyEnemies == 0
+              && std::fabs(invalidSupport.powerMargin - duel.powerMargin) < 0.001f,
+          "primary target, dead actor or own team counted as extra enemy support");
+
+    bool intermediateGoals = true;
+    for (BotIntent intent : { BotIntent::DefendCore, BotIntent::RepairCoreDefense,
+             BotIntent::GearUp, BotIntent::SecureResources, BotIntent::PressureCore,
+             BotIntent::BreakCoreDefense, BotIntent::FightEnemy, BotIntent::ChaseWeakEnemy,
+             BotIntent::RetreatHome, BotIntent::Recover })
+    {
+        BotNavigationDestination destination;
+        destination.intent = intent;
+        destination.support = GridPos { 12, 53, 0 };
+        destination.intermediate = true;
+        destination.targetPlayerId = 902;
+        destination.targetCore = GridPos { 93, 53, 2 };
+        destination.ownCore = GridPos { 2, 53, -93 };
+        const NavigationGoalPtr goal = BuildBotNavigationGoal(destination);
+        intermediateGoals = intermediateGoals && goal != nullptr
+            && goal->RepresentativePosition() == std::optional<GridPos>(destination.support);
+    }
+    check("22_corridor_before_interaction", intermediateGoals,
+          "an interaction intent overrode its intermediate travel destination");
+
+    BotNavigationDestination finalDestination;
+    finalDestination.intent = BotIntent::DefendCore;
+    finalDestination.support = GridPos { 12, 53, 0 };
+    finalDestination.ownCore = GridPos { 2, 53, -93 };
+    const NavigationGoalPtr defenseGoal = BuildBotNavigationGoal(finalDestination);
+    finalDestination.intent = BotIntent::ChaseWeakEnemy;
+    finalDestination.targetPlayerId = 902;
+    const NavigationGoalPtr chaseGoal = BuildBotNavigationGoal(finalDestination);
+    finalDestination.intent = BotIntent::RepairCoreDefense;
+    check("23_final_interaction_restored", defenseGoal->RepresentativePosition() == finalDestination.ownCore
+              && dynamic_cast<const GoalAttackRangeOfPlayer*>(chaseGoal.get()) != nullptr
+              && BuildBotNavigationGoal(finalDestination) == nullptr,
+          "corridor completion failed to restore defense, pursuit or repair ownership");
+
+    BotAttackCommitment commitment;
+    BotAttackOption nearbyBase;
+    nearbyBase.teamId = 1;
+    nearbyBase.travelSeconds = 10.0f;
+    nearbyBase.preparationSeconds = 80.0f;
+    BotAttackOption connectedBase;
+    connectedBase.teamId = 2;
+    connectedBase.travelSeconds = 30.0f;
+    std::vector<BotAttackOption> options { nearbyBase, connectedBase };
+    const int accessibleTarget = SelectBotAttackOption(options, commitment, 0.0f);
+    options[0].preparationSeconds = 0.0f;
+    options[0].reachable = false;
+    const int unreachableRejected = SelectBotAttackOption(options, commitment, 20.0f);
+    check("24_attack_route_cost", accessibleTarget == 2 && unreachableRejected == 2,
+          "short direct distance overrode construction cost or disconnected route");
+
+    options[0].reachable = true;
+    options[0].travelSeconds = 29.0f;
+    options[1].supportingAttackers = 3;
+    const int reinforcedTarget = SelectBotAttackOption(options, commitment, 25.0f);
+    options[1].supportingAttackers = 0;
+    const int smallFluctuation = SelectBotAttackOption(options, commitment, 30.0f);
+    options[1].recentRouteFailures = 3;
+    const int failedTarget = SelectBotAttackOption(options, commitment, 35.0f);
+    check("25_attack_commitment", reinforcedTarget == 2 && smallFluctuation == 2 && failedTarget == 1,
+          "reinforcements churned the target or repeated route failures failed to release it");
+
+    options.erase(options.begin());
+    const int destroyedTarget = SelectBotAttackOption(options, commitment, 35.1f);
+    check("26_destroyed_target_interrupt", destroyedTarget == 2,
+          "minimum commitment retained a destroyed Core");
+
+    BotSearchMemory search;
+    std::vector<BotSearchSite> sites {
+        { 1, Vector3 { 10, 2, 0 }, 40.0f },
+        { 2, Vector3 { 20, 2, 0 }, 35.0f },
+        { 3, Vector3 { 80, 2, 0 }, 0.0f },
+        { 4, Vector3 { 100, 2, 0 }, 0.0f } };
+    SelectBotSearchSite(sites, search, Vector3 { 0, 2, 0 }, 1, -1000.0f, 0.0f);
+    const int firstSite = search.siteId;
+    SelectBotSearchSite(sites, search, Vector3 { 10, 2, 0 }, 1, -1000.0f, 2.0f);
+    const int secondSite = search.siteId;
+    SelectBotSearchSite(sites, search, Vector3 { 20, 2, 0 }, 1, -1000.0f, 4.0f);
+    const int thirdSite = search.siteId;
+    check("27_search_sweeps_map", firstSite == 1 && secondSite == 2 && thirdSite == 3,
+          "search remained at the Core/spawn after inspecting them");
+
+    SelectBotSearchSite(sites, search, Vector3 { 20, 2, 0 }, 1, -1000.0f, 23.0f);
+    check("28_search_failed_site", search.siteId == 4,
+          "search repeated an unreachable site without trying another region");
+    sites.push_back({ 0, Vector3 { 50, 2, 0 }, 80.0f });
+    SelectBotSearchSite(sites, search, Vector3 { 20, 2, 0 }, 1, 24.0f, 24.0f);
+    check("29_search_new_evidence", search.siteId == 0 && search.visits.size() == 3,
+          "new sighting did not redirect search or erased the team's visited regions");
+    sites.pop_back();
+    SelectBotSearchSite(sites, search, Vector3 { 0, 2, 0 }, 2, -1000.0f, 25.0f);
+    check("30_search_target_reset", search.siteId == 1 && search.visits.empty(),
+          "a new opponent inherited the old opponent's search exclusions");
+
+    TeamCoordinationBus bridgeBus;
+    const bool firstBuilder = bridgeBus.TryReserveBridge(1, 101, 0.0f, Vector3 {}, 32);
+    const bool stolenByOtherRoute = bridgeBus.TryReserveBridge(2, 202, 1.0f, Vector3 {}, 32);
+    const bool stolenBySameBuilder = bridgeBus.TryReserveBridge(1, 202, 2.0f, Vector3 {}, 32);
+    const bool retained = bridgeBus.TryReserveBridge(1, 101, 3.0f, Vector3 {}, 32);
+    const bool staleReassigned = bridgeBus.TryReserveBridge(2, 202, 9.0f, Vector3 {}, 32);
+    check("31_bridge_lease_ownership", firstBuilder && !stolenByOtherRoute && !stolenBySameBuilder
+              && retained && staleReassigned && bridgeBus.bridgeBuilderId == 2,
+          "another crossing stole an active construction lease or a stalled builder retained it forever");
+
+    check("32_opening_pressure_roles", !BotOpeningPressureEligible(20, 1, true, 195, false)
+              && !BotOpeningPressureEligible(20, 1, true, 197, true)
+              && BotOpeningPressureEligible(20, 1, false, 195, false)
+              && BotOpeningPressureEligible(20, 1, false, 197, true)
+              && !BotOpeningPressureEligible(20, 1, false, 197, false)
+              && !BotOpeningPressureEligible(60, 1, false, 195, true)
+              && !BotOpeningPressureEligible(20, 3, false, 195, true),
+          "opening scout stole the defender or reversed at the departure boundary");
+
+    TeamCoordinationBus help;
+    help.PublishBridgeRequest(1, BotIntent::PressureCore, Vector3 { 20, 2, 0 }, 3, 0);
+    const bool claimed = help.TryClaimBridgeRequest(2, Vector3 {}, 8, 0, false);
+    help.PublishBridgeRequest(1, BotIntent::PressureCore, Vector3 { 20, 2, 0 }, 3, 4);
+    check("33_bridge_request_refresh", claimed && help.bridgeRequestBuilderId == 2,
+          "request refresh discarded the assigned helper");
+    const bool lowStockContinues = help.TryClaimBridgeRequest(2, Vector3 { 5, 2, 0 }, 3, 5, true);
+    const bool progressed = help.TryClaimBridgeRequest(2, Vector3 { 10, 2, 0 }, 2, 10, true);
+    help.PublishBridgeRequest(1, BotIntent::PressureCore, Vector3 { 20, 2, 0 }, 3, 14);
+    const bool retainedHelper = help.TryClaimBridgeRequest(2, Vector3 { 10, 2, 0 }, 2, 16, true);
+    const bool stalledHelper = help.TryClaimBridgeRequest(2, Vector3 { 10, 2, 0 }, 2, 23, true);
+    const bool replacement = help.TryClaimBridgeRequest(3, Vector3 {}, 8, 23, true);
+    check("34_bridge_help_progress_lease", lowStockContinues && progressed && retainedHelper
+              && !stalledHelper && replacement && !help.CompleteBridgeRequest(2)
+              && help.CompleteBridgeRequest(3),
+          "helper stopped below four blocks, monopolized a stalled request, or lost ownership checks");
+    finalDestination.intent = BotIntent::PressureCore;
+    finalDestination.targetCore = GridPos { 80, 53, 0 };
+    finalDestination.bridgeAssist = true;
+    const auto helpGoal = BuildBotNavigationGoal(finalDestination);
+    check("35_bridge_help_destination", helpGoal->RepresentativePosition() == std::optional<GridPos>(finalDestination.support),
+          "helper's requested repair point was replaced by an enemy Core");
+    help.PublishBridgeRequest(1, BotIntent::SecureResources, Vector3 { 20, 2, 0 }, -1, 30);
+    check("36_bridge_help_request_isolation", !help.TryClaimBridgeRequest(1, Vector3 {}, 8, 30, false)
+              && !help.PublishBridgeRequest(4, BotIntent::SecureResources, Vector3 {}, -1, 31),
+          "requester assigned itself or another request stole an active help task");
+
+    std::vector<BotBridgeHelperOption> helpers {
+        { 8, false, true, 1, 16, 2 }, { 4, true, false, 12, 12, 7 },
+        { 2, true, false, 2, 4, 7 }, { 6, true, false, 12, 12, 7 }
+    };
+    const int selected = SelectBotBridgeHelper(helpers);
+    std::reverse(helpers.begin(), helpers.end());
+    check("37_bridge_helper_route_and_stock", selected == 4 && SelectBotBridgeHelper(helpers) == 4,
+        "helper selection depended on update order, incomplete route, or insufficient stock");
+    check("38_bridge_helper_fallback", SelectBotBridgeHelper({ { 2, false, false, 1, 12, 0 },
+        { 3, false, true, 4, 8, 2 } }) == 3
+        && SelectBotBridgeHelper({ { 2, true, false, 1, 3, 0 } }) == -1,
+        "helper selection accepted unreachable or unprepared candidates");
+    const BotBridgeHelpFollowup followup { 1, 2, Vector3 { 20, 0, 0 }, 20, 10 };
+    const Vector3 resumed { 5, 0, 0 };
+    check("39_bridge_help_requires_resumption",
+        AssessBotHelpOutcome(followup, resumed, followup.objective, true, true, false, 12) == BotHelpOutcome::Progress
+        && AssessBotHelpOutcome(followup, resumed, followup.objective, true, false, false, 12) == BotHelpOutcome::Pending
+        && AssessBotHelpOutcome(followup, resumed, followup.objective, true, true, true, 12) == BotHelpOutcome::Pending
+        && AssessBotHelpOutcome(followup, resumed, followup.objective, true, true, false, 11) == BotHelpOutcome::Pending,
+        "arrival, airborne displacement, or active recovery was counted as successful help");
+    check("40_bridge_help_outcomes",
+        AssessBotHelpOutcome(followup, {}, followup.objective, false, true, false, 12) == BotHelpOutcome::Failed
+        && AssessBotHelpOutcome(followup, {}, {}, true, true, false, 12) == BotHelpOutcome::ChangedObjective
+        && AssessBotHelpOutcome(followup, {}, followup.objective, true, true, false, 40) == BotHelpOutcome::TimedOut,
+        "failed or abandoned assistance was counted as progress");
+
+    help.Clear();
+    help.bridgeHelpFollowups.push_back(followup);
+    check("41_bridge_help_observation_window",
+        !help.PublishBridgeRequest(1, BotIntent::SecureResources, {}, -1, 20)
+        && help.PublishBridgeRequest(3, BotIntent::SecureResources, {}, -1, 20),
+        "repeated rendezvous displaced observation or prevented helping a different teammate");
+    help.Clear();
+    help.bridgeHelpFollowups.push_back(followup);
+    check("42_bridge_help_retry_after_observation",
+        help.PublishBridgeRequest(1, BotIntent::SecureResources, {}, -1, 40),
+        "unresolved help permanently suppressed subsequent requests");
     std::cout << (failures == 0 ? "BOT_AI_SMOKE_OK" : "BOT_AI_SMOKE_FAIL")
-              << " failures=" << failures << " scenarios=17 maxTicksPerScenario=1" << std::endl;
+              << " failures=" << failures << " scenarios=42 maxTicksPerScenario=1" << std::endl;
     return failures == 0 ? 0 : 7;
 }
 
@@ -6556,8 +7450,9 @@ int Game::RunBotAISmoke() { return DiagnosticsDisabled(); }
 void Game::PrepareStartupSmoke() {}
 void Game::ExerciseStartupSmokeMutation(bool) {}
 int Game::RunUiScreenshotDiag() { return DiagnosticsDisabled(); }
+int Game::RunParticleReviewDiag() { return DiagnosticsDisabled(); }
 int Game::RunFrameProfileDiag() { return DiagnosticsDisabled(); }
-int Game::RunMapReviewDiag(const std::string&) { return DiagnosticsDisabled(); }
+int Game::RunMapReviewDiag(const std::string&, std::optional<ArenaBiome>) { return DiagnosticsDisabled(); }
 int RunProtocolSmoke() { return DiagnosticsDisabled(); }
 
 #endif // DAIBED_DIAGNOSTICS

@@ -533,6 +533,7 @@ NavigationSearchResult VoxelPathfinder::FindPath(
     result.path.resolvedGoal = start.support;
     result.path.worldRevision = world.WorldRevision();
     SearchQueryCache query(world, profile);
+    const float maximumJumpRise = profile.MaximumJumpRise();
     int maxExecutableGapJump = 0;
     for (int gap = 1; gap <= profile.maxGapJumpBlocks; ++gap)
     {
@@ -615,6 +616,10 @@ NavigationSearchResult VoxelPathfinder::FindPath(
             int nextBridgeChain,
             PlannedMovement movement)
         {
+            for (const NavigationFailedTransition& failure : limits.failedTransitions)
+                if (failure.from == movement.from && failure.to == movement.to && failure.type == movement.type)
+                    return;
+
             if (!InBounds(start.support, nextSupport, limits))
             {
                 return;
@@ -687,6 +692,14 @@ NavigationSearchResult VoxelPathfinder::FindPath(
                 {
                     continue;
                 }
+                // Voxel dy=1 can mean a 1.5-block climb from a lower slab.
+                // Validate actual collision surfaces against player physics,
+                // rather than repeatedly executing an impossible "one block" hop.
+                const float surfaceRise = world.SupportCenter(next, profile.bodyCenterAboveSupport).y
+                    - world.SupportCenter(currentState.support, profile.bodyCenterAboveSupport).y;
+                if (surfaceRise > static_cast<float>(profile.maxStepHeightBlocks) + 0.001f
+                    && (!profile.canJump || surfaceRise > maximumJumpRise + 0.001f))
+                    continue;
                 if (dy > 0 && !profile.canJump && profile.maxStepHeightBlocks < dy)
                 {
                     continue;

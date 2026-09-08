@@ -3,6 +3,7 @@
 #include "CombatSystem.h"
 #include "HeroSystem.h"
 #include "UiText.h"
+#include "VisualTheme.h"
 #include "VecConvert.h"
 #include "raymath.h"
 #include "rlgl.h"
@@ -1275,26 +1276,6 @@ std::string FormatTenths(float value)
     return std::to_string(tenths / 10) + "." + std::to_string(tenths % 10);
 }
 
-Color HeroUiColor(HeroId id)
-{
-    switch (id)
-    {
-    case HeroId::Radon:
-        return Color { 92, 164, 255, 255 };
-    case HeroId::Orbita:
-        return Color { 255, 96, 82, 255 };
-    case HeroId::Brom:
-        return Color { 96, 202, 118, 255 };
-    case HeroId::Konvoy:
-        return Color { 92, 210, 255, 255 };
-    case HeroId::Likho:
-        return Color { 104, 238, 92, 255 };
-    case HeroId::Svidetel:
-        return Color { 180, 104, 255, 255 };
-    }
-    return WHITE;
-}
-
 std::string AbilityStateText(const HeroAbilityState& state, bool ultimate, float ultimateCharge, bool primed)
 {
     if (ultimate && primed)
@@ -1314,6 +1295,42 @@ std::string AbilityStateText(const HeroAbilityState& state, bool ultimate, float
         return std::to_string(static_cast<int>(ultimateCharge)) + "%";
     }
     return "готово";
+}
+
+void DrawSoftContactShadow(Vector3 groundCenter, float radius, float opacity, int quality)
+{
+    // Concentric translucent discs approximate a soft penumbra without a
+    // screen-space depth pass. The low preset keeps one cheap disc so actors
+    // remain grounded even when cascade maps are disabled or unsupported.
+    const int rings = quality >= 2 ? 4 : (quality == 1 ? 2 : 1);
+    const int segments = quality >= 2 ? 28 : (quality == 1 ? 16 : 10);
+    for (int ring = rings; ring >= 1; --ring)
+    {
+        const float fraction = static_cast<float>(ring) / static_cast<float>(rings);
+        const float ringOpacity = opacity * (1.0f - fraction * 0.62f) / static_cast<float>(rings);
+        DrawCylinder(
+            Vector3 { groundCenter.x, groundCenter.y + 0.012f + static_cast<float>(ring) * 0.0004f, groundCenter.z },
+            radius * fraction,
+            radius * fraction,
+            0.012f,
+            segments,
+            Fade(BLACK, ringOpacity));
+    }
+}
+
+const char* AbilityHudLabel(HeroId hero, HeroAbilitySlot slot)
+{
+    static constexpr const char* labels[][3] {
+        { "Толчок", "Молотов", "Жертва" },
+        { "Рывок", "Фантомы", "Телепорт" },
+        { "Пылесос", "Камикадзе", "Рой" },
+        { "Капкан", "Наручники", "Купол" },
+        { "Тихие шаги", "Кровоток", "Маскировка" },
+        { "Эхо", "Фаза", "Контуры" },
+    };
+    const int heroIndex = std::clamp(static_cast<int>(hero), 0, 5);
+    const int slotIndex = std::clamp(static_cast<int>(slot), 0, 2);
+    return labels[heroIndex][slotIndex];
 }
 
 Vector3 RotateFlat(Vector3 direction, float radians)
@@ -1393,8 +1410,14 @@ void DrawRadonPresentationEffect(const WorldEffect& effect)
             base.y - 0.12f * progress,
             base.z - effect.direction.z * effect.radius * (1.2f + progress)
         };
-        DrawLine3D(tail, base, Fade(effect.color, t * 0.95f));
-        DrawSphere(base, effect.radius * (0.42f + t * 0.24f), Fade(effect.color, t * 0.70f));
+        DrawCylinderEx(
+            tail,
+            base,
+            std::max(0.008f, effect.radius * 0.08f),
+            std::max(0.003f, effect.radius * 0.025f),
+            6,
+            Fade(effect.color, t * 0.78f));
+        DrawLine3D(tail, base, Fade(WHITE, t * 0.55f));
         break;
     }
     case WorldEffectKind::FireZone:
@@ -1462,9 +1485,9 @@ void DrawHeroDeviceVisual(const HeroDeviceVisual& device, int localTeamId)
 {
     const bool enemy = localTeamId >= 0 && device.teamId != localTeamId;
     const Color relationColor = enemy ? Color { 255, 92, 92, 255 } : Color { 102, 226, 255, 255 };
-    const Color bromColor = MixColor(HeroUiColor(HeroId::Brom), relationColor, 0.42f);
-    const Color konvoyColor = MixColor(HeroUiColor(HeroId::Konvoy), relationColor, 0.42f);
-    const Color svidetelColor = MixColor(HeroUiColor(HeroId::Svidetel), relationColor, 0.42f);
+    const Color bromColor = MixColor(VisualTheme::HeroAccent(HeroId::Brom), relationColor, 0.42f);
+    const Color konvoyColor = MixColor(VisualTheme::HeroAccent(HeroId::Konvoy), relationColor, 0.42f);
+    const Color svidetelColor = MixColor(VisualTheme::HeroAccent(HeroId::Svidetel), relationColor, 0.42f);
     const float time = static_cast<float>(GetTime());
     const float pulse = 0.5f + 0.5f * std::sin(time * 8.0f + device.position.x * 0.7f + device.position.z * 0.4f);
     Vector3 forward = Normalize(device.direction);
@@ -1875,7 +1898,9 @@ bool Renderer::Initialize()
     darkBrickTexture_ = loadBlockWithNormal(BlockType::DarkBrickBlock, "dark_brick_block", MakeBrickImage(Color { 42, 38, 46, 255 }, Color { 84, 72, 88, 255 }, Color { 62, 54, 70, 255 }, 18), 2.6f, 42);
     lightBrickTexture_ = loadBlockWithNormal(BlockType::LightBrickBlock, "light_brick_block", MakeBrickImage(Color { 166, 150, 122, 255 }, Color { 224, 204, 166, 255 }, Color { 194, 170, 132, 255 }, 19), 2.6f, 46);
     metalBlockTexture_ = loadBlockWithNormal(BlockType::MetalBlock, "metal_block", MakeMetalBlockImage(), 2.0f, 230);
-    glowBlockTexture_ = loadBlockWithNormal(BlockType::GlowBlock, "glow_block", MakeGlowBlockImage(), 1.6f, 220);
+    // 250+ is reserved by lighting.fs as an explicit emissive material tag;
+    // ordinary polished stone, glass and metals remain reflective only.
+    glowBlockTexture_ = loadBlockWithNormal(BlockType::GlowBlock, "glow_block", MakeGlowBlockImage(), 1.6f, 255);
     plankVariantTexture_ = loadBlockWithNormal(BlockType::PlankBlock, "plank_block", MakePlankVariantImage(), 2.4f, 32);
     decorativeTileTexture_ = loadBlockWithNormal(BlockType::DecorativeTileBlock, "decorative_tile_block", MakeDecorativeTileImage(), 2.2f, 130);
     trimBlockTexture_ = loadBlockWithNormal(BlockType::TrimBlock, "trim_block", MakeTrimBlockImage(), 2.0f, 90);
@@ -1893,14 +1918,14 @@ bool Renderer::Initialize()
     goldTexture_ = loadBlockWithNormal(BlockType::GoldBlock, "gold_block", MakeGoldBlockImage(), 2.4f, 240);
     ironBarsTexture_ = loadBlockWithNormal(BlockType::IronBarsBlock, "iron_bars_block", MakeIronBarsImage(), 2.7f, 186);
     ladderTexture_ = loadBlockWithNormal(BlockType::LadderBlock, "ladder_block", MakeLadderImage(), 2.6f, 30);
-    torchTexture_ = loadBlockWithNormal(BlockType::TorchBlock, "torch_block", MakeTorchBlockImage(), 1.5f, 218);
+    torchTexture_ = loadBlockWithNormal(BlockType::TorchBlock, "torch_block", MakeTorchBlockImage(), 1.5f, 253);
     obsidianTexture_ = loadBlockWithNormal(BlockType::ObsidianBlock, "obsidian_block", MakeTextureImage(Color { 38, 28, 54, 255 }, Color { 90, 52, 132, 255 }, 8), 1.8f, 160);
     glassTexture_ = LoadCustomizableTexture("energy_glass_block", MakeTextureImage(Color { 112, 232, 255, 150 }, Color { 220, 252, 255, 210 }, 9));
     springTexture_ = loadBlockWithNormal(BlockType::SpringBlock, "spring_block", MakeTextureImage(Color { 92, 196, 124, 255 }, Color { 255, 235, 142, 255 }, 10), 1.6f, 60);
     stickyTexture_ = loadBlockWithNormal(BlockType::StickyBlock, "sticky_block", MakeTextureImage(Color { 92, 184, 118, 255 }, Color { 40, 112, 72, 255 }, 11), 1.6f, 80);
     tntTexture_ = loadBlockWithNormal(BlockType::ExplosiveBlock, "explosive_block", MakeTntImage(), 1.8f, 24);
     spikeTexture_ = loadBlockWithNormal(BlockType::SpikeBlock, "spike_block", MakeTextureImage(Color { 148, 148, 158, 255 }, Color { 236, 236, 244, 255 }, 12), 1.8f, 140);
-    lavaTexture_ = loadBlockWithNormal(BlockType::LavaBlock, "lava_block", MakeTextureImage(Color { 230, 70, 28, 255 }, Color { 255, 210, 66, 255 }, 13), 2.2f, 210);
+    lavaTexture_ = loadBlockWithNormal(BlockType::LavaBlock, "lava_block", MakeTextureImage(Color { 230, 70, 28, 255 }, Color { 255, 210, 66, 255 }, 13), 2.2f, 251);
     iceTexture_ = LoadCustomizableTexture("ice_block", MakeTextureImage(Color { 150, 225, 255, 190 }, Color { 230, 250, 255, 230 }, 14));
     // Blocks without a normal map still want the distance-mip sampling.
     ApplyWorldTextureSampling(leafTexture_);
@@ -2019,7 +2044,7 @@ void Renderer::Shutdown()
         UnloadTexture(flatNormalTexture_);
         flatNormalTexture_ = {};
     }
-    UnloadShadowTarget();
+    UnloadShadowTargets();
     heroVisuals_.Shutdown();
     if (heroPreviewTarget_.id != 0)
     {
@@ -2037,6 +2062,15 @@ void Renderer::SetWorldRenderDistance(float distance)
 void Renderer::SetShadowQuality(int quality)
 {
     shadowQuality_ = std::clamp(quality, 0, 2);
+    if (shadowQuality_ == 0)
+    {
+        UnloadShadowTargets();
+    }
+}
+
+void Renderer::SetAmbientOcclusionQuality(int quality)
+{
+    ambientOcclusionQuality_ = std::clamp(quality, 0, 2);
 }
 
 void Renderer::SyncChunks(const World& world, const std::vector<Team>& teams) const
@@ -2112,14 +2146,17 @@ void Renderer::UpdateMapPointLights(const World& world) const
     mapPointLightsRevision_ = revision;
 }
 
-void Renderer::SetNearestMapPointLights(const Camera3D& camera) const
+void Renderer::SetNearestPointLights(
+    const Camera3D& camera,
+    const std::vector<ScenePointLight>& dynamicLights) const
 {
     std::vector<ScenePointLight> nearest = mapPointLights_;
+    nearest.insert(nearest.end(), dynamicLights.begin(), dynamicLights.end());
     std::sort(nearest.begin(), nearest.end(), [&camera](const ScenePointLight& a, const ScenePointLight& b)
     {
         return DistanceSquared(a.position, camera.position) < DistanceSquared(b.position, camera.position);
     });
-    constexpr std::size_t kMaxSceneLights = 12;
+    constexpr std::size_t kMaxSceneLights = 16;
     if (nearest.size() > kMaxSceneLights)
     {
         nearest.resize(kMaxSceneLights);
@@ -2127,13 +2164,21 @@ void Renderer::SetNearestMapPointLights(const Camera3D& camera) const
     sceneShader_.SetPointLights(nearest);
 }
 
-bool Renderer::EnsureShadowTarget(int resolution)
+bool Renderer::EnsureShadowTargets(
+    const std::array<int, SceneShadowParams::kCascadeCount>& resolutions)
 {
-    if (shadowTarget_.id != 0 && shadowResolution_ == resolution)
+    bool matches = true;
+    for (int cascade = 0; cascade < SceneShadowParams::kCascadeCount; ++cascade)
+    {
+        matches = matches
+            && shadowTargets_[cascade].id != 0
+            && shadowResolutions_[cascade] == resolutions[cascade];
+    }
+    if (matches)
     {
         return true;
     }
-    UnloadShadowTarget();
+    UnloadShadowTargets();
     if (shadowTargetFailed_)
     {
         // The driver rejected a depth-only framebuffer once; keep the blob
@@ -2143,63 +2188,73 @@ bool Renderer::EnsureShadowTarget(int resolution)
 
     // Depth-only render target, mirroring raylib's shadowmap example: no
     // color attachment, the depth texture is what the lighting shader reads.
-    RenderTexture2D target {};
-    target.id = rlLoadFramebuffer(resolution, resolution);
-    if (target.id == 0)
+    for (int cascade = 0; cascade < SceneShadowParams::kCascadeCount; ++cascade)
     {
-        TraceLog(LOG_WARNING, "SHADOW: framebuffer creation failed; sun shadows disabled");
-        shadowTargetFailed_ = true;
-        return false;
+        const int resolution = resolutions[cascade];
+        RenderTexture2D target {};
+        target.id = rlLoadFramebuffer(resolution, resolution);
+        if (target.id != 0)
+        {
+            target.texture.width = resolution;
+            target.texture.height = resolution;
+            rlEnableFramebuffer(target.id);
+            target.depth.id = rlLoadTextureDepth(resolution, resolution, false);
+            target.depth.width = resolution;
+            target.depth.height = resolution;
+            target.depth.format = 19;
+            target.depth.mipmaps = 1;
+            rlFramebufferAttach(target.id, target.depth.id, RL_ATTACHMENT_DEPTH, RL_ATTACHMENT_TEXTURE2D, 0);
+            const bool complete = rlFramebufferComplete(target.id);
+            rlDisableFramebuffer();
+            if (!complete || target.depth.id == 0)
+            {
+                rlUnloadFramebuffer(target.id);
+                target = {};
+            }
+        }
+        if (target.id == 0)
+        {
+            TraceLog(LOG_WARNING, "SHADOW: cascade %d framebuffer failed; sun shadows disabled", cascade);
+            UnloadShadowTargets();
+            shadowTargetFailed_ = true;
+            return false;
+        }
+        rlTextureParameters(target.depth.id, RL_TEXTURE_WRAP_S, RL_TEXTURE_WRAP_CLAMP);
+        rlTextureParameters(target.depth.id, RL_TEXTURE_WRAP_T, RL_TEXTURE_WRAP_CLAMP);
+        shadowTargets_[cascade] = target;
+        shadowResolutions_[cascade] = resolution;
     }
-    // BeginTextureMode reads the viewport size from target.texture.
-    target.texture.width = resolution;
-    target.texture.height = resolution;
-    rlEnableFramebuffer(target.id);
-    target.depth.id = rlLoadTextureDepth(resolution, resolution, false);
-    target.depth.width = resolution;
-    target.depth.height = resolution;
-    target.depth.format = 19;
-    target.depth.mipmaps = 1;
-    rlFramebufferAttach(target.id, target.depth.id, RL_ATTACHMENT_DEPTH, RL_ATTACHMENT_TEXTURE2D, 0);
-    const bool complete = rlFramebufferComplete(target.id);
-    rlDisableFramebuffer();
-    if (!complete || target.depth.id == 0)
-    {
-        TraceLog(LOG_WARNING, "SHADOW: depth framebuffer incomplete; sun shadows disabled");
-        rlUnloadFramebuffer(target.id);
-        shadowTargetFailed_ = true;
-        return false;
-    }
-    // PCF reads outside the ortho window must clamp, not wrap to the other
-    // side of the map.
-    rlTextureParameters(target.depth.id, RL_TEXTURE_WRAP_S, RL_TEXTURE_WRAP_CLAMP);
-    rlTextureParameters(target.depth.id, RL_TEXTURE_WRAP_T, RL_TEXTURE_WRAP_CLAMP);
-    shadowTarget_ = target;
-    shadowResolution_ = resolution;
     return true;
 }
 
-void Renderer::UnloadShadowTarget()
+void Renderer::UnloadShadowTargets()
 {
-    if (shadowTarget_.id != 0)
+    for (RenderTexture2D& target : shadowTargets_)
     {
-        // rlUnloadFramebuffer also deletes the attached depth texture.
-        rlUnloadFramebuffer(shadowTarget_.id);
-        shadowTarget_ = {};
+        if (target.id != 0)
+        {
+            // rlUnloadFramebuffer also deletes the attached depth texture.
+            rlUnloadFramebuffer(target.id);
+            target = {};
+        }
     }
-    shadowResolution_ = 0;
+    shadowResolutions_.fill(0);
     sunShadowsValid_ = false;
 }
 
-void Renderer::PrepareSunShadows(const World& world, const std::vector<Team>& teams, const Camera3D& camera)
+void Renderer::PrepareSunShadows(const World& world, const std::vector<Team>& teams, const Camera3D& camera, const std::vector<Player>& players)
 {
     sunShadowsValid_ = false;
     if (shadowQuality_ <= 0 || !texturesReady_ || !sceneShader_.IsReady())
     {
         return;
     }
-    const int resolution = shadowQuality_ >= 2 ? 2048 : 1024;
-    if (!EnsureShadowTarget(resolution))
+    // Far shadows cover the draw distance. High also increases far resolution
+    // so extending the coverage does not erase block-sized silhouettes.
+    const std::array<int, SceneShadowParams::kCascadeCount> resolutions = shadowQuality_ >= 2
+        ? std::array<int, SceneShadowParams::kCascadeCount> { 2048, 2048 }
+        : std::array<int, SceneShadowParams::kCascadeCount> { 1024, 1024 };
+    if (!EnsureShadowTargets(resolutions))
     {
         return;
     }
@@ -2207,43 +2262,71 @@ void Renderer::PrepareSunShadows(const World& world, const std::vector<Team>& te
     SyncChunks(world, teams);
     UpdateMapPointLights(world);
 
-    // Ortho volume follows the camera, biased toward the view direction so
-    // most of the texel budget lands where the player is looking.
-    const float radius = shadowQuality_ >= 2 ? 64.0f : 48.0f;
-    const Vector3 forward = Vector3Normalize(Vector3Subtract(camera.target, camera.position));
-    Vector3 focus = Vector3Add(camera.position, Vector3Scale(forward, radius * 0.35f));
-
-    // Snap the window to whole shadow texels in light space; otherwise every
-    // camera move makes block shadow edges shimmer.
-    const float worldPerTexel = (radius * 2.0f) / static_cast<float>(resolution);
     const Vector3 up { 0.0f, 1.0f, 0.0f };
     const Matrix lightRotation = MatrixLookAt(Vector3 { 0.0f, 0.0f, 0.0f }, kSceneSunDirection, up);
-    Vector3 lightSpaceFocus = Vector3Transform(focus, lightRotation);
-    lightSpaceFocus.x = std::floor(lightSpaceFocus.x / worldPerTexel) * worldPerTexel;
-    lightSpaceFocus.y = std::floor(lightSpaceFocus.y / worldPerTexel) * worldPerTexel;
-    focus = Vector3Transform(lightSpaceFocus, MatrixInvert(lightRotation));
+    const Matrix inverseLightRotation = MatrixInvert(lightRotation);
+    sunShadowDistance_ = worldRenderDistance_;
+    const std::array<float, SceneShadowParams::kCascadeCount> radii {
+        shadowQuality_ >= 2 ? 48.0f : 40.0f,
+        sunShadowDistance_ / 0.86f
+    };
+    // Both ends of the blend fit inside the near map's fully covered region.
+    sunShadowSplitDistance_ = std::min(radii[0] * 0.65f, sunShadowDistance_ * 0.4f);
 
-    Camera3D lightCamera {};
-    lightCamera.position = Vector3Subtract(focus, Vector3Scale(kSceneSunDirection, 180.0f));
-    lightCamera.target = focus;
-    lightCamera.up = up;
-    // For CAMERA_ORTHOGRAPHIC raylib treats fovy as the world-space window
-    // height; the square depth target keeps the aspect at 1.
-    lightCamera.fovy = radius * 2.0f;
-    lightCamera.projection = CAMERA_ORTHOGRAPHIC;
+    for (int cascade = 0; cascade < SceneShadowParams::kCascadeCount; ++cascade)
+    {
+        const float radius = radii[cascade];
+        Vector3 focus = camera.position;
+        // Stabilize each cascade independently in light space. Snapping both
+        // axes (including the light-space vertical axis) removes crawling on
+        // floors and walls during camera translation and pitch changes.
+        const float worldPerTexel = (radius * 2.0f) / static_cast<float>(resolutions[cascade]);
+        sunShadowWorldPerTexel_[cascade] = worldPerTexel;
+        Vector3 lightSpaceFocus = Vector3Transform(focus, lightRotation);
+        lightSpaceFocus.x = std::floor(lightSpaceFocus.x / worldPerTexel + 0.5f) * worldPerTexel;
+        lightSpaceFocus.y = std::floor(lightSpaceFocus.y / worldPerTexel + 0.5f) * worldPerTexel;
+        focus = Vector3Transform(lightSpaceFocus, inverseLightRotation);
 
-    BeginTextureMode(shadowTarget_);
-    ClearBackground(WHITE);
-    BeginMode3D(lightCamera);
-    const Matrix lightView = rlGetMatrixModelview();
-    const Matrix lightProjection = rlGetMatrixProjection();
-    // Only depth matters here: color writes land in a framebuffer without a
-    // color attachment, so the default material shader is good enough.
-    chunkRenderer_.Draw(lightCamera, 180.0f + radius * 2.0f, Shader {});
-    EndMode3D();
-    EndTextureMode();
+        Camera3D lightCamera {};
+        const float lightOffset = radius + 128.0f;
+        lightCamera.position = Vector3Subtract(focus, Vector3Scale(kSceneSunDirection, lightOffset));
+        lightCamera.target = focus;
+        lightCamera.up = up;
+        lightCamera.fovy = radius * 2.0f;
+        lightCamera.projection = CAMERA_ORTHOGRAPHIC;
 
-    sunLightViewProj_ = MatrixMultiply(lightView, lightProjection);
+        BeginTextureMode(shadowTargets_[cascade]);
+        ClearBackground(WHITE);
+        BeginMode3D(lightCamera);
+        const Matrix lightView = rlGetMatrixModelview();
+        const Matrix lightProjection = rlGetMatrixProjection();
+        chunkRenderer_.Draw(lightCamera, lightOffset + radius * 2.0f, Shader {});
+        // Actors must cast into both cascades, including the first-person player.
+        for (const Player& player : players)
+        {
+            if (!player.IsAlive()) continue;
+            const Vector3 position = player.GetPosition();
+            if (Vector3Distance(position, focus) > radius + 10.0f) continue;
+            const auto& state = player.GetHeroState();
+            const HeroId casterHero = player.GetHeroId() == HeroId::Likho && state.ultimate.active
+                ? state.likhoDisguiseHeroId : player.GetHeroId();
+            const HeroVisualAsset* visual = heroVisuals_.Find(casterHero);
+            if (visual != nullptr)
+            {
+                heroVisuals_.ApplyAnimation(casterHero, state.animationState,
+                    HeroAnimationFraction(state), static_cast<float>(GetTime()) + player.GetId() * 0.071f);
+                const Vector3 actorForward = player.Forward();
+                const float yaw = std::atan2(actorForward.x, actorForward.z) * 180.0f / kPi + visual->yawOffsetDegrees;
+                Vector3 scale = visual->scale;
+                if (player.IsSneaking()) scale.y *= 0.92f;
+                DrawModelEx(visual->model, Vector3Add(position, visual->offset), Vector3 { 0, 1, 0 }, yaw, scale, WHITE);
+            }
+            else DrawCube(position, 0.6f, 1.8f, 0.6f, WHITE);
+        }
+        EndMode3D();
+        EndTextureMode();
+        sunLightViewProj_[cascade] = MatrixMultiply(lightView, lightProjection);
+    }
     sunShadowsValid_ = true;
 }
 
@@ -2303,7 +2386,7 @@ void Renderer::RenderHeroPreview(HeroId heroId, Rectangle destination, float yaw
     BeginTextureMode(heroPreviewTarget_);
     ClearBackground(Color { 7, 9, 14, 255 });
     BeginMode3D(previewCamera);
-    const Color heroColor = HeroUiColor(heroId);
+    const Color heroColor = VisualTheme::HeroAccent(heroId);
     if (!portrait)
     {
         const Vector3 podiumCenter { center.x, bounds.min.y - 0.15f, center.z };
@@ -2362,6 +2445,7 @@ void Renderer::RenderScene(
     const std::vector<FloatingText>& floatingTexts,
     const Camera3D& camera,
     const ItemStack& localHeldItem,
+    const FirstPersonMotionPose& firstPersonPose,
     Color skyColor,
     bool hideLocalPlayer) const
 {
@@ -2392,10 +2476,14 @@ void Renderer::RenderScene(
     SyncChunks(world, teams);
     UpdateMapPointLights(world);
 
+    sceneShader_.UpdateVoxelLighting(world, camera,
+        [this, &teams](const Block& block) { return GetBlockColor(block, teams); });
+
     BeginMode3D(camera);
 
+    const bool atmosphericSky = sceneShader_.DrawSky(camera, skyColor);
     DrawSkyVoid(skyColor, camera.position.y);
-    for (int i = 0; i < 10; ++i)
+    for (int i = 0; !atmosphericSky && i < 10; ++i)
     {
         const float x = -44.0f + static_cast<float>((i * 17) % 88);
         const float z = -38.0f + static_cast<float>((i * 29) % 76);
@@ -2407,18 +2495,99 @@ void Renderer::RenderScene(
 
     SceneShadowParams shadowParams {};
     const SceneShadowParams* activeShadow = nullptr;
-    if (sunShadowsValid_ && shadowQuality_ > 0 && shadowTarget_.depth.id != 0)
+    if (sunShadowsValid_ && shadowQuality_ > 0
+        && shadowTargets_[0].depth.id != 0
+        && shadowTargets_[1].depth.id != 0)
     {
         shadowParams.lightViewProj = sunLightViewProj_;
-        shadowParams.depthTextureId = shadowTarget_.depth.id;
-        shadowParams.texelSize = 1.0f / static_cast<float>(shadowResolution_);
+        for (int cascade = 0; cascade < SceneShadowParams::kCascadeCount; ++cascade)
+        {
+            shadowParams.depthTextureId[cascade] = shadowTargets_[cascade].depth.id;
+            shadowParams.texelSize[cascade] = 1.0f / static_cast<float>(shadowResolutions_[cascade]);
+            shadowParams.worldPerTexel[cascade] = sunShadowWorldPerTexel_[cascade];
+        }
         shadowParams.strength = shadowQuality_ >= 2 ? 0.72f : 0.62f;
-        shadowParams.distance = std::min(100.0f, worldRenderDistance_);
+        shadowParams.splitDistance = sunShadowSplitDistance_;
+        shadowParams.distance = sunShadowDistance_;
         shadowParams.widePcf = shadowQuality_ >= 2;
         activeShadow = &shadowParams;
     }
+
+    std::vector<ScenePointLight> dynamicLights;
+    dynamicLights.reserve(cores.size() + generators.size() + heroDevices.size()
+        + projectiles.size() + worldEffects.size() + explosives.size());
+    for (const EnergyCore& core : cores)
+    {
+        if (!core.IsAlive()) continue;
+        const Team* team = FindTeam(teams, core.GetTeamId());
+        const Color color = team != nullptr ? GetTeamColor(team->color) : Color { 112, 232, 255, 255 };
+        const Vector3 center = world.GridToWorld(core.GetBlockPosition());
+        dynamicLights.push_back(ScenePointLight {
+            Vector3 { center.x, center.y + 0.28f, center.z }, color, 7.5f, 1.05f });
+    }
+    for (const Generator& generator : generators)
+    {
+        Color color = GetResourceColor(generator.GetType());
+        const Vector3 position = ToVector3(generator.GetPosition());
+        dynamicLights.push_back(ScenePointLight {
+            Vector3 { position.x, position.y + 0.48f, position.z }, color, 4.2f, 0.48f });
+    }
+    for (const HeroDeviceVisual& device : heroDevices)
+    {
+        const Team* team = FindTeam(teams, device.teamId);
+        Color color = team != nullptr ? GetTeamColor(team->color) : Color { 112, 232, 255, 255 };
+        if (device.kind == HeroDeviceVisualKind::KonvoyTrap
+            || device.kind == HeroDeviceVisualKind::KonvoyTether)
+        {
+            color = Color { 255, 204, 92, 255 };
+        }
+        dynamicLights.push_back(ScenePointLight {
+            Vector3 { device.position.x, device.position.y + 0.38f, device.position.z },
+            color, device.active ? 6.2f : 4.0f, device.active ? 0.92f : 0.46f });
+    }
+    for (const EnergyProjectile& projectile : projectiles)
+    {
+        if (projectile.kind == ProjectileKind::Fireball || projectile.kind == ProjectileKind::Molotov)
+        {
+            dynamicLights.push_back(ScenePointLight { projectile.position,
+                projectile.blueFire ? Color { 86, 176, 255, 255 } : Color { 255, 112, 52, 255 },
+                5.5f, 1.05f });
+        }
+        else if (projectile.kind == ProjectileKind::Blaster)
+        {
+            dynamicLights.push_back(ScenePointLight {
+                projectile.position, Color { 92, 238, 255, 255 }, 4.0f, 0.82f });
+        }
+    }
+    for (const TimedExplosion& explosive : explosives)
+    {
+        dynamicLights.push_back(ScenePointLight {
+            explosive.position, Color { 255, 126, 56, 255 }, 4.8f,
+            explosive.timer < 0.8f ? 1.1f : 0.46f });
+    }
+    for (const WorldEffect& effect : worldEffects)
+    {
+        if (effect.kind == WorldEffectKind::FireZone
+            || effect.kind == WorldEffectKind::CorePulse
+            || effect.color.g > effect.color.r + 20)
+        {
+            const float remaining = 1.0f - std::clamp(effect.age / std::max(0.01f, effect.lifetime), 0.0f, 1.0f);
+            dynamicLights.push_back(ScenePointLight {
+                Vector3 { effect.position.x, effect.position.y + 0.25f, effect.position.z },
+                effect.color, std::clamp(effect.radius * 2.3f, 3.0f, 8.0f), 0.35f + remaining * 0.78f });
+        }
+    }
+    std::vector<ParticleGlowLight> particleGlowLights;
+    particles.AppendGlowLights(particleGlowLights);
+    for (const ParticleGlowLight& light : particleGlowLights)
+    {
+        dynamicLights.push_back(ScenePointLight {
+            light.position, light.color, light.radius, light.intensity });
+    }
     sceneShader_.Begin(camera, skyColor, 0.0045f, worldRenderDistance_, activeShadow);
-    SetNearestMapPointLights(camera);
+    sceneShader_.SetAmbientOcclusionQuality(ambientOcclusionQuality_);
+    sceneShader_.SetEmissiveStrength(0.0f);
+    SetNearestPointLights(camera, dynamicLights);
     // Baked AO and normal maps exist only on chunk meshes; the gates must
     // close again before players/devices/transparent blocks hit the batch.
     sceneShader_.SetChunkPassFeatures(true);
@@ -2444,8 +2613,11 @@ void Renderer::RenderScene(
     for (const Generator& generator : generators)
     {
         const Vector3 pos = ToVector3(generator.GetPosition());
+        DrawSoftContactShadow(Vector3 { pos.x, pos.y - 0.01f, pos.z }, 0.56f, 0.24f, shadowQuality_);
+        sceneShader_.SetEmissiveStrength(0.42f);
         DrawCube(Vector3 { pos.x, pos.y + 0.18f, pos.z }, 0.85f, 0.35f, 0.85f, GetResourceColor(generator.GetType()));
         DrawSphere(Vector3 { pos.x, pos.y + 0.62f, pos.z }, 0.24f, WHITE);
+        sceneShader_.SetEmissiveStrength(0.0f);
     }
 
     for (const EnergyCore& core : cores)
@@ -2473,6 +2645,9 @@ void Renderer::RenderScene(
         const float healthFraction = static_cast<float>(core.GetHealth()) / static_cast<float>(std::max(1, core.GetMaxHealth()));
         const float stageScale = 0.72f + healthFraction * 0.28f;
         const Vector3 coreCenter { pos.x, pos.y - 0.06f, pos.z };
+        DrawSoftContactShadow(Vector3 { pos.x, pos.y - 0.49f, pos.z },
+            0.72f * stageScale, 0.34f, shadowQuality_);
+        sceneShader_.SetEmissiveStrength(1.0f);
         DrawCube(coreCenter, 0.92f * stageScale, 0.78f * stageScale, 0.92f * stageScale, Fade(teamColor, 0.70f + healthFraction * 0.22f));
         DrawSphere(Vector3 { pos.x, pos.y + 0.40f * stageScale, pos.z }, 0.18f + 0.08f * healthFraction, Color { 178, 245, 255, 255 });
         DrawCubeWires(coreCenter, 0.96f * stageScale, 0.82f * stageScale, 0.96f * stageScale, WHITE);
@@ -2492,6 +2667,7 @@ void Renderer::RenderScene(
                 Vector3 { pos.x + side, pos.y + 0.52f + static_cast<float>(i % 2) * 0.12f, pos.z + z + 0.18f },
                 Color { 20, 24, 32, 230 });
         }
+        sceneShader_.SetEmissiveStrength(0.0f);
     }
 
     for (const Player& player : players)
@@ -2521,16 +2697,10 @@ void Renderer::RenderScene(
         Color color = baseColor;
         const bool enemy = localTeamId >= 0 && player.GetTeamId() != localTeamId;
         const Vector3 pos = player.GetPosition();
-        if (shadowQuality_ > 0 && player.IsOnGround())
+        if (player.IsOnGround())
         {
-            const int segments = shadowQuality_ > 1 ? 28 : 14;
-            DrawCylinder(
-                Vector3 { pos.x, pos.y - 0.875f, pos.z },
-                0.46f,
-                0.46f,
-                0.018f,
-                segments,
-                Fade(BLACK, shadowQuality_ > 1 ? 0.25f : 0.17f));
+            DrawSoftContactShadow(Vector3 { pos.x, pos.y - 0.89f, pos.z },
+                0.50f, dying ? 0.15f : 0.34f, shadowQuality_);
         }
         const bool radon = player.GetHeroId() == HeroId::Radon;
         const bool orbita = player.GetHeroId() == HeroId::Orbita;
@@ -2588,18 +2758,18 @@ void Renderer::RenderScene(
         }
         if (player.GetHeroId() == HeroId::Likho && heroState.ultimate.active)
         {
-            color = MixColor(color, HeroUiColor(HeroId::Likho), 0.18f + 0.10f * std::sin(static_cast<float>(GetTime()) * 13.0f));
+            color = MixColor(color, VisualTheme::HeroAccent(HeroId::Likho), 0.18f + 0.10f * std::sin(static_cast<float>(GetTime()) * 13.0f));
         }
         if (svidetelContours && enemy)
         {
             const bool distorted = player.GetHeroId() == HeroId::Likho && heroState.ultimate.active;
             rlDisableDepthTest();
-            DrawSphereWires(Vector3 { pos.x, pos.y + 0.25f, pos.z }, 1.15f, 10, 16, Fade(HeroUiColor(HeroId::Svidetel), distorted ? 0.58f : 0.86f));
+            DrawSphereWires(Vector3 { pos.x, pos.y + 0.25f, pos.z }, 1.15f, 10, 16, Fade(VisualTheme::HeroAccent(HeroId::Svidetel), distorted ? 0.58f : 0.86f));
             if (distorted)
             {
                 const float jitter = 0.10f + 0.05f * std::sin(static_cast<float>(GetTime()) * 17.0f);
                 DrawSphereWires(Vector3 { pos.x + jitter, pos.y + 0.32f, pos.z - jitter }, 1.08f, 8, 13, Fade(Color { 255, 92, 210, 255 }, 0.48f));
-                DrawSphereWires(Vector3 { pos.x - jitter, pos.y + 0.18f, pos.z + jitter }, 1.22f, 7, 11, Fade(HeroUiColor(HeroId::Likho), 0.42f));
+                DrawSphereWires(Vector3 { pos.x - jitter, pos.y + 0.18f, pos.z + jitter }, 1.22f, 7, 11, Fade(VisualTheme::HeroAccent(HeroId::Likho), 0.42f));
             }
             rlEnableDepthTest();
         }
@@ -2810,7 +2980,7 @@ void Renderer::RenderScene(
         }
         if (orbita)
         {
-            const Color orbitaColor = HeroUiColor(HeroId::Orbita);
+            const Color orbitaColor = VisualTheme::HeroAccent(HeroId::Orbita);
             const float pulseFraction = std::clamp(heroState.orbitaPulseTimer / 3.0f, 0.0f, 1.0f);
             if (pulseFraction > 0.0f || IsAbilityCastAnimation(heroState.animationState))
             {
@@ -2896,11 +3066,16 @@ void Renderer::RenderScene(
             camera.target.y - camera.position.y,
             camera.target.z - camera.position.z
         });
-        const Vector3 cameraRight = Normalize(Cross(handForward, camera.up));
-        const Vector3 cameraUp = Normalize(Cross(cameraRight, handForward));
+        const Vector3 baseRight = Normalize(Cross(handForward, camera.up));
+        const Vector3 baseUp = Normalize(Cross(baseRight, handForward));
+        const float roll = firstPersonPose.viewmodelRollDegrees * DEG2RAD;
+        const Vector3 cameraRight = Add(Scale(baseRight, std::cos(roll)), Scale(baseUp, std::sin(roll)));
+        const Vector3 cameraUp = Add(Scale(baseUp, std::cos(roll)), Scale(baseRight, -std::sin(roll)));
         const Vector3 hand = Add(
-            Add(camera.position, Scale(handForward, 0.52f)),
-            Add(Scale(cameraRight, 0.44f), Scale(cameraUp, -0.34f)));
+            Add(camera.position, Scale(handForward, 0.52f + firstPersonPose.viewmodelOffset.z)),
+            Add(
+                Scale(cameraRight, 0.44f + firstPersonPose.viewmodelOffset.x),
+                Scale(cameraUp, -0.34f + firstPersonPose.viewmodelOffset.y)));
         const std::optional<BlockType> block = ItemToBlock(localHeldItem.type);
         const Texture2D* blockTexture = block.has_value() ? GetBlockTexture(*block) : nullptr;
         Color itemTint = ItemUiColor(localHeldItem.type);
@@ -2945,8 +3120,11 @@ void Renderer::RenderScene(
             const Vector3 cameraUp = Normalize(Cross(cameraRight, heroForward));
             const float anim = HeroAnimationFraction(heroState);
             const Color radonColor = heroState.radonOverloaded ? Color { 255, 118, 70, 255 } : Color { 92, 164, 255, 255 };
-            const Vector3 leftHand = Add(Add(camera.position, Scale(heroForward, 0.58f + anim * 0.12f)), Add(Scale(cameraRight, -0.32f), Scale(cameraUp, -0.30f)));
-            const Vector3 rightHand = Add(Add(camera.position, Scale(heroForward, 0.58f + anim * 0.12f)), Add(Scale(cameraRight, 0.32f), Scale(cameraUp, -0.30f)));
+            const Vector3 motionOffset = Add(
+                Scale(cameraRight, firstPersonPose.viewmodelOffset.x),
+                Add(Scale(cameraUp, firstPersonPose.viewmodelOffset.y), Scale(heroForward, firstPersonPose.viewmodelOffset.z)));
+            const Vector3 leftHand = Add(Add(Add(camera.position, motionOffset), Scale(heroForward, 0.58f + anim * 0.12f)), Add(Scale(cameraRight, -0.32f), Scale(cameraUp, -0.30f)));
+            const Vector3 rightHand = Add(Add(Add(camera.position, motionOffset), Scale(heroForward, 0.58f + anim * 0.12f)), Add(Scale(cameraRight, 0.32f), Scale(cameraUp, -0.30f)));
             const float pulse = 0.09f + 0.05f * std::sin(static_cast<float>(GetTime()) * 12.0f);
             DrawSphere(leftHand, pulse, Fade(radonColor, 0.62f));
             DrawSphere(rightHand, pulse, Fade(radonColor, 0.62f));
@@ -2970,9 +3148,12 @@ void Renderer::RenderScene(
             const Vector3 cameraUp = Normalize(Cross(cameraRight, heroForward));
             const float anim = HeroAnimationFraction(heroState);
             const float pulse = std::clamp(heroState.orbitaPulseTimer / 3.0f, 0.0f, 1.0f);
-            const Color orbitaColor = HeroUiColor(HeroId::Orbita);
-            const Vector3 leftHand = Add(Add(camera.position, Scale(heroForward, 0.62f + anim * 0.10f)), Add(Scale(cameraRight, -0.34f), Scale(cameraUp, -0.30f)));
-            const Vector3 rightHand = Add(Add(camera.position, Scale(heroForward, 0.62f + anim * 0.10f)), Add(Scale(cameraRight, 0.34f), Scale(cameraUp, -0.30f)));
+            const Color orbitaColor = VisualTheme::HeroAccent(HeroId::Orbita);
+            const Vector3 motionOffset = Add(
+                Scale(cameraRight, firstPersonPose.viewmodelOffset.x),
+                Add(Scale(cameraUp, firstPersonPose.viewmodelOffset.y), Scale(heroForward, firstPersonPose.viewmodelOffset.z)));
+            const Vector3 leftHand = Add(Add(Add(camera.position, motionOffset), Scale(heroForward, 0.62f + anim * 0.10f)), Add(Scale(cameraRight, -0.34f), Scale(cameraUp, -0.30f)));
+            const Vector3 rightHand = Add(Add(Add(camera.position, motionOffset), Scale(heroForward, 0.62f + anim * 0.10f)), Add(Scale(cameraRight, 0.34f), Scale(cameraUp, -0.30f)));
             DrawSphere(leftHand, 0.08f + pulse * 0.06f, Fade(WHITE, 0.72f));
             DrawSphere(rightHand, 0.08f + pulse * 0.06f, Fade(orbitaColor, 0.70f));
             DrawLine3D(leftHand, Add(leftHand, Scale(heroForward, 0.72f + pulse * 0.36f)), Fade(WHITE, 0.74f));
@@ -2982,7 +3163,11 @@ void Renderer::RenderScene(
 
     for (const HeroDeviceVisual& device : heroDevices)
     {
+        DrawSoftContactShadow(Vector3 { device.position.x, device.position.y - 0.02f, device.position.z },
+            std::clamp(device.radius * 0.42f, 0.34f, 0.90f), 0.30f, shadowQuality_);
+        sceneShader_.SetEmissiveStrength(device.active ? 0.82f : 0.44f);
         DrawHeroDeviceVisual(device, localTeamId);
+        sceneShader_.SetEmissiveStrength(0.0f);
     }
     DrawOrbitaTeleportPreview(orbitaTeleportPreview);
 
@@ -3037,13 +3222,17 @@ void Renderer::RenderScene(
 
     for (const TimedExplosion& explosive : explosives)
     {
+        DrawSoftContactShadow(Vector3 { explosive.position.x, explosive.position.y - 0.47f, explosive.position.z },
+            0.58f, 0.30f, shadowQuality_);
         const bool flashing = explosive.timer < 0.8f;
         const float flash = flashing ? 0.58f + 0.42f * std::sin(static_cast<float>(GetTime()) * 20.0f) : 1.0f;
+        sceneShader_.SetEmissiveStrength(flashing ? 0.72f : 0.12f);
         DrawCube(explosive.position, 0.90f, 0.90f, 0.90f, Fade(Color { 212, 52, 44, 255 }, flash));
         DrawCube(Vector3 { explosive.position.x, explosive.position.y, explosive.position.z - 0.456f },
             0.68f, 0.18f, 0.012f, Fade(WHITE, flash));
         DrawCubeWires(explosive.position, 0.94f, 0.94f, 0.94f,
             flashing ? Fade(Color { 255, 224, 122, 255 }, flash) : Fade(BLACK, 0.68f));
+        sceneShader_.SetEmissiveStrength(0.0f);
     }
 
     if (placementPreview.visible && placementPreview.valid)
@@ -3052,11 +3241,16 @@ void Renderer::RenderScene(
         DrawCubeWires(previewCenter, 1.04f, 1.04f, 1.04f, BLACK);
     }
 
+    sceneShader_.SetEmissiveStrength(0.92f);
     for (const WorldEffect& effect : worldEffects)
     {
         DrawRadonPresentationEffect(effect);
     }
-    particles.Draw();
+    sceneShader_.SetEmissiveStrength(0.0f);
+    particles.Draw(false);
+    sceneShader_.SetEmissiveStrength(0.90f);
+    particles.Draw(true);
+    sceneShader_.SetEmissiveStrength(0.0f);
 
     rlDrawRenderBatchActive();
     rlEnableDepthTest();
@@ -3073,13 +3267,25 @@ void Renderer::RenderScene(
     // keeps fast arrows and energy bolts readable even at high frame rates.
     for (const EnergyProjectile& projectile : projectiles)
     {
+        sceneShader_.SetEmissiveStrength(
+            projectile.kind == ProjectileKind::Arrow ? (projectile.critical ? 0.28f : 0.0f) : 0.95f);
         const Vector3 direction = Normalize(projectile.velocity);
         if (projectile.kind == ProjectileKind::Arrow)
         {
+            const Color shaftColor = projectile.arrowVariant == ArrowVariant::Breacher
+                ? Color { 255, 194, 86, 255 }
+                : (projectile.arrowVariant == ArrowVariant::Impulse
+                    ? Color { 186, 126, 255, 255 }
+                    : Color { 206, 245, 255, 255 });
+            const Color headColor = projectile.arrowVariant == ArrowVariant::Breacher
+                ? Color { 255, 232, 154, 255 }
+                : (projectile.arrowVariant == ArrowVariant::Impulse
+                    ? Color { 228, 194, 255, 255 }
+                    : Color { 230, 255, 255, 255 });
             const Vector3 tail = Add(projectile.position, Scale(direction, -2.20f));
-            DrawCylinderEx(tail, projectile.position, 0.070f, 0.025f, 8, Color { 206, 245, 255, 255 });
-            DrawSphere(projectile.position, 0.13f, Color { 230, 255, 255, 255 });
-            DrawLine3D(Add(tail, Vector3 { 0.0f, 0.12f, 0.0f }), projectile.position, Color { 112, 232, 255, 255 });
+            DrawCylinderEx(tail, projectile.position, 0.070f, 0.025f, 8, shaftColor);
+            DrawSphere(projectile.position, 0.13f, headColor);
+            DrawLine3D(Add(tail, Vector3 { 0.0f, 0.12f, 0.0f }), projectile.position, shaftColor);
             if (projectile.critical)
             {
                 DrawSphereWires(projectile.position, 0.18f, 5, 7, Color { 255, 226, 96, 235 });
@@ -3113,6 +3319,8 @@ void Renderer::RenderScene(
         }
     }
 
+    sceneShader_.SetEmissiveStrength(0.0f);
+
     sceneShader_.End();
     EndMode3D();
 
@@ -3140,7 +3348,13 @@ void Renderer::RenderScene(
             continue;
         }
         const bool blaster = projectile.kind == ProjectileKind::Blaster;
-        const Color glow = blaster ? Color { 98, 245, 255, 255 } : Color { 178, 245, 255, 255 };
+        const Color glow = blaster
+            ? Color { 98, 245, 255, 255 }
+            : (projectile.arrowVariant == ArrowVariant::Breacher
+                ? Color { 255, 194, 86, 255 }
+                : (projectile.arrowVariant == ArrowVariant::Impulse
+                    ? Color { 186, 126, 255, 255 }
+                    : Color { 178, 245, 255, 255 }));
         DrawLineEx(tail, head, blaster ? 7.0f : 4.0f, Fade(glow, 0.34f));
         DrawLineEx(tail, head, blaster ? 3.0f : 1.7f, glow);
         DrawCircleV(head, blaster ? 7.0f : 4.0f, Fade(WHITE, 0.92f));
@@ -3287,6 +3501,8 @@ void Renderer::RenderUI(
     int shopCategoryIndex,
     const Shop& shop,
     const std::string& message,
+    bool chatInputOpen,
+    const std::string& chatInput,
     const PlacementPreview& placementPreview,
     const BreakProgress& breakProgress,
     const CombatPreview& combatPreview,
@@ -3296,7 +3512,7 @@ void Renderer::RenderUI(
     int inventoryCursorSlot,
     const ItemStack& heldInventoryStack,
     const char* cameraModeText,
-    const std::vector<EventMessage>& eventMessages,
+    const std::vector<EventMessage>& chatMessages,
     const MatchStats& stats,
     float hitMarkerTimer,
     float damageFlashTimer,
@@ -3311,22 +3527,12 @@ void Renderer::RenderUI(
     const Team* playerTeam = FindTeam(teams, localPlayer.GetTeamId());
     const Inventory& inventory = localPlayer.GetInventory();
     (void)cameraModeText;
+    (void)inShopZone;
+    (void)message;
 
     if (damageFlashTimer > 0.0f)
     {
         DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Fade(RED, std::min(0.28f, damageFlashTimer * 0.28f)));
-    }
-
-    DrawRectangle(14, GetScreenHeight() - 106, 500, 82, Fade(Color { 8, 10, 14, 255 }, 0.62f));
-    DrawRectangleLines(14, GetScreenHeight() - 106, 500, 82, Fade(WHITE, 0.16f));
-    DrawText(message.c_str(), 28, GetScreenHeight() - 92, 20, Color { 245, 218, 112, 255 });
-    if (placementPreview.visible && !placementPreview.reason.empty())
-    {
-        DrawText(placementPreview.reason.c_str(), 28, GetScreenHeight() - 66, 18, placementPreview.valid ? Color { 88, 242, 150, 255 } : Color { 255, 118, 118, 255 });
-    }
-    if (inShopZone)
-    {
-        DrawText("Зона магазина: R", 28, GetScreenHeight() - 40, 18, Color { 125, 230, 255, 255 });
     }
 
     if (shopOpen)
@@ -3496,7 +3702,12 @@ void Renderer::RenderUI(
         Color itemColor = ItemUiColor(stack.type);
         if (block.has_value())
         {
-            itemColor = GetBlockColor(Block { *block, localPlayer.GetTeamId(), true }, teams);
+            const int variant = stack.type == ItemType::LightBlock
+                    && localPlayer.GetSelectedWoolVariant() >= 0
+                ? 16 + localPlayer.GetSelectedWoolVariant()
+                : 0;
+            itemColor = GetBlockColor(
+                Block { *block, localPlayer.GetTeamId(), true, variant }, teams);
         }
 
         if (const Texture2D* texture = GetItemTexture(stack.type))
@@ -3529,15 +3740,63 @@ void Renderer::RenderUI(
     const int hotbarX = centerX - hotbarWidth / 2;
     const int hotbarY = GetScreenHeight() - 96;
     const float healthFraction = static_cast<float>(localPlayer.GetHealth()) / static_cast<float>(std::max(1, localPlayer.GetMaxHealth()));
+    const int hudRowHeight = 50;
+    const int hudRowY = hotbarY;
     const int hpWidth = hotbarWidth;
-    const int hpHeight = 19;
-    const int hpY = hotbarY - 31;
+    const int hpHeight = 27;
+    const int hpY = hotbarY - hpHeight - 10;
     const Rectangle hpBar {
         static_cast<float>(centerX - hpWidth / 2),
         static_cast<float>(hpY),
         static_cast<float>(hpWidth),
         static_cast<float>(hpHeight)
     };
+    const int hpX = static_cast<int>(hpBar.x);
+    const int hudColumnGap = 10;
+    const int chatPanelX = 14;
+    const int chatPanelWidth = std::max(0, hpX - hudColumnGap - chatPanelX);
+    const int abilityPanelX = hpX + hpWidth + hudColumnGap;
+    const int abilityPanelWidth = std::max(0, GetScreenWidth() - abilityPanelX - 14);
+
+    struct HudMessageLine { std::string text; Color color; };
+    std::vector<HudMessageLine> hudLines;
+    for (const EventMessage& event : chatMessages)
+    {
+        const float remaining = 1.0f - std::clamp(
+            event.age / std::max(0.001f, event.lifetime), 0.0f, 1.0f);
+        hudLines.push_back(HudMessageLine { event.text, Fade(event.color, 0.55f + remaining * 0.45f) });
+    }
+    const bool showChatPanel = chatInputOpen || !hudLines.empty();
+    if (showChatPanel && chatPanelWidth >= 80)
+    {
+        DrawRectangle(chatPanelX, hudRowY, chatPanelWidth, hudRowHeight,
+            Fade(Color { 8, 10, 14, 255 }, chatInputOpen ? 0.84f : 0.62f));
+        DrawRectangleLines(chatPanelX, hudRowY, chatPanelWidth, hudRowHeight,
+            Fade(chatInputOpen ? VisualTheme::Palette::Energy : WHITE, chatInputOpen ? 0.72f : 0.16f));
+        BeginScissorMode(chatPanelX + 8, hudRowY + 4, chatPanelWidth - 16, hudRowHeight - 8);
+        if (chatInputOpen)
+        {
+            if (!hudLines.empty())
+            {
+                const HudMessageLine& previous = hudLines.back();
+                DrawText(previous.text.c_str(), chatPanelX + 10, hudRowY + 5, 14, Fade(previous.color, 0.62f));
+            }
+            const bool cursorVisible = std::fmod(static_cast<float>(GetTime()), 1.0f) < 0.56f;
+            const std::string inputLine = "> " + chatInput + (cursorVisible ? "_" : "");
+            DrawText(inputLine.c_str(), chatPanelX + 10, hudRowY + 27, 16, WHITE);
+        }
+        else
+        {
+            const int firstLine = std::max(0, static_cast<int>(hudLines.size()) - 2);
+            int lineY = hudRowY + 7;
+            for (int i = firstLine; i < static_cast<int>(hudLines.size()); ++i)
+            {
+                DrawText(hudLines[i].text.c_str(), chatPanelX + 10, lineY, 15, hudLines[i].color);
+                lineY += 20;
+            }
+        }
+        EndScissorMode();
+    }
     DrawBar(
         hpBar,
         healthFraction,
@@ -3566,37 +3825,80 @@ void Renderer::RenderUI(
         }
     }
     const std::string hpText = std::to_string(localPlayer.GetHealth()) + "/" + std::to_string(localPlayer.GetMaxHealth());
-    DrawText(hpText.c_str(), centerX - MeasureText(hpText.c_str(), 16) / 2, hpY + 2, 16, WHITE);
+    constexpr int hpFontSize = 16;
+    const int hpTextX = static_cast<int>(hpBar.x)
+        + (static_cast<int>(hpBar.width) - MeasureText(hpText.c_str(), hpFontSize)) / 2;
+    const int hpTextY = static_cast<int>(hpBar.y)
+        + (static_cast<int>(hpBar.height) - hpFontSize) / 2;
+    DrawText(hpText.c_str(), hpTextX, hpTextY, hpFontSize, WHITE);
     const auto& hotbar = inventory.GetHotbarSlots();
     for (int i = 0; i < kHotbarSlotCount; ++i)
     {
         const int x = hotbarX + i * (slotSize + gap);
         drawSlot(hotbar[i], x, hotbarY, slotSize, i == selectedHotbarSlot, inventoryOpen && inventoryCursorSlot == i);
     }
+    const std::string currency = "Fe " + std::to_string(inventory.GetResource(ResourceType::Iron))
+        + "   Au " + std::to_string(inventory.GetResource(ResourceType::Gold))
+        + "   Cr " + std::to_string(inventory.GetResource(ResourceType::Crystal));
+    DrawText(currency.c_str(), hotbarX, hotbarY + slotSize + 7, 15, Fade(WHITE, 0.82f));
+    if (selectedHotbarSlot >= 0 && selectedHotbarSlot < kHotbarSlotCount)
+    {
+        const ItemStack& selected = hotbar[selectedHotbarSlot];
+        std::string variantStatus;
+        Color variantColor = Fade(WHITE, 0.82f);
+        if (selected.type == ItemType::Bow)
+        {
+            const ArrowVariant variant = localPlayer.GetArrowVariant();
+            const float reload = localPlayer.GetArrowReloadTimer(variant);
+            variantStatus = std::string(ArrowVariantName(variant)) + " "
+                + std::to_string(localPlayer.GetArrowAmmo(variant)) + "/"
+                + std::to_string(ArrowQuiverCapacity(variant));
+            if (reload > 0.0f)
+            {
+                variantStatus += " · " + FormatTenths(reload) + " с";
+            }
+            variantColor = variant == ArrowVariant::Breacher
+                ? Color { 255, 194, 86, 255 }
+                : (variant == ArrowVariant::Impulse
+                    ? Color { 186, 126, 255, 255 }
+                    : Color { 178, 245, 255, 255 });
+        }
+        else if (selected.type == ItemType::LightBlock)
+        {
+            variantStatus = "Шерсть: цвет "
+                + std::to_string(std::max(0, localPlayer.GetSelectedWoolVariant()) + 1)
+                + "/16";
+        }
+        if (!variantStatus.empty())
+        {
+            DrawText(variantStatus.c_str(),
+                hotbarX + hotbarWidth - MeasureText(variantStatus.c_str(), 15),
+                hotbarY + slotSize + 7, 15, variantColor);
+        }
+    }
 
     const HeroDefinition& hero = HeroSystem::GetDefinition(localPlayer.GetHeroId());
     const HeroRuntimeState& heroState = localPlayer.GetHeroState();
-    const Color heroColor = HeroUiColor(hero.id);
-    const int abilityPanelWidth = 360;
-    const int abilityPanelHeight = 64;
-    const int abilityPanelX = GetScreenWidth() - abilityPanelWidth - 18;
-    const int abilityPanelY = hotbarY - abilityPanelHeight - 12;
-    DrawRectangle(abilityPanelX, abilityPanelY, abilityPanelWidth, abilityPanelHeight, Fade(Color { 8, 10, 14, 255 }, 0.66f));
-    DrawRectangleLines(abilityPanelX, abilityPanelY, abilityPanelWidth, abilityPanelHeight, Fade(WHITE, 0.16f));
-    DrawText(hero.name.c_str(), abilityPanelX + 12, abilityPanelY + 8, 18, heroColor);
-
-    const auto drawAbility = [abilityPanelY, heroColor](const char* key, const char* label, const std::string& stateText, int x)
+    const Color heroColor = VisualTheme::HeroAccent(hero.id);
+    const int abilityGap = 6;
+    const int abilityCardWidth = (abilityPanelWidth - abilityGap * 2) / 3;
+    const int abilityLabelSize = abilityCardWidth < 105 ? 10 : 12;
+    const auto drawAbility = [hudRowY, hudRowHeight, heroColor, abilityCardWidth, abilityLabelSize](
+        const char* key, const char* label, const std::string& stateText, int x)
     {
-        DrawRectangle(x, abilityPanelY + 26, 106, 32, Fade(Color { 18, 21, 29, 255 }, 0.74f));
-        DrawRectangleLines(x, abilityPanelY + 26, 106, 32, Fade(heroColor, 0.36f));
-        DrawText(key, x + 7, abilityPanelY + 32, 15, heroColor);
-        DrawText(label, x + 28, abilityPanelY + 30, 11, Fade(WHITE, 0.82f));
-        DrawText(stateText.c_str(), x + 28, abilityPanelY + 44, 10, Fade(WHITE, 0.62f));
+        DrawRectangle(x, hudRowY, abilityCardWidth, hudRowHeight, Fade(Color { 12, 15, 21, 255 }, 0.70f));
+        DrawRectangleLines(x, hudRowY, abilityCardWidth, hudRowHeight, Fade(heroColor, 0.36f));
+        DrawText(key, x + 6, hudRowY + 8, 15, heroColor);
+        DrawText(label, x + 27, hudRowY + 6, abilityLabelSize, Fade(WHITE, 0.92f));
+        DrawText(stateText.c_str(), x + 27, hudRowY + 27, 11, Fade(WHITE, 0.64f));
     };
-    const int abilityX = abilityPanelX + 12;
-    drawAbility(heroActive1KeyText, "Активка 1", AbilityStateText(heroState.active1, false, heroState.ultimateCharge, false), abilityX);
-    drawAbility(heroActive2KeyText, "Активка 2", AbilityStateText(heroState.active2, false, heroState.ultimateCharge, false), abilityX + 116);
-    drawAbility(heroUltimateKeyText, "Ульта", AbilityStateText(heroState.ultimate, true, heroState.ultimateCharge, heroState.ultimatePrimed), abilityX + 232);
+    const int abilityX = abilityPanelX;
+    drawAbility(heroActive1KeyText, AbilityHudLabel(hero.id, HeroAbilitySlot::Active1),
+        AbilityStateText(heroState.active1, false, heroState.ultimateCharge, false), abilityX);
+    drawAbility(heroActive2KeyText, AbilityHudLabel(hero.id, HeroAbilitySlot::Active2),
+        AbilityStateText(heroState.active2, false, heroState.ultimateCharge, false), abilityX + abilityCardWidth + abilityGap);
+    drawAbility(heroUltimateKeyText, AbilityHudLabel(hero.id, HeroAbilitySlot::Ultimate),
+        AbilityStateText(heroState.ultimate, true, heroState.ultimateCharge, heroState.ultimatePrimed), abilityX + (abilityCardWidth + abilityGap) * 2);
 
     if (inventoryOpen)
     {
@@ -3635,17 +3937,6 @@ void Renderer::RenderUI(
             const Vector2 mouse = GetMousePosition();
             drawSlot(heldInventoryStack, static_cast<int>(mouse.x) + 12, static_cast<int>(mouse.y) + 12, slotSize, false, true);
         }
-    }
-
-    int feedY = 18;
-    for (const EventMessage& event : eventMessages)
-    {
-        const float t = 1.0f - std::clamp(event.age / std::max(0.001f, event.lifetime), 0.0f, 1.0f);
-        const int width = MeasureText(event.text.c_str(), 20) + 28;
-        const int x = GetScreenWidth() / 2 - width / 2;
-        DrawRectangle(x, feedY - 4, width, 28, Fade(BLACK, 0.42f * t));
-        DrawText(event.text.c_str(), x + 14, feedY, 20, Fade(event.color, t));
-        feedY += 32;
     }
 
     if (winnerTeamId.has_value())
@@ -3691,6 +3982,10 @@ Color Renderer::GetBlockColor(const Block& block, const std::vector<Team>& teams
     case BlockType::TeamBlock:
     case BlockType::WoolBlock:
     {
+        if (block.variant >= 16 && block.variant < 32)
+        {
+            return MinecraftDyeColor(block.variant - 16);
+        }
         const Team* team = FindTeam(teams, block.teamId);
         if (team != nullptr)
         {
@@ -4013,11 +4308,11 @@ Color Renderer::GetResourceColor(ResourceType type) const
     switch (type)
     {
     case ResourceType::Iron:
-        return Color { 188, 198, 210, 255 };
+        return VisualTheme::Palette::ResourceIron;
     case ResourceType::Gold:
-        return Color { 246, 196, 74, 255 };
+        return VisualTheme::Palette::ResourceGold;
     case ResourceType::Crystal:
-        return Color { 112, 232, 255, 255 };
+        return VisualTheme::Palette::ResourceCrystal;
     }
 
     return WHITE;

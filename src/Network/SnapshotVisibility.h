@@ -2,7 +2,7 @@
 
 #include "Network/NetworkSnapshot.h"
 
-// Per-client visibility filter (see docs/NETWORK_PREP_PLAN.md). Raylib-free and
+// Per-client visibility filter (see docs/MULTIPLAYER_TARGET_ARCHITECTURE.md). Raylib-free and
 // pure: it takes the FULL MatchSnapshot the server built and returns the subset
 // a specific recipient is allowed to see. It needs nothing but the snapshot —
 // the recipient's team is derived from the (unfiltered) player list — so it is

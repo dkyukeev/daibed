@@ -152,6 +152,7 @@ struct EnergyProjectile
     float distanceTraveled = 0.0f;
     int punchLevel = 0;
     ProjectileKind kind = ProjectileKind::Arrow;
+    ArrowVariant arrowVariant = ArrowVariant::Standard;
     bool critical = false;
     bool speedBasedDamage = false;
     bool affectedByDrag = false;

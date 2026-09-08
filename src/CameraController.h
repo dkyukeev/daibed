@@ -19,6 +19,7 @@ public:
     void SetMode(ViewMode mode);
     void SetFov(float fov);
     void SetCrouching(bool crouching);
+    void SetFirstPersonPresentationOffset(Vector3 localOffset);
 
     const Camera3D& GetCamera() const;
     Vector3 GetAimOrigin() const;
@@ -46,4 +47,5 @@ private:
     float crouchBlend_ = 0.0f;
     float firstPersonFocusY_ = 0.0f;
     Vector3 firstPersonAimOrigin_ {};
+    Vector3 firstPersonPresentationOffset_ {};
 };
